@@ -838,6 +838,254 @@ toggle_auto_renew() {
 }
 
 # ================================================================ 新建站点
+# ---------------------------------------------------------------- 默认首页
+default_page_php() {
+  cat <<'WSMPAGE'
+<?php
+// 站点默认首页 (由 wsm 生成) - 兼容 PHP 7.4 ~ 8.4
+// 测试完成后请删除本文件, 页面底部有"删除此页"按钮。
+header('Content-Type: text/html; charset=utf-8');
+header('X-Robots-Tag: noindex');
+
+function h($s) { return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
+function ext_ok($e) {
+    if ($e === 'opcache') { return extension_loaded('Zend OPcache') || function_exists('opcache_get_status'); }
+    return extension_loaded($e);
+}
+
+$self    = __FILE__;
+$age     = time() - (int)@filemtime($self);
+$expired = $age > 86400;            // 创建 24 小时后, 数据库测试自动关闭
+$host    = preg_replace('/[^A-Za-z0-9.\-:]/', '', (string)($_SERVER['HTTP_HOST'] ?? 'localhost'));
+$ip      = (string)($_SERVER['REMOTE_ADDR'] ?? '');
+$https   = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+        || (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https');
+
+// ---------- 删除本页 ----------
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'del') {
+    $ok = @unlink($self);
+    echo '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+       . '<body style="font:16px/1.7 system-ui,sans-serif;padding:48px 24px;text-align:center">'
+       . ($ok ? '已删除测试页。现在可以上传你的网站程序了。' : '删除失败: 没有权限, 请用 SFTP 或在服务器上手动删除 ' . h(basename($self)))
+       . '</body>';
+    exit;
+}
+
+// ---------- 数据库连接测试 (只允许连本机, 且限制尝试次数) ----------
+$dbMsg = null;
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'db') {
+    $lim = sys_get_temp_dir() . '/wsm_dbtest_' . md5($ip);
+    $now = time();
+    $hits = array_filter(array_map('intval', (array)@explode(',', (string)@file_get_contents($lim))), function ($t) use ($now) { return $t > $now - 3600; });
+    if ($expired) {
+        $dbMsg = [false, '测试页已超过 24 小时, 数据库测试已关闭。请删除本页。'];
+    } elseif (count($hits) >= 10) {
+        $dbMsg = [false, '尝试次数过多, 请 1 小时后再试。'];
+    } elseif (!function_exists('mysqli_connect')) {
+        $dbMsg = [false, '没有安装 mysqli 扩展'];
+    } else {
+        $hits[] = $now;
+        @file_put_contents($lim, implode(',', $hits));
+        mysqli_report(MYSQLI_REPORT_OFF);
+        $m = mysqli_init();
+        $m->options(MYSQLI_OPT_CONNECT_TIMEOUT, 3);
+        $ok = @$m->real_connect('localhost', trim((string)($_POST['user'] ?? '')), (string)($_POST['pass'] ?? ''), trim((string)($_POST['name'] ?? '')) ?: null);
+        if (!$ok) {
+            $dbMsg = [false, '连接失败: ' . $m->connect_error];
+        } else {
+            $dbMsg = [true, '连接成功 · 数据库版本 ' . $m->server_info];
+            $m->close();
+        }
+    }
+}
+
+$exts = ['mysqli', 'pdo_mysql', 'curl', 'gd', 'mbstring', 'xml', 'zip', 'openssl', 'json', 'intl', 'bcmath', 'opcache', 'redis'];
+$testfile = __DIR__ . '/.wsm_w_' . bin2hex(random_bytes(3));
+$canWrite = @file_put_contents($testfile, '1') !== false;
+if ($canWrite) { @unlink($testfile); }
+$user = function_exists('posix_getpwuid') ? (posix_getpwuid(posix_geteuid())['name'] ?? '-') : get_current_user();
+?>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title><?= h($host) ?></title>
+<style>
+  :root {
+    --bg:#f6f7fb; --card:#ffffff; --tx:#1b1f2a; --mut:#6b7385; --line:#e6e9f0;
+    --pri:#3563f5; --pri-soft:rgba(53,99,245,.10); --ok:#10a25a; --ok-soft:rgba(16,162,90,.12);
+    --bad:#d6342b; --bad-soft:rgba(214,52,43,.10); --warn:#a8680a; --warn-soft:rgba(240,170,40,.16);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#0e1015; --card:#161a22; --tx:#e9ecf3; --mut:#97a0b3; --line:#252b36;
+      --pri:#7b98ff; --pri-soft:rgba(123,152,255,.14); --ok:#3ccf86; --ok-soft:rgba(60,207,134,.14);
+      --bad:#ff7b72; --bad-soft:rgba(255,123,114,.14); --warn:#f0be5a; --warn-soft:rgba(240,190,90,.14);
+    }
+  }
+  * { box-sizing:border-box; }
+  html { -webkit-text-size-adjust:100%; }
+  body {
+    margin:0; color:var(--tx); background:var(--bg);
+    background-image:radial-gradient(900px 380px at 50% -120px, var(--pri-soft), transparent 70%);
+    background-repeat:no-repeat;
+    font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  }
+  .wrap { max-width:680px; margin:0 auto; padding:56px 16px 40px; }
+  .hero { text-align:center; margin-bottom:32px; }
+  .logo {
+    width:56px; height:56px; margin:0 auto 18px; border-radius:16px; display:grid; place-items:center;
+    background:var(--pri); color:#fff; box-shadow:0 10px 28px var(--pri-soft);
+  }
+  .logo svg { width:28px; height:28px; }
+  h1 { margin:0 0 6px; font-size:26px; line-height:1.25; letter-spacing:-.01em; word-break:break-all; }
+  .sub { margin:0; color:var(--mut); }
+  .chips { display:flex; flex-wrap:wrap; gap:8px; justify-content:center; margin-top:18px; }
+  .chip { padding:3px 12px; border-radius:999px; font-size:13px; background:var(--pri-soft); color:var(--pri); }
+  .chip.ok { background:var(--ok-soft); color:var(--ok); }
+  .chip.off { background:var(--warn-soft); color:var(--warn); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:20px 22px; margin-bottom:16px; }
+  .card h2 { margin:0 0 12px; font-size:15px; font-weight:600; }
+  .card h2 small { font-weight:400; color:var(--mut); margin-left:8px; }
+  .row { display:flex; justify-content:space-between; gap:16px; padding:9px 0; border-bottom:1px solid var(--line); }
+  .row:last-child { border-bottom:0; padding-bottom:0; }
+  .row span:first-child { color:var(--mut); flex:none; }
+  .row span:last-child { text-align:right; word-break:break-all; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(98px,1fr)); gap:8px; }
+  .ext { display:flex; align-items:center; gap:7px; padding:7px 10px; border:1px solid var(--line); border-radius:10px; font-size:13px; }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--ok); flex:none; }
+  .ext.no { color:var(--mut); } .ext.no .dot { background:var(--bad); }
+  form { display:grid; gap:10px; }
+  .two { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  input {
+    width:100%; padding:11px 12px; font:inherit; color:var(--tx); background:var(--bg);
+    border:1px solid var(--line); border-radius:10px; outline:none;
+  }
+  input:focus { border-color:var(--pri); box-shadow:0 0 0 3px var(--pri-soft); }
+  button {
+    padding:11px 16px; font:inherit; font-weight:600; border:0; border-radius:10px; cursor:pointer;
+    background:var(--pri); color:#fff;
+  }
+  button.ghost { background:transparent; color:var(--bad); border:1px solid var(--line); font-weight:500; }
+  button:disabled, input:disabled { opacity:.5; cursor:not-allowed; }
+  .msg { padding:10px 14px; border-radius:10px; margin-bottom:12px; font-size:14px; }
+  .msg.ok { background:var(--ok-soft); color:var(--ok); } .msg.bad { background:var(--bad-soft); color:var(--bad); }
+  .note { color:var(--mut); font-size:13px; margin:12px 0 0; }
+  .foot { text-align:center; color:var(--mut); font-size:13px; margin-top:28px; }
+  .foot form { display:inline; }
+  @media (max-width:480px) { .wrap { padding-top:40px; } h1 { font-size:22px; } .two { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="hero">
+    <div class="logo">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>
+    </div>
+    <h1><?= h($host) ?></h1>
+    <p class="sub">站点创建成功, 服务运行正常</p>
+    <div class="chips">
+      <span class="chip">PHP <?= h(PHP_VERSION) ?></span>
+      <span class="chip <?= $https ? 'ok' : 'off' ?>"><?= $https ? 'HTTPS 已启用' : 'HTTP · 未启用 HTTPS' ?></span>
+      <span class="chip ok"><?= h(PHP_SAPI) ?></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>运行环境</h2>
+    <div class="row"><span>服务器</span><span><?= h($_SERVER['SERVER_SOFTWARE'] ?? '-') ?></span></div>
+    <div class="row"><span>网站目录</span><span><?= h(__DIR__) ?></span></div>
+    <div class="row"><span>运行用户</span><span><?= h($user) ?></span></div>
+    <div class="row"><span>目录可写</span><span><?= $canWrite ? '是' : '否 (上传 / 缓存类程序会出错)' ?></span></div>
+    <div class="row"><span>服务器时间</span><span><?= h(date('Y-m-d H:i:s')) ?> · <?= h(date_default_timezone_get()) ?></span></div>
+    <div class="row"><span>上传 / 内存 / 超时</span><span><?= h(ini_get('upload_max_filesize')) ?> / <?= h(ini_get('memory_limit')) ?> / <?= h(ini_get('max_execution_time')) ?>s</span></div>
+  </div>
+
+  <div class="card">
+    <h2>PHP 扩展</h2>
+    <div class="grid">
+      <?php foreach ($exts as $e): $ok = ext_ok($e); ?>
+        <div class="ext <?= $ok ? '' : 'no' ?>"><i class="dot"></i><?= h($e) ?></div>
+      <?php endforeach; ?>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>数据库连接测试<small>仅限本机 localhost</small></h2>
+    <?php if ($dbMsg): ?>
+      <div class="msg <?= $dbMsg[0] ? 'ok' : 'bad' ?>"><?= h($dbMsg[1]) ?></div>
+    <?php endif; ?>
+    <form method="post" autocomplete="off">
+      <input type="hidden" name="action" value="db">
+      <div class="two">
+        <input name="user" placeholder="数据库用户名" value="<?= h($_POST['user'] ?? '') ?>" <?= $expired ? 'disabled' : '' ?>>
+        <input name="pass" type="password" placeholder="数据库密码" <?= $expired ? 'disabled' : '' ?>>
+      </div>
+      <input name="name" placeholder="数据库名 (可留空)" value="<?= h($_POST['name'] ?? '') ?>" <?= $expired ? 'disabled' : '' ?>>
+      <button type="submit" <?= $expired ? 'disabled' : '' ?>>测试连接</button>
+    </form>
+    <p class="note"><?= $expired ? '创建已超过 24 小时, 测试功能已自动关闭。' : '密码只用于本次连接, 不会保存。数据库可在服务器上执行 wsm → 数据库 里创建。' ?></p>
+  </div>
+
+  <div class="foot">
+    <p>这是自动生成的测试页, 会显示服务器信息, 用完请删除。</p>
+    <form method="post" onsubmit="return confirm('确定删除这个测试页吗?')">
+      <input type="hidden" name="action" value="del">
+      <button class="ghost" type="submit">删除此页</button>
+    </form>
+  </div>
+
+</div>
+</body>
+</html>
+WSMPAGE
+}
+
+default_page_static() {
+  cat <<'WSMPAGE'
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>__DOMAIN__</title>
+<style>
+  :root { --bg:#f6f7fb; --card:#fff; --tx:#1b1f2a; --mut:#6b7385; --line:#e6e9f0; --pri:#3563f5; --pri-soft:rgba(53,99,245,.10); }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0e1015; --card:#161a22; --tx:#e9ecf3; --mut:#97a0b3; --line:#252b36; --pri:#7b98ff; --pri-soft:rgba(123,152,255,.14); } }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; display:grid; place-items:center; padding:24px 16px; color:var(--tx); background:var(--bg);
+    background-image:radial-gradient(900px 380px at 50% -120px, var(--pri-soft), transparent 70%); background-repeat:no-repeat;
+    font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif; }
+  .box { width:100%; max-width:420px; text-align:center; background:var(--card); border:1px solid var(--line); border-radius:20px; padding:40px 28px; }
+  .logo { width:56px; height:56px; margin:0 auto 18px; border-radius:16px; display:grid; place-items:center; background:var(--pri); color:#fff; box-shadow:0 10px 28px var(--pri-soft); }
+  .logo svg { width:28px; height:28px; }
+  h1 { margin:0 0 6px; font-size:24px; line-height:1.25; word-break:break-all; }
+  p { margin:0; color:var(--mut); }
+  .tip { margin-top:22px; padding-top:18px; border-top:1px solid var(--line); font-size:13px; }
+</style>
+</head>
+<body>
+  <div class="box">
+    <div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div>
+    <h1>__DOMAIN__</h1>
+    <p>站点创建成功, 服务运行正常</p>
+    <p class="tip">把你的网站文件上传到网站目录, 替换本页 (index.html) 即可。</p>
+  </div>
+</body>
+</html>
+WSMPAGE
+}
+
+write_default_page() {  # write_default_page 网站目录 类型(php|static) 域名
+  local root=$1 type=$2 domain=$3
+  if [[ $type == php ]]; then default_page_php > "$root/index.php"
+  else default_page_static | sed "s/__DOMAIN__/$domain/g" > "$root/index.html"; fi
+}
+
 add_site() {  # add_site 类型 [域名] [后端/跳转目标]
   local type=$1 domain=${2:-} extra=${3:-} aliases="" root=${PRESET_ROOT:-} a u
   command -v nginx >/dev/null 2>&1 || die "还没有安装环境, 请先执行: wsm install"
@@ -861,7 +1109,7 @@ add_site() {  # add_site 类型 [域名] [后端/跳转目标]
       ROOT=${root%/}
       mkdir -p "$ROOT"
       if [[ ! -e $ROOT/index.html && ! -e $ROOT/index.php ]]; then
-        printf '<!doctype html>\n<html lang="zh-CN"><head><meta charset="utf-8"><title>%s</title></head>\n<body><h1>%s 站点创建成功</h1></body></html>\n' "$domain" "$domain" > "$ROOT/index.html"
+        write_default_page "$ROOT" "$type" "$domain"
       fi
       fix_perms_dir "$ROOT"
       if [[ $type == php ]]; then
@@ -3017,6 +3265,24 @@ files_clean() {
   info "清理完成"
 }
 
+files_default_page() {
+  files_unlocked || return 1
+  local t=static f bakd
+  [[ ${TYPE:-} == php ]] && t=php
+  bakd=$BACKUP_DIR/edit/$DOMAIN
+  if [[ -e $ROOT/index.php || -e $ROOT/index.html ]]; then
+    confirm "会替换现有首页 (旧文件自动备份), 继续?" n || return 0
+    mkdir -p "$bakd"
+    for f in index.php index.html; do
+      [[ -e $ROOT/$f ]] && cp -a "$ROOT/$f" "$bakd/$f.$(date +%Y%m%d_%H%M%S)"
+    done
+    rm -f "$ROOT/index.php" "$ROOT/index.html"
+  fi
+  write_default_page "$ROOT" "$t" "$DOMAIN"
+  chown "$WEB_USER:$WEB_USER" "$ROOT/index.php" "$ROOT/index.html" 2>/dev/null
+  info "已生成默认首页 ($([[ $t == php ]] && echo 'index.php, 带数据库测试' || echo 'index.html'))"
+}
+
 files_menu() {
   local d=$1 c
   load_meta "$d"
@@ -3026,7 +3292,7 @@ files_menu() {
     title "文件工具 · $d"
     echo "  目录: $ROOT"
     choose c "操作:" "目录大小排行" "查找大文件" "最近改动的文件" "搜索文件名" "搜索文件内容" \
-      "可疑代码扫描" "解压到网站目录" "打包网站目录" "批量替换文本" "编辑文件" "清理垃圾文件" "修复权限" "返回" || return 0
+      "可疑代码扫描" "解压到网站目录" "打包网站目录" "批量替换文本" "编辑文件" "清理垃圾文件" "生成默认首页" "修复权限" "返回" || return 0
     case $c in
       目录*) files_dirsize ;;
       查找*) files_bigfiles ;;
@@ -3039,6 +3305,7 @@ files_menu() {
       批量*) files_replace ;;
       编辑*) files_edit ;;
       清理*) files_clean ;;
+      生成*) files_default_page ;;
       修复*) files_unlocked && confirm "把所有者改为 $WEB_USER, 目录 755 / 文件 644 ?" y && { fix_perms_dir "$ROOT"; info "权限已修复"; } ;;
       *) return 0 ;;
     esac
