@@ -3152,11 +3152,10 @@ update_menu() {
     title "更新脚本"
     u=${UPDATE_URL#https://raw.githubusercontent.com/}
     echo "  当前版本: v$WSM_VER"
-    echo "  仓库: $(files_trunc "${u:-(未设置)}" 32)"
-    choose c "操作:" "检查并更新" "设置仓库地址" "回滚到旧版本" "返回" || return 0
+    echo "  来源: $(files_trunc "$u" 32)"
+    choose c "操作:" "检查并更新" "回滚到旧版本" "返回" || return 0
     case $c in
       检查*) update_run ;;
-      设置*) update_set_url ;;
       回滚*) update_rollback ;;
       *) return 0 ;;
     esac
