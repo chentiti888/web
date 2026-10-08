@@ -3055,21 +3055,28 @@ menu_files() {
 # ================================================================ 在线更新
 UPDATE_CONF=$WSM_DIR/update.conf
 SELF_BAK=$WSM_DIR/backup
+UPDATE_DEFAULT_URL="https://raw.githubusercontent.com/chentiti888/web/main/wsm.sh"
 UPDATE_URL=""
 UPDATED=0
 UPD_TMP=""
 
-update_load() { UPDATE_URL=""; [[ -f $UPDATE_CONF ]] && source "$UPDATE_CONF"; return 0; }
+update_load() { UPDATE_URL=""; [[ -f $UPDATE_CONF ]] && source "$UPDATE_CONF"; UPDATE_URL=${UPDATE_URL:-$UPDATE_DEFAULT_URL}; return 0; }
 
 update_set_url() {
   local in url re_url re_repo
   re_url='^https://[A-Za-z0-9._~:/?&=%@+-]+$'
   re_repo='^([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)(@([A-Za-z0-9._/-]+))?$'
-  echo "填 GitHub 仓库, 如 chentiti888/wsm  (指定分支: chentiti888/wsm@dev)"
+  echo "填 GitHub 仓库, 如 chentiti888/web  (指定分支: chentiti888/web@dev)"
+  echo "也可以直接粘贴仓库网址 (https://github.com/用户/仓库)"
   echo "脚本文件名需要是 wsm.sh; 文件名不同时请直接填完整的 raw 地址 (https://...)"
   read -r -p "仓库 / 地址: " in || return 1
   in=${in// /}
   [[ -n $in ]] || return 1
+  in=${in%.git}
+  # 直接粘贴 GitHub 网页地址也行: https://github.com/用户/仓库[/tree|blob/分支/...]
+  if [[ $in =~ ^https://github\.com/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)(/(tree|blob)/([A-Za-z0-9._-]+).*)?$ ]]; then
+    in="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}${BASH_REMATCH[5]:+@${BASH_REMATCH[5]}}"
+  fi
   if [[ $in =~ $re_url ]]; then url=$in
   elif [[ $in =~ $re_repo ]]; then
     url="https://raw.githubusercontent.com/${BASH_REMATCH[1]}/${BASH_REMATCH[2]}/${BASH_REMATCH[4]:-main}/wsm.sh"
