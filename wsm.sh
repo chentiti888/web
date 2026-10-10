@@ -3057,6 +3057,7 @@ PHP
   echo "  程序目录: $app"
   [[ $SSL == 1 ]] || warn "还没启用 HTTPS, 建议到 [SSL 证书] 里开启"
   echo "  以后更新: wsm xboard-update $domain"
+  echo "  想把主页/订阅/节点分成不同域名: wsm xboard-domains  (或 网站管理 → 15)"
   return 0
 }
 
@@ -3766,6 +3767,7 @@ menu_sites() {
   12) 文件工具
   13) 新建 Xboard
   14) 更新 Xboard
+  15) 设置 Xboard 域名 (主页/订阅/节点)
    0) 返回
 EOF
     read -r -p "请选择: " c || return 0
@@ -3784,6 +3786,7 @@ EOF
       12) (menu_files) ;;
       13) (xb_install); pause ;;
       14) (xb_update ""); pause ;;
+      15) (xb_domains ""); pause ;;
       0|q) return 0 ;;
       *) warn "无效选择" ;;
     esac
