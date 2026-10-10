@@ -18,7 +18,7 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="2.2"
+WSM_VER="2.3"
 WSM_DIR=/etc/wsm
 META_DIR=$WSM_DIR/sites
 CERT_DIR=$WSM_DIR/certs
@@ -296,12 +296,12 @@ EOF
 # ================================================================ 站点元数据
 META_KEYS=(TYPE DOMAIN ALIASES ROOT PHPVER UPSTREAM SSL FORCE_HTTPS CERT_MODE REWRITE
            AUTH HOTLINK HOTLINK_DOMAINS IP_MODE IP_LIST GZIP CACHE REDIRECT_TO REDIRECT_CODE DISABLED
-           TAMPER TAMPER_EXCLUDE NOEXEC)
+           TAMPER TAMPER_EXCLUDE NOEXEC GUARD GUARD_LEVEL)
 
 meta_defaults() {
   TYPE=; DOMAIN=; ALIASES=; ROOT=; PHPVER=; UPSTREAM=; SSL=0; FORCE_HTTPS=0; CERT_MODE=le
   REWRITE=none; AUTH=0; HOTLINK=0; HOTLINK_DOMAINS=; IP_MODE=none; IP_LIST=; GZIP=1; CACHE=0
-  REDIRECT_TO=; REDIRECT_CODE=301; DISABLED=0; TAMPER=0; TAMPER_EXCLUDE=; NOEXEC=0
+  REDIRECT_TO=; REDIRECT_CODE=301; DISABLED=0; TAMPER=0; TAMPER_EXCLUDE=; NOEXEC=0; GUARD=0; GUARD_LEVEL=2
 }
 
 meta_file() { echo "$META_DIR/$1.conf"; }
@@ -480,6 +480,7 @@ server_body() {
     gzip_types text/plain text/css text/xml application/json application/javascript application/xml image/svg+xml;
 EOF
   fi
+  guard_server_lines
   if [[ $IP_MODE == allow ]]; then
     for ip in $IP_LIST; do echo "    allow $ip;"; done
     echo "    deny all;"
@@ -545,6 +546,7 @@ EOF
 
 render_site() {
   load_meta "$1"
+  if [[ ${GUARD:-0} == 1 ]]; then guard_ensure_global || return 1; fi
   local names="$DOMAIN${ALIASES:+ $ALIASES}"
   local conf="$NGX_CONF/$DOMAIN.conf"
   if [[ $DISABLED == 1 ]]; then
@@ -1218,6 +1220,7 @@ site_summary() {
   else echo "  HTTPS:    未启用"; fi
   echo "  访问密码: $(yn "$AUTH")   防盗链: $(yn "$HOTLINK")   静态缓存: $(yn "$CACHE")   Gzip: $(yn "$GZIP")   IP规则: $IP_MODE"
   echo "  防篡改:   $([[ $TAMPER == 1 ]] && echo "${G}已锁定${N}" || echo 未锁定)   可写目录: ${TAMPER_EXCLUDE:-无}   可写目录禁PHP: $(yn "$NOEXEC")"
+  echo "  防CC/bot: $([[ ${GUARD:-0} == 1 ]] && echo "${G}已开启${N} ($(guard_level_name "${GUARD_LEVEL:-2}"))" || echo 未开启)"
 }
 
 need_type() {  # need_type 类型...  (当前 TYPE 不在其中则提示)
@@ -1492,6 +1495,239 @@ ssl_menu() {
   done
 }
 
+# ================================================================ 防 CC / 防恶意 bot
+# 原理: 1) 全局文件 01-wsm-guard.conf 定义规则 (只定义, 不生效)
+#       2) 站点开启后, 在站点配置里引用这些规则才生效 (每个站点单独开关)
+#       3) Xboard 的节点通信接口、订阅链接、静态文件不限速也不拦截, 避免误伤
+#       4) 装了 Fail2ban 时可开「自动封禁」: 短时间内被拦截很多次的 IP 封 1 小时
+GUARD_CONF=$NGX_CONF/01-wsm-guard.conf
+
+guard_level_name() { case $1 in 1) echo "宽松" ;; 3) echo "严格" ;; *) echo "标准" ;; esac; }
+guard_level_desc() {
+  case $1 in
+    1) echo "每个 IP 每秒 30 次, 突发 100 次" ;;
+    3) echo "每个 IP 每秒 5 次, 突发 20 次" ;;
+    *) echo "每个 IP 每秒 10 次, 突发 50 次" ;;
+  esac
+}
+guard_burst() { case $1 in 1) echo 100 ;; 3) echo 20 ;; *) echo 50 ;; esac; }
+
+guard_cf_ranges() {  # 输出 Cloudflare 回源 IP 段 (先在线获取, 失败用内置列表)
+  local v4 v6
+  v4=$(curl -fsS --max-time 6 https://www.cloudflare.com/ips-v4/ 2>/dev/null | grep -E '^[0-9.]+/[0-9]+$')
+  v6=$(curl -fsS --max-time 6 https://www.cloudflare.com/ips-v6/ 2>/dev/null | grep -E '^[0-9a-fA-F:]+/[0-9]+$')
+  [[ -n $v4 ]] || v4="173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18
+108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15
+104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22"
+  [[ -n $v6 ]] || v6="2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32
+2a06:98c0::/29 2c0f:f248::/32"
+  printf '%s\n%s\n' "$v4" "$v6" | tr ' ' '\n' | grep -v '^$'
+}
+
+guard_write_global() {  # guard_write_global [noreal]  写全局规则文件
+  local r
+  {
+    echo "# managed by wsm - 防 CC / 防恶意 bot 的公共规则 (站点开启防护后才生效)"
+    if [[ ${1:-} != noreal ]]; then
+      echo "# 站点开了 Cloudflare 橙云时, 取访客真实 IP (否则会把 Cloudflare 的 IP 当成访客)"
+      for r in $(guard_cf_ranges); do echo "set_real_ip_from $r;"; done
+      echo "real_ip_header CF-Connecting-IP;"
+    fi
+    cat <<'EOF'
+
+# 不限速、不拦截的请求: Xboard 节点接口 / 订阅链接 / 静态文件
+map $request_uri $wsm_skip {
+    default 0;
+    ~^/api/v[12]/server/                1;
+    ~^/api/v1/client/subscribe          1;
+    "~^/[A-Za-z0-9_-]+/[0-9A-Fa-f]{32}/?(\?|$)"   1;
+    ~*\.(css|js|mjs|png|jpe?g|gif|svg|ico|webp|avif|woff2?|ttf|eot|map)(\?|$)   1;
+}
+map $wsm_skip $wsm_key {
+    1       "";
+    default $binary_remote_addr;
+}
+
+# 恶意扫描器 / 攻击工具 / 高频采集爬虫 (正常搜索引擎不受影响)
+map "$wsm_skip:$http_user_agent" $wsm_bad_ua {
+    default 0;
+    ~^1:    0;
+    "0:"    1;
+    "0:-"   1;
+    ~*^0:.*(sqlmap|nikto|nmap|masscan|zgrab|zmap|nuclei|acunetix|netsparker|wpscan|dirbuster|gobuster|feroxbuster|ffuf|wfuzz|hydra|jaeles|whatweb|zmeu|morfeus|libwww-perl|python-urllib|scrapy|httrack|ahrefsbot|semrushbot|mj12bot|dotbot|blexbot|dataforseobot|megaindex|serpstatbot|bytespider)  1;
+}
+
+# 扫描敏感文件的请求
+map $uri $wsm_bad_path {
+    default 0;
+    ~*/\.(env|git|svn|hg|bzr|ds_store|idea|vscode|aws|ssh|htpasswd)(/|$)   1;
+    ~*\.(sql|sqlite|bak|backup|old|orig|swp|swo)$                         1;
+    ~*/(vendor/phpunit|phpunit/|eval-stdin\.php|cgi-bin/|boaform|hnap1|actuator/|solr/admin)  1;
+}
+# WordPress 专用路径 (非 WordPress 站点被访问这些就是在扫漏洞)
+map $uri $wsm_wp_path {
+    default 0;
+    ~*/(wp-login\.php|xmlrpc\.php|wp-config\.php|wp-admin/|wp-includes/|wp-content/plugins/)  1;
+}
+
+limit_req_zone  $wsm_key zone=wsm_l1:20m rate=30r/s;
+limit_req_zone  $wsm_key zone=wsm_l2:20m rate=10r/s;
+limit_req_zone  $wsm_key zone=wsm_l3:20m rate=5r/s;
+limit_conn_zone $wsm_key zone=wsm_conn:20m;
+limit_req_status  429;
+limit_conn_status 429;
+limit_req_log_level warn;
+EOF
+  } > "$GUARD_CONF.tmp"
+}
+
+guard_ensure_global() {  # 全局文件不存在就生成并检测, 失败自动降级/回滚
+  [[ -f $GUARD_CONF ]] && return 0
+  guard_write_global
+  mv -f "$GUARD_CONF.tmp" "$GUARD_CONF"
+  if nginx -t >/dev/null 2>&1; then return 0; fi
+  # 可能已有别的 real_ip 配置冲突, 去掉真实 IP 部分再试
+  guard_write_global noreal
+  mv -f "$GUARD_CONF.tmp" "$GUARD_CONF"
+  if nginx -t >/dev/null 2>&1; then
+    warn "已存在其他「真实 IP」配置, 防护规则不再重复设置 Cloudflare 真实 IP"
+    return 0
+  fi
+  nginx -t 2>&1 | tail -3 >&2
+  rm -f "$GUARD_CONF"
+  err "Nginx 不支持防护规则 (缺少 limit_req / realip / map 模块?)"
+  return 1
+}
+
+guard_server_lines() {  # 输出站点配置里的防护指令 (依赖 load_meta)
+  [[ ${GUARD:-0} == 1 ]] || return 0
+  local lv=${GUARD_LEVEL:-2}
+  [[ $lv == 1 || $lv == 3 ]] || lv=2
+  echo "    # wsm 防护: 恶意 bot / 敏感文件扫描 / 限速 (Xboard 节点和订阅接口已排除)"
+  echo '    if ($wsm_bad_ua) { return 444; }'
+  echo '    if ($wsm_bad_path) { return 444; }'
+  [[ $REWRITE == wordpress ]] || echo '    if ($wsm_wp_path) { return 444; }'
+  echo "    limit_req zone=wsm_l$lv burst=$(guard_burst "$lv") nodelay;"
+  echo "    limit_conn wsm_conn 60;"
+}
+
+# ---------------- 自动封禁 (Fail2ban)
+GUARD_F2B_FILTER=/etc/fail2ban/filter.d/wsm-guard.conf
+GUARD_F2B_JAIL=/etc/fail2ban/jail.d/wsm-guard.local
+
+guard_ban_on() {
+  if ! command -v fail2ban-client >/dev/null 2>&1; then
+    confirm "自动封禁需要 Fail2ban, 现在安装吗?" y || return 1
+    install_fail2ban || return 1
+  fi
+  mkdir -p /etc/fail2ban/filter.d /etc/fail2ban/jail.d
+  cat > "$GUARD_F2B_FILTER" <<'EOF'
+# managed by wsm - 被 wsm 防护拦截(444)或限速(429)的请求
+[Definition]
+failregex = ^<HOST> \S+ \S+ \[[^\]]*\] "[^"]*" (?:444|429)
+ignoreregex =
+EOF
+  cat > "$GUARD_F2B_JAIL" <<'EOF'
+# managed by wsm - 1 分钟内被拦截 30 次以上的 IP 封 1 小时
+[wsm-guard]
+enabled  = true
+port     = http,https
+filter   = wsm-guard
+logpath  = /var/log/nginx/*.access.log
+findtime = 60
+maxretry = 30
+bantime  = 3600
+EOF
+  systemctl restart fail2ban >/dev/null 2>&1 || { err "Fail2ban 重启失败, 请查看: systemctl status fail2ban"; return 1; }
+  info "自动封禁已开启: 1 分钟内被拦截 30 次以上的 IP 封 1 小时"
+  echo "  查看: fail2ban-client status wsm-guard   解封: fail2ban-client set wsm-guard unbanip <IP>"
+}
+
+guard_ban_off() {
+  rm -f "$GUARD_F2B_FILTER" "$GUARD_F2B_JAIL"
+  command -v fail2ban-client >/dev/null 2>&1 && systemctl restart fail2ban >/dev/null 2>&1
+  info "自动封禁已关闭"
+}
+
+guard_ban_state() { [[ -f $GUARD_F2B_JAIL ]] && echo "开" || echo "关"; }
+
+guard_log() {  # guard_log 域名: 最近被拦截的 IP
+  local f="/var/log/nginx/$1.access.log"
+  [[ -f $f ]] || { warn "还没有访问日志"; return 0; }
+  local n
+  n=$(tail -n 20000 "$f" | awk '$9==444 || $9==429' | wc -l)
+  echo "最近 2 万条访问里, 被拦截 $n 次 (444=恶意请求, 429=请求太快)"
+  ((n > 0)) || return 0
+  echo; echo "拦截最多的 IP:"
+  tail -n 20000 "$f" | awk '$9==444 || $9==429 {print $1}' | sort | uniq -c | sort -rn | head -10 \
+    | awk '{printf "  %-8s %s\n", $1"次", $2}'
+  echo; echo "最近 10 条:"
+  tail -n 20000 "$f" | awk '$9==444 || $9==429' | tail -10 | cut -c1-160 | sed 's/^/  /'
+  if [[ -f $GUARD_F2B_JAIL ]] && command -v fail2ban-client >/dev/null 2>&1; then
+    echo; fail2ban-client status wsm-guard 2>/dev/null | grep -E "Currently banned|Banned IP" | sed 's/^/  /'
+  fi
+}
+
+guard_set() {  # guard_set 域名 on|off
+  load_meta "$1"
+  if [[ $2 == on ]]; then
+    guard_ensure_global || return 1
+    GUARD=1
+  else
+    GUARD=0
+  fi
+  apply_site || return 1
+  if [[ $2 == on ]]; then
+    info "已开启防护: $DOMAIN (强度: $(guard_level_name "${GUARD_LEVEL:-2}"))"
+  else
+    info "已关闭防护: $DOMAIN"
+  fi
+}
+
+guard_menu() {  # guard_menu 域名
+  local d=$1 c lv
+  while true; do
+    load_meta "$d"
+    title "防 CC / 防恶意 bot · $d"
+    echo "  状态:     $([[ ${GUARD:-0} == 1 ]] && echo "${G}已开启${N}" || echo 未开启)"
+    echo "  强度:     $(guard_level_name "${GUARD_LEVEL:-2}") ($(guard_level_desc "${GUARD_LEVEL:-2}"))"
+    echo "  自动封禁: $(guard_ban_state) (所有开启防护的站点共用)"
+    echo
+    echo "  开启后会:"
+    echo "   - 拦截扫描器/攻击工具和高频采集爬虫, 正常搜索引擎不受影响"
+    echo "   - 拦截扫描 .env / .git / 备份文件 等敏感文件的请求"
+    echo "   - 限制同一个 IP 的请求速度, 防 CC 和刷接口 (超出返回 429)"
+    echo "   - Xboard 的节点通信接口、订阅链接、图片/JS/CSS 等静态文件不受影响"
+    echo "   - 站点用 Cloudflare 橙云时自动识别访客真实 IP"
+    choose c "操作:" "$([[ ${GUARD:-0} == 1 ]] && echo 关闭防护 || echo 开启防护)" "调整强度" \
+      "查看拦截记录" "自动封禁 开/关" "返回" || return 0
+    case $c in
+      开启防护) guard_set "$d" on ;;
+      关闭防护) guard_set "$d" off ;;
+      调整强度)
+        choose lv "选择强度:" "宽松 ($(guard_level_desc 1))" "标准 ($(guard_level_desc 2), 推荐)" \
+          "严格 ($(guard_level_desc 3))" || continue
+        case $lv in 宽松*) GUARD_LEVEL=1 ;; 严格*) GUARD_LEVEL=3 ;; *) GUARD_LEVEL=2 ;; esac
+        apply_site && info "强度已改为: $(guard_level_name "$GUARD_LEVEL")"
+        ;;
+      查看拦截记录) guard_log "$d"; pause ;;
+      自动封禁*)
+        if [[ -f $GUARD_F2B_JAIL ]]; then confirm "关闭自动封禁?" n && guard_ban_off
+        else guard_ban_on; fi
+        ;;
+      *) return 0 ;;
+    esac
+  done
+}
+
+guard_cli() {  # wsm guard [站点] [on|off]
+  use_site "${1:-}" || return 1
+  case ${2:-} in
+    on|off) guard_set "$SITE" "$2" ;;
+    *) guard_menu "$SITE" ;;
+  esac
+}
+
 site_settings() {
   use_site "${1:-}" || return 1
   local d=$SITE c
@@ -1502,7 +1738,7 @@ site_settings() {
     echo
     local -a __it=("域名绑定" "SSL/HTTPS" "切换PHP版本" "网站根目录" "后端/跳转目标" "伪静态规则" \
       "反代子路径" "访问密码" "防盗链/缓存" "IP黑白名单" "Gzip压缩" "停用/启用" \
-      "查看Nginx配置" "日志统计" "备份此站点" "修复权限" "网站防篡改" "文件工具")
+      "查看Nginx配置" "日志统计" "备份此站点" "修复权限" "网站防篡改" "文件工具" "防CC/防恶意bot")
     local __k
     for __k in "${!__it[@]}"; do
       printf '%3d) ' $((__k + 1)); pad_w "${__it[__k]}" 14
@@ -1530,6 +1766,7 @@ site_settings() {
       16) need_type php static && [[ -d $ROOT ]] && fix_perms_dir "$ROOT" && info "权限已修复" ;;
       17) need_type php static && tamper_menu "$d" ;;
       18) need_type php static && files_menu "$d" ;;
+      19) guard_menu "$d" ;;
       0|q) return 0 ;;
       *) warn "无效选择" ;;
     esac
@@ -3048,6 +3285,9 @@ PHP
   scheme=http; [[ $SSL == 1 ]] && scheme=https
   xb_env_set "$app/.env" APP_URL "$scheme://$domain"
   xb_services "$domain" "$app" "$v"
+  if confirm "开启防 CC / 防恶意 bot 吗? (节点接口和订阅链接不受影响)" y; then
+    guard_set "$domain" on || warn "防护没开成功, 以后可在 [站点设置] 里开启"
+  fi
   echo
   info "Xboard 部署完成 (请截图或记下下面的信息)"
   echo "  后台地址: $scheme://$domain/$secure"
@@ -4003,6 +4243,7 @@ wsm v$WSM_VER - Web Server Manager
   wsm add-wp [域名]                 一键部署 WordPress
   wsm add-xboard [域名]             一键部署 Xboard
   wsm xboard-update [域名]          更新 Xboard
+  wsm guard [域名] [on|off]         防 CC / 防恶意 bot
   wsm xboard-domains [站点]         设置主页/订阅/节点三个域名
   wsm add-proxy [域名] [后端URL]    新建反向代理
   wsm sftp                          SFTP 账号管理
@@ -4051,6 +4292,7 @@ case ${1:-menu} in
   update)       update_run "${2:-}" ;;
   rollback)     update_rollback ;;
   stats)        stats_cli "${2:-}" "${3:-1}" ;;
+  guard)        guard_cli "${2:-}" "${3:-}" ;;
   add-proxy)    add_site proxy "${2:-}" "${3:-}" ;;
   add-redirect) add_site redirect "${2:-}" "${3:-}" ;;
   ssl)          use_site "${2:-}" && ssl_pick_method "$SITE" ;;
