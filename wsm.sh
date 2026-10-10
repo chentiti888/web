@@ -3297,6 +3297,7 @@ PHP
   echo "  程序目录: $app"
   [[ $SSL == 1 ]] || warn "还没启用 HTTPS, 建议到 [SSL 证书] 里开启"
   echo "  以后更新: wsm xboard-update $domain"
+  echo "  忘了后台地址/密码: wsm xboard-info $domain"
   echo "  想把主页/订阅/节点分成不同域名: wsm xboard-domains  (或 网站管理 → 15)"
   return 0
 }
@@ -3385,6 +3386,73 @@ PHP
   echo "   - ${sub:-订阅域名}、${node:-节点域名} 的 DNS 记录指向本机 IP, 并设为灰云(仅DNS)"
   echo "   - 主页域名 $DOMAIN 保持橙云"
   echo "  注意: 已安装的节点不会自动改, 要改节点上 /etc/xboard-node/config.yml 里的面板地址, 或重新安装。"
+}
+
+xb_php_run() {  # xb_php_run 程序目录 PHP命令 模式 [参数...]  (以网站用户运行 Xboard 辅助脚本)
+  local app=$1 php=$2 h out; shift 2
+  h=$(mktemp --suffix=.php); chmod 644 "$h"
+  cat > "$h" <<'PHP'
+<?php
+$base = $argv[1]; $mode = $argv[2] ?? 'info';
+require $base . '/vendor/autoload.php';
+$app = require $base . '/bootstrap/app.php';
+$app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+if ($mode === 'info') {
+    echo "SECURE=" . admin_setting('secure_path', admin_setting('frontend_admin_path', hash('crc32b', config('app.key')))) . "\n";
+    foreach (\App\Models\User::where('is_admin', 1)->orderBy('id')->pluck('email') as $e) echo "ADMIN=$e\n";
+} elseif ($mode === 'reset') {
+    $u = \App\Models\User::where('email', $argv[3] ?? '')->first();
+    if (!$u) { fwrite(STDERR, "邮箱不存在\n"); exit(1); }
+    $pw = ($argv[4] ?? '') !== '' ? $argv[4] : \App\Utils\Helper::guid(false);
+    $u->password = password_hash($pw, PASSWORD_DEFAULT);
+    $u->password_algo = null;
+    $u->password_salt = null;
+    if (!$u->save()) { fwrite(STDERR, "保存失败\n"); exit(1); }
+    echo "NEWPW=$pw\n";
+}
+PHP
+  out=$(cd "$app" && runuser -u "$WEB_USER" -- "$php" "$h" "$app" "$@" 2>&1); local rc=$?
+  rm -f "$h"
+  printf '%s\n' "$out"
+  return $rc
+}
+
+xb_info() {  # xb_info [域名]: 查看后台地址/管理员, 重置管理员密码
+  use_site "${1:-}" || return 1
+  local app=${ROOT%/public} php out secure scheme=http c e pw np
+  local -a admins=()
+  [[ $ROOT == */public && -f $app/artisan ]] || { err "$DOMAIN 不是 Xboard 站点"; return 1; }
+  php=$(php_bin "$PHPVER")
+  [[ $SSL == 1 ]] && scheme=https
+  while true; do
+    out=$(xb_php_run "$app" "$php" info) || { printf '%s\n' "$out" | tail -5; err "读取失败 (数据库或 Redis 没启动?)"; return 1; }
+    secure=$(printf '%s\n' "$out" | sed -n 's/^SECURE=//p')
+    mapfile -t admins < <(printf '%s\n' "$out" | sed -n 's/^ADMIN=//p')
+    title "Xboard 后台信息 · $DOMAIN"
+    echo "  后台地址: $scheme://$DOMAIN/$secure"
+    if ((${#admins[@]})); then
+      for e in "${admins[@]}"; do echo "  管理员:   $e"; done
+    else
+      warn "没有找到管理员账号"
+    fi
+    echo "  密码:     数据库里只存加密值, 查不到原密码, 忘了就重置"
+    echo "  程序目录: $app"
+    choose c "操作:" "重置管理员密码" "返回" || return 0
+    [[ $c == 重置* ]] || return 0
+    ((${#admins[@]})) || { warn "没有管理员账号可重置"; continue; }
+    if ((${#admins[@]} == 1)); then e=${admins[0]}
+    else choose e "重置哪个管理员?" "${admins[@]}" || continue; fi
+    read -r -p "新密码 (至少 8 位, 直接回车自动生成): " pw || pw=""
+    if [[ -n $pw && ${#pw} -lt 8 ]]; then warn "密码至少 8 位"; continue; fi
+    confirm "确定重置 $e 的密码?" y || continue
+    out=$(xb_php_run "$app" "$php" reset "$e" "$pw") || { printf '%s\n' "$out" | tail -5; err "重置失败"; continue; }
+    np=$(printf '%s\n' "$out" | sed -n 's/^NEWPW=//p')
+    info "已重置, 请记下 (只显示这一次):"
+    echo "  后台地址: $scheme://$DOMAIN/$secure"
+    echo "  管理员:   $e"
+    echo "  新密码:   $np"
+    pause
+  done
 }
 
 xb_purge() {  # xb_purge 域名 网站根目录  (删除站点时调用)
@@ -4008,6 +4076,7 @@ menu_sites() {
   13) 新建 Xboard
   14) 更新 Xboard
   15) 设置 Xboard 域名 (主页/订阅/节点)
+  16) Xboard 后台信息 / 重置管理员密码
    0) 返回
 EOF
     read -r -p "请选择: " c || return 0
@@ -4027,6 +4096,7 @@ EOF
       13) (xb_install); pause ;;
       14) (xb_update ""); pause ;;
       15) (xb_domains ""); pause ;;
+      16) (xb_info "") ;;
       0|q) return 0 ;;
       *) warn "无效选择" ;;
     esac
@@ -4243,6 +4313,7 @@ wsm v$WSM_VER - Web Server Manager
   wsm add-wp [域名]                 一键部署 WordPress
   wsm add-xboard [域名]             一键部署 Xboard
   wsm xboard-update [域名]          更新 Xboard
+  wsm xboard-info [域名]            Xboard 后台地址/管理员, 重置管理员密码
   wsm guard [域名] [on|off]         防 CC / 防恶意 bot
   wsm xboard-domains [站点]         设置主页/订阅/节点三个域名
   wsm add-proxy [域名] [后端URL]    新建反向代理
@@ -4287,6 +4358,7 @@ case ${1:-menu} in
   add-wp)       wp_install "${2:-}" ;;
   add-xboard)   xb_install "${2:-}" ;;
   xboard-update) xb_update "${2:-}" ;;
+  xboard-info)   xb_info "${2:-}" ;;
   xboard-domains) xb_domains "${2:-}" "${3:-}" "${4:-}" ;;
   sftp)         sftp_menu ;;
   update)       update_run "${2:-}" ;;
