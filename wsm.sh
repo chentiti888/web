@@ -3078,6 +3078,74 @@ xb_update() {  # xb_update [域名]
   info "更新完成"
 }
 
+xb_domains() {  # xb_domains [站点] [订阅域名] [节点域名]
+  use_site "${1:-}" || return 1
+  local app=${ROOT%/public} php sub=${2:-} node=${3:-} n u h out scheme=http changed=0 s_url="" n_url=""
+  [[ $ROOT == */public && -f $app/artisan ]] || { err "$DOMAIN 不是 Xboard 站点"; return 1; }
+  php=$(php_bin "$PHPVER")
+  title "Xboard 域名分离 (主页 / 订阅 / 节点)"
+  echo "  主页域名: $DOMAIN"
+  echo "  其他绑定: ${ALIASES:-(无)}"
+  echo
+  echo "  建议: 三个域名都解析到本机; 主页开橙云, 订阅和节点两个设为灰云(仅DNS)。"
+  echo "  留空 = 不改这一项。"
+  if [[ -z $sub && -z $node ]]; then
+    read -r -p "① 订阅域名 (如 sub.example.com): " sub || sub=""
+    read -r -p "② 节点安装/通信域名 (如 node.example.com): " node || node=""
+  fi
+  [[ -n $sub || -n $node ]] || { warn "没有输入任何域名"; return 0; }
+  for n in $sub $node; do
+    valid_domain "$n" || { err "域名格式不正确: $n"; return 1; }
+    if u=$(domain_used "$n" "$DOMAIN"); then err "$n 已被站点 $u 使用"; return 1; fi
+  done
+  for n in $sub $node; do
+    [[ $n == "$DOMAIN" || " $ALIASES " == *" $n "* ]] && continue
+    ALIASES="${ALIASES:+$ALIASES }$n"; changed=1
+  done
+  if (( changed )); then
+    apply_site || return 1
+    info "已把新域名绑定到站点 $DOMAIN"
+  fi
+  if [[ $SSL == 1 && $CERT_MODE == le ]]; then
+    if (( changed )); then
+      info "重新申请覆盖全部域名的证书 ..."
+      ssl_le_http "$DOMAIN" || { err "证书申请失败, 面板里的订阅/节点域名没有修改。请检查 DNS 解析后再运行一次"; return 1; }
+      load_meta "$DOMAIN"
+    fi
+    scheme=https
+  elif [[ $SSL == 1 ]]; then
+    scheme=https; warn "当前不是 Let's Encrypt 证书, 请确认证书包含: $sub $node"
+  else
+    warn "站点还没启用 HTTPS, 订阅/节点地址暂时用 http, 建议先到 [SSL 证书] 开启后再运行本命令"
+  fi
+  [[ -n $sub ]] && s_url="$scheme://$sub"
+  [[ -n $node ]] && n_url="$scheme://$node"
+  h=$(mktemp --suffix=.php); chmod 644 "$h"
+  cat > "$h" <<'PHP'
+<?php
+$base = $argv[1];
+require $base . '/vendor/autoload.php';
+$app = require $base . '/bootstrap/app.php';
+$app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+$set = [];
+if (($argv[2] ?? '') !== '') $set['subscribe_url'] = $argv[2];
+if (($argv[3] ?? '') !== '') $set['node_panel_url'] = $argv[3];
+admin_setting($set);
+echo "OK\n";
+PHP
+  out=$(cd "$app" && runuser -u "$WEB_USER" -- "$php" "$h" "$app" "$s_url" "$n_url" 2>&1); rm -f "$h"
+  [[ $out == *OK* ]] || { printf '%s\n' "$out" | tail -8; err "写入面板设置失败"; return 1; }
+  echo
+  info "完成"
+  [[ -n $s_url ]] && echo "  订阅地址前缀: $s_url   (已写入后台「订阅URL」)"
+  [[ -n $n_url ]] && echo "  节点通信域名: $n_url   (节点管理里新生成的安装命令会用它)"
+  echo
+  echo "  还需要你在 Cloudflare 做:"
+  echo "   - ${sub:-订阅域名}、${node:-节点域名} 的 DNS 记录指向本机 IP, 并设为灰云(仅DNS)"
+  echo "   - 主页域名 $DOMAIN 保持橙云"
+  echo "  注意: 已安装的节点不会自动改, 要改节点上 /etc/xboard-node/config.yml 里的面板地址, 或重新安装。"
+}
+
 xb_purge() {  # xb_purge 域名 网站根目录  (删除站点时调用)
   local app=${2%/public} k; k=$(xb_slug "$1")
   [[ $2 == */public && -f $app/artisan ]] || return 0
@@ -3932,6 +4000,7 @@ wsm v$WSM_VER - Web Server Manager
   wsm add-wp [域名]                 一键部署 WordPress
   wsm add-xboard [域名]             一键部署 Xboard
   wsm xboard-update [域名]          更新 Xboard
+  wsm xboard-domains [站点]         设置主页/订阅/节点三个域名
   wsm add-proxy [域名] [后端URL]    新建反向代理
   wsm sftp                          SFTP 账号管理
   wsm update [-y]                   从 Git 仓库更新脚本 (-y 不确认)
@@ -3974,6 +4043,7 @@ case ${1:-menu} in
   add-wp)       wp_install "${2:-}" ;;
   add-xboard)   xb_install "${2:-}" ;;
   xboard-update) xb_update "${2:-}" ;;
+  xboard-domains) xb_domains "${2:-}" "${3:-}" "${4:-}" ;;
   sftp)         sftp_menu ;;
   update)       update_run "${2:-}" ;;
   rollback)     update_rollback ;;
