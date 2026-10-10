@@ -18,7 +18,7 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="2.1"
+WSM_VER="2.2"
 WSM_DIR=/etc/wsm
 META_DIR=$WSM_DIR/sites
 CERT_DIR=$WSM_DIR/certs
@@ -1141,6 +1141,7 @@ add_site() {  # add_site 类型 [域名] [后端/跳转目标]
 }
 
 choose_php() {  # 结果放在 CHOSEN_PHP
+  [[ -n ${PRESET_PHP:-} ]] && { CHOSEN_PHP=$PRESET_PHP; return 0; }
   local list x
   local -a arr=()
   list=$(php_installed | sort -V)
@@ -1165,6 +1166,7 @@ del_site() {
   local d=$DOMAIN
   confirm "确认删除站点 $d ? 此操作不可恢复" n || return 0
   sftp_purge_domain "$d"
+  xb_purge "$d" "$ROOT"
   rm -f "$NGX_CONF/$d.conf"
   [[ $TAMPER == 1 && -d $ROOT ]] && chattr -R -i "$ROOT" 2>/dev/null
   rm -f "$WSM_DIR/baseline/$d.sha256" "$WSM_DIR/baseline/$d.tar.gz"
@@ -2863,6 +2865,230 @@ GRANT ALL PRIVILEGES ON \`$dbn\`.* TO '$dbu'@'localhost'; FLUSH PRIVILEGES;" \
   return 0
 }
 
+# ================================================================ Xboard
+# 无容器部署: PHP-FPM + MariaDB + Redis + systemd 队列 + cron
+XB_REPO_HTTPS=${XB_REPO_HTTPS:-https://github.com/chentiti888/xboard.git}
+XB_REPO_SSH=${XB_REPO_SSH:-git@github.com:chentiti888/xboard.git}
+
+xb_slug() { printf '%s' "$1" | tr -c 'A-Za-z0-9' '_' | cut -c1-30; }
+
+xb_env_set() {  # xb_env_set 文件 键 值
+  local v=${3//\\/\\\\}; v=${v//&/\\&}; v=${v//|/\\|}
+  if grep -q "^$2=" "$1"; then sed -i "s|^$2=.*|$2=$v|" "$1"
+  else printf '%s=%s\n' "$2" "$3" >> "$1"; fi
+}
+
+xb_safe_dir() {
+  git config --global --get-all safe.directory 2>/dev/null | grep -Fxq "$1" \
+    || git config --global --add safe.directory "$1"
+}
+
+xb_composer() {  # xb_composer 程序目录 PHP命令
+  (cd "$1" && COMPOSER_ALLOW_SUPERUSER=1 COMPOSER_NO_INTERACTION=1 \
+    "$2" "$(command -v composer)" install --no-dev -o -q)
+}
+
+xb_abort() {
+  [[ -n ${XB_APP:-} ]] && rm -rf -- "$XB_APP"
+  [[ -n ${XB_DB:-} ]] && mysql -e "DROP DATABASE IF EXISTS \`$XB_DB\`; DROP USER IF EXISTS '$XB_DB'@'localhost';" 2>/dev/null
+  die "$1 (已清理)"
+}
+
+xb_pick_php() {  # -> XB_PHP (Xboard 需要 PHP 8.2+)
+  local x; local -a list=()
+  for x in $(php_installed | sort -V); do
+    awk -v v="$x" 'BEGIN { exit !(v + 0 >= 8.2) }' && list+=("$x")
+  done
+  if (( ${#list[@]} == 0 )); then
+    warn "Xboard 需要 PHP 8.2 以上, 先安装 PHP 8.2"
+    install_php 8.2 || return 1
+    XB_PHP=8.2
+  elif (( ${#list[@]} == 1 )); then XB_PHP=${list[0]}
+  else choose XB_PHP "选择 PHP 版本 (Xboard 需要 8.2+):" "${list[@]}" || return 1
+  fi
+}
+
+xb_php_ready() {  # xb_php_ready PHP版本: 补齐扩展, 放开 Xboard 需要的函数
+  local v=$1 pv e f cur new
+  pv=$(php_pkgver "$v")
+  for e in mysql curl gd mbstring xml zip intl bcmath redis; do
+    if [[ $PM == apt ]]; then pkg_install "php$v-$e" >/dev/null 2>&1 || true
+    else
+      case $e in mysql) e=mysqlnd ;; redis) e='pecl-redis*' ;; esac
+      pkg_install "php${pv}-php-$e" >/dev/null 2>&1 || pkg_install "php${pv}-php-pecl-$e" >/dev/null 2>&1 || true
+    fi
+  done
+  f=$(php_ini_file "$v")
+  if [[ -f $f ]] && grep -q '^disable_functions' "$f"; then
+    cur=$(grep -m1 '^disable_functions' "$f" | sed -E 's/^disable_functions *= *//; s/"//g')
+    new=$(printf '%s' "$cur" | tr ',' '\n' | grep -vxE 'putenv|proc_open|pcntl_alarm|pcntl_signal' | paste -sd, -)
+    sed -i '/^disable_functions/d' "$f"
+    if [[ -n $new ]]; then ini_set_kv "$f" disable_functions "$new"; fi
+  fi
+  systemctl restart "$(php_svc "$v")" >/dev/null 2>&1 || true
+  return 0
+}
+
+xb_services() {  # xb_services 域名 程序目录 PHP版本
+  local k php; k=$(xb_slug "$1"); php=$(command -v "$(php_bin "$3")" || php_bin "$3")
+  cat > "/etc/systemd/system/xboard-$k.service" <<EOF
+[Unit]
+Description=Xboard queue ($1)
+After=network.target
+
+[Service]
+User=$WEB_USER
+Group=$WEB_USER
+WorkingDirectory=$2
+ExecStart=$php artisan horizon
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  printf '* * * * * %s cd %s && %s artisan schedule:run >> /dev/null 2>&1\n' "$WEB_USER" "$2" "$php" > "/etc/cron.d/xboard-$k"
+  chmod 644 "/etc/cron.d/xboard-$k"
+  systemctl daemon-reload
+  systemctl enable --now "xboard-$k" >/dev/null 2>&1 || warn "队列服务启动失败, 请查看: systemctl status xboard-$k"
+}
+
+xb_install() {  # xb_install [域名]
+  command -v nginx >/dev/null 2>&1 || die "还没有安装环境, 请先执行: wsm install"
+  local domain=${1:-} app root v php email pw dbn dbp k out h secure scheme
+  title "一键部署 Xboard"
+  command -v git >/dev/null 2>&1 || pkg_install git || die "git 安装失败"
+  if ! command -v mysql >/dev/null 2>&1; then
+    confirm "Xboard 需要数据库, 现在安装 MariaDB 吗?" y || return 1
+    install_db || return 1
+  fi
+  if ! unit_exists redis-server && ! unit_exists redis; then
+    confirm "Xboard 需要 Redis, 现在安装吗?" y || return 1
+    install_redis || return 1
+  fi
+  command -v composer >/dev/null 2>&1 || install_composer || return 1
+  ask domain "① 网站域名 (如 panel.example.com)"
+  valid_domain "$domain" || die "域名格式不正确: $domain"
+  [[ -f $(meta_file "$domain") ]] && die "站点已存在: $domain"
+  v=$(domain_used "$domain") && die "域名 $domain 已被站点 $v 使用"
+  app=$WWW_ROOT/$domain; root=$app/public
+  safe_root "$app" || die "网站目录不合法: $app"
+  if [[ -d $app && -n $(ls -A "$app" 2>/dev/null) ]]; then
+    die "目录 $app 里已有文件, 请换一个域名或先清空该目录"
+  fi
+  read -r -p "② 管理员邮箱 [admin@$domain]: " email || email=""
+  email=${email:-admin@$domain}
+  [[ $email =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]] || die "邮箱格式不正确"
+  xb_pick_php || return 1
+  v=$XB_PHP; php=$(php_bin "$v")
+
+  mkdir -p "$app"; XB_APP=$app
+  info "下载 Xboard 源码 ..."
+  if [[ -n ${XB_REPO:-} ]]; then
+    GIT_TERMINAL_PROMPT=0 git clone -q --depth 1 "$XB_REPO" "$app"
+  else
+    GIT_TERMINAL_PROMPT=0 git clone -q --depth 1 "$XB_REPO_HTTPS" "$app" 2>/dev/null \
+      || GIT_TERMINAL_PROMPT=0 git clone -q --depth 1 "$XB_REPO_SSH" "$app"
+  fi || xb_abort "下载失败 (仓库是私有的话, 服务器需要配置 GitHub SSH 密钥)"
+  [[ -f $app/artisan ]] || xb_abort "源码不完整"
+  xb_safe_dir "$app"
+  xb_php_ready "$v"
+  info "安装依赖 (需要几分钟, 请耐心等待) ..."
+  xb_composer "$app" "$php" || xb_abort "安装依赖失败"
+
+  k=$(printf '%s' "$domain" | tr -c 'A-Za-z0-9' '_' | cut -c1-12)
+  dbn="xb_${k}_$(openssl rand -hex 2)"
+  dbp=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 20)
+  mysql -e "CREATE DATABASE \`$dbn\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; \
+CREATE USER '$dbn'@'localhost' IDENTIFIED BY '$dbp'; \
+GRANT ALL PRIVILEGES ON \`$dbn\`.* TO '$dbn'@'localhost'; FLUSH PRIVILEGES;" \
+    || xb_abort "创建数据库失败"
+  XB_DB=$dbn
+
+  cp "$app/.env.example" "$app/.env"
+  xb_env_set "$app/.env" APP_KEY "base64:$(openssl rand -base64 32)"
+  xb_env_set "$app/.env" DB_CONNECTION mysql
+  xb_env_set "$app/.env" DB_HOST 127.0.0.1
+  xb_env_set "$app/.env" DB_PORT 3306
+  xb_env_set "$app/.env" DB_DATABASE "$dbn"
+  xb_env_set "$app/.env" DB_USERNAME "$dbn"
+  xb_env_set "$app/.env" DB_PASSWORD "$dbp"
+  chown -R "$WEB_USER:$WEB_USER" "$app"
+  chmod 640 "$app/.env"
+
+  info "导入数据库 ..."
+  out=$(cd "$app" && runuser -u "$WEB_USER" -- env CACHE_DRIVER=array QUEUE_CONNECTION=sync SESSION_DRIVER=array \
+        "$php" artisan migrate --force 2>&1) || { printf '%s\n' "$out" | tail -8; xb_abort "导入数据库失败"; }
+  h=$(mktemp --suffix=.php); chmod 644 "$h"
+  cat > "$h" <<'PHP'
+<?php
+$base = $argv[1];
+require $base . '/vendor/autoload.php';
+$app = require $base . '/bootstrap/app.php';
+$app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+$pw = \App\Utils\Helper::guid(false);
+if (!\App\Console\Commands\XboardInstall::registerAdmin($argv[2], $pw)) { fwrite(STDERR, "admin fail\n"); exit(1); }
+\App\Services\Plugin\PluginManager::installDefaultPlugins();
+echo "ADMINPW=$pw\n";
+echo "SECURE=" . hash('crc32b', config('app.key')) . "\n";
+PHP
+  out=$(cd "$app" && runuser -u "$WEB_USER" -- env CACHE_DRIVER=array QUEUE_CONNECTION=sync SESSION_DRIVER=array \
+        "$php" "$h" "$app" "$email" 2>&1); rm -f "$h"
+  pw=$(printf '%s\n' "$out" | sed -n 's/^ADMINPW=//p')
+  secure=$(printf '%s\n' "$out" | sed -n 's/^SECURE=//p')
+  [[ -n $pw && -n $secure ]] || { printf '%s\n' "$out" | tail -8; xb_abort "创建管理员失败"; }
+  xb_env_set "$app/.env" INSTALLED true
+  XB_APP=""; XB_DB=""
+
+  PRESET_ROOT=$root PRESET_PHP=$v add_site php "$domain" \
+    || { err "站点创建失败, 程序在 $app, 数据库 $dbn 已创建, 管理员密码: $pw"; return 1; }
+  load_meta "$domain"
+  PHPVER=$v; REWRITE=laravel
+  apply_site >/dev/null
+  scheme=http; [[ $SSL == 1 ]] && scheme=https
+  xb_env_set "$app/.env" APP_URL "$scheme://$domain"
+  xb_services "$domain" "$app" "$v"
+  echo
+  info "Xboard 部署完成 (请截图或记下下面的信息)"
+  echo "  后台地址: $scheme://$domain/$secure"
+  echo "  管理员:   $email"
+  echo "  密码:     $pw"
+  echo "  数据库:   $dbn  密码 $dbp (已写入 .env)"
+  echo "  程序目录: $app"
+  [[ $SSL == 1 ]] || warn "还没启用 HTTPS, 建议到 [SSL 证书] 里开启"
+  echo "  以后更新: wsm xboard-update $domain"
+  return 0
+}
+
+xb_update() {  # xb_update [域名]
+  use_site "${1:-}" || return 1
+  local app=${ROOT%/public} php k
+  [[ $ROOT == */public && -f $app/artisan ]] || { err "$DOMAIN 不是 Xboard 站点"; return 1; }
+  php=$(php_bin "$PHPVER"); k=$(xb_slug "$DOMAIN")
+  warn "更新会用仓库里的最新代码覆盖程序文件, 数据库和 .env 不受影响"
+  confirm "继续更新 $DOMAIN ?" y || return 0
+  xb_safe_dir "$app"
+  (cd "$app" && GIT_TERMINAL_PROMPT=0 git fetch -q origin main && git reset -q --hard origin/main) \
+    || { err "拉取代码失败 (检查网络或仓库权限)"; return 1; }
+  info "安装依赖 ..."
+  xb_composer "$app" "$php" || { err "安装依赖失败"; return 1; }
+  chown -R "$WEB_USER:$WEB_USER" "$app"
+  (cd "$app" && runuser -u "$WEB_USER" -- "$php" artisan xboard:update) || warn "xboard:update 出错, 请看上面的信息"
+  systemctl restart "xboard-$k" >/dev/null 2>&1 || true
+  info "更新完成"
+}
+
+xb_purge() {  # xb_purge 域名 网站根目录  (删除站点时调用)
+  local app=${2%/public} k; k=$(xb_slug "$1")
+  [[ $2 == */public && -f $app/artisan ]] || return 0
+  systemctl disable --now "xboard-$k" >/dev/null 2>&1 || true
+  rm -f "/etc/systemd/system/xboard-$k.service" "/etc/cron.d/xboard-$k"
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  info "已移除 Xboard 队列服务和计划任务"
+  grep -m1 '^DB_DATABASE=' "$app/.env" 2>/dev/null | sed 's/^DB_DATABASE=/   数据库未删除: /'
+  if safe_root "$app" && confirm "同时删除 Xboard 程序目录 $app ?" n; then rm -rf -- "$app"; fi
+}
+
 # ================================================================ 访问统计
 # 只在你打开时临时分析 nginx 日志, 不常驻、不占资源
 declare -A ST=()
@@ -3470,6 +3696,8 @@ menu_sites() {
   10) 网站防篡改
   11) SFTP 账号
   12) 文件工具
+  13) 新建 Xboard
+  14) 更新 Xboard
    0) 返回
 EOF
     read -r -p "请选择: " c || return 0
@@ -3486,6 +3714,8 @@ EOF
       10) (menu_tamper) ;;
       11) sftp_menu ;;
       12) (menu_files) ;;
+      13) (xb_install); pause ;;
+      14) (xb_update ""); pause ;;
       0|q) return 0 ;;
       *) warn "无效选择" ;;
     esac
@@ -3700,6 +3930,8 @@ wsm v$WSM_VER - Web Server Manager
   wsm install                       安装 Nginx/PHP/MariaDB/certbot 环境
   wsm add-php|add-static [域名]     新建站点
   wsm add-wp [域名]                 一键部署 WordPress
+  wsm add-xboard [域名]             一键部署 Xboard
+  wsm xboard-update [域名]          更新 Xboard
   wsm add-proxy [域名] [后端URL]    新建反向代理
   wsm sftp                          SFTP 账号管理
   wsm update [-y]                   从 Git 仓库更新脚本 (-y 不确认)
@@ -3740,6 +3972,8 @@ case ${1:-menu} in
   add-php)      add_site php "${2:-}" ;;
   add-static)   add_site static "${2:-}" ;;
   add-wp)       wp_install "${2:-}" ;;
+  add-xboard)   xb_install "${2:-}" ;;
+  xboard-update) xb_update "${2:-}" ;;
   sftp)         sftp_menu ;;
   update)       update_run "${2:-}" ;;
   rollback)     update_rollback ;;
