@@ -18,7 +18,7 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="2.3"
+WSM_VER="2.4"
 WSM_DIR=/etc/wsm
 META_DIR=$WSM_DIR/sites
 CERT_DIR=$WSM_DIR/certs
@@ -2422,6 +2422,7 @@ manage_service() {
   unit_exists mariadb && svcs+=("mariadb")
   unit_exists redis-server && svcs+=("redis-server")
   unit_exists redis && svcs+=("redis")
+  unit_exists fail2ban && svcs+=("fail2ban")
   for x in $(php_installed | sort -V); do svcs+=("$(php_svc "$x")"); done
   echo "服务状态:"
   for x in "${svcs[@]}"; do printf "   %-22s %s\n" "$x" "$(svc_state "$x")"; done
@@ -2678,6 +2679,7 @@ fail2ban_conf() {  # fail2ban_conf 输出文件
     echo
     echo "[sshd]"
     echo "enabled = true"
+    [[ -f /var/log/auth.log || -f /var/log/secure ]] || echo "backend = systemd"
     echo
     echo "[nginx-http-auth]"
     echo "enabled = true"
@@ -2689,13 +2691,21 @@ fail2ban_conf() {  # fail2ban_conf 输出文件
 install_fail2ban() {
   pkg_refresh
   pkg_install fail2ban || return 1
+  [[ $PM == apt && ! -f /var/log/auth.log ]] && pkg_install python3-systemd >/dev/null 2>&1
   fail2ban_conf /etc/fail2ban/jail.d/wsm.local
+  local myip=${SSH_CLIENT%% *} x
+  local -a wl=()
+  if [[ -f $F2B_WL ]]; then
+    mapfile -t wl < <(f2b_wl_get)
+    if valid_ip "$myip" && [[ " ${wl[*]:-} " != *" $myip "* ]]; then wl+=("$myip"); fi
+    f2b_wl_set "${wl[@]}"
+  fi
   systemctl enable --now fail2ban
   systemctl restart fail2ban
   sleep 1
   info "Fail2ban 已启动: SSH 连续输错 5 次封 1 小时, 站点访问密码同理"
   echo "  已自动把你当前的登录 IP 加入白名单, 避免误封自己"
-  echo "  查看: fail2ban-client status sshd   解封: fail2ban-client set sshd unbanip <IP>"
+  echo "  白名单/解封/开机自启: wsm 主菜单 → 安全防护 → Fail2ban 管理"
 }
 
 install_ffmpeg() {
@@ -4059,6 +4069,331 @@ update_menu() {
 }
 
 # ================================================================ 菜单
+# ================================================================ 安全防护
+# 源站保护: 用 iptables 让 80/443 只接受 Cloudflare 的连接 (SSH 等其他端口不受影响)
+#   规则放在独立链 WSM_CF 里, 开机由 systemd 服务自动加载, 每周自动更新 Cloudflare IP 段
+CFW_IPS=$WSM_DIR/cf-ips.txt
+CFW_UNIT=/etc/systemd/system/wsm-cf-firewall.service
+CFW_CRON=/etc/cron.d/wsm-cf-ips
+CFW_CHAIN=WSM_CF
+F2B_WL=/etc/fail2ban/jail.d/zz-wsm-whitelist.local
+
+cfw_active() { command -v iptables >/dev/null 2>&1 && iptables -w -S "$CFW_CHAIN" >/dev/null 2>&1; }
+
+cfw_state() {
+  if cfw_active; then echo "${G}已开启${N} ($(grep -c . "$CFW_IPS" 2>/dev/null || echo 0) 个IP段)"
+  elif [[ -f $CFW_UNIT ]]; then echo "${R}已设置但规则未生效${N}"
+  else echo "未开启"; fi
+}
+
+cfw_ensure_iptables() {
+  command -v iptables >/dev/null 2>&1 && return 0
+  info "安装 iptables ..."
+  pkg_install iptables >/dev/null 2>&1
+  command -v iptables >/dev/null 2>&1 || { err "iptables 安装失败"; return 1; }
+}
+
+cfw_fetch() {  # 在线获取 Cloudflare IP 段; 失败时保留旧列表, 没有旧列表才用内置列表
+  local tmp v4 v6
+  tmp=$(mktemp)
+  v4=$(curl -fsS --max-time 10 https://www.cloudflare.com/ips-v4/ 2>/dev/null | grep -E '^[0-9.]+/[0-9]+$')
+  v6=$(curl -fsS --max-time 10 https://www.cloudflare.com/ips-v6/ 2>/dev/null | grep -E '^[0-9a-fA-F:]+/[0-9]+$')
+  if (( $(printf '%s\n' "$v4" | grep -c .) >= 5 )); then
+    printf '%s\n%s\n' "$v4" "$v6" | grep -v '^$' | sort -u > "$tmp"
+  elif [[ -s $CFW_IPS ]]; then
+    rm -f "$tmp"; warn "在线获取失败, 继续使用已保存的 IP 列表"; return 0
+  else
+    warn "在线获取失败, 使用内置的 Cloudflare IP 列表"
+    guard_cf_ranges | grep -E '^[0-9a-fA-F:.]+/[0-9]+$' | sort -u > "$tmp"
+  fi
+  mkdir -p "$WSM_DIR"; mv -f "$tmp" "$CFW_IPS"; chmod 644 "$CFW_IPS"
+}
+
+cfw_remove_rules() {
+  local t
+  for t in iptables ip6tables; do
+    command -v "$t" >/dev/null 2>&1 || continue
+    while "$t" -w -D INPUT -p tcp -m multiport --dports 80,443 -j "$CFW_CHAIN" 2>/dev/null; do :; done
+    "$t" -w -F "$CFW_CHAIN" 2>/dev/null
+    "$t" -w -X "$CFW_CHAIN" 2>/dev/null
+  done
+  return 0
+}
+
+cfw_apply_rules() {
+  [[ -s $CFW_IPS ]] || { err "没有 Cloudflare IP 列表"; return 1; }
+  cfw_ensure_iptables || return 1
+  cfw_remove_rules
+  local t r v6 ok=0
+  for t in iptables ip6tables; do
+    command -v "$t" >/dev/null 2>&1 || continue
+    [[ $t == ip6tables ]] && v6=1 || v6=0
+    if ! "$t" -w -N "$CFW_CHAIN" 2>/dev/null; then
+      ((v6)) && continue
+      err "创建防火墙规则失败"; return 1
+    fi
+    if ((v6)); then "$t" -w -A "$CFW_CHAIN" -s ::1/128 -j ACCEPT
+    else "$t" -w -A "$CFW_CHAIN" -s 127.0.0.0/8 -j ACCEPT; fi
+    while read -r r; do
+      [[ -n $r ]] || continue
+      if [[ $r == *:* ]]; then ((v6)) || continue; else ((v6)) && continue; fi
+      "$t" -w -A "$CFW_CHAIN" -s "$r" -j ACCEPT
+    done < "$CFW_IPS"
+    "$t" -w -A "$CFW_CHAIN" -j DROP
+    "$t" -w -I INPUT 1 -p tcp -m multiport --dports 80,443 -j "$CFW_CHAIN" \
+      || { ((v6)) && { "$t" -w -F "$CFW_CHAIN"; "$t" -w -X "$CFW_CHAIN"; continue; }; cfw_remove_rules; err "加载规则失败"; return 1; }
+    ((v6)) || ok=1
+  done
+  ((ok)) || { cfw_remove_rules; err "IPv4 规则没有生效"; return 1; }
+}
+
+cfw_check_sites() {  # 检查每个站点是否经过 Cloudflare (橙云) -> CFW_BAD = 没经过的数量
+  local d names n
+  CFW_BAD=0
+  echo "检查站点是否已开启 Cloudflare 橙云:"
+  while read -r d; do
+    [[ -n $d ]] || continue
+    names=$(load_meta "$d" 2>/dev/null; [[ $DISABLED == 1 ]] || echo "$DOMAIN $ALIASES")
+    for n in $names; do
+      if curl -sI --max-time 8 "http://$n/" 2>/dev/null | tr -d '\r' | grep -qi '^server: *cloudflare'; then
+        echo "  ${G}✔${N} $n"
+      else
+        echo "  ${R}✘${N} $n  (没走橙云, 开启后打不开)"
+        CFW_BAD=$((CFW_BAD + 1))
+      fi
+    done
+  done < <(list_site_names)
+}
+
+cfw_check_ports() {  # 列出 80/443 上除 Nginx 以外的程序
+  local o
+  o=$(ss -ltnpH 2>/dev/null | awk '$4 ~ /:(80|443)$/' | grep -v '"nginx"' || true)
+  [[ -n $o ]] || return 0
+  warn "80/443 上还有其他程序, 开启后它们也只有 Cloudflare 能连:"
+  printf '%s\n' "$o" | awk '{print "  " $4 "  " $6}'
+}
+
+cfw_install_unit() {
+  [[ -x $WSM_BIN ]] || self_install
+  [[ -x $WSM_BIN ]] || { err "找不到 $WSM_BIN, 无法设置开机自动加载"; return 1; }
+  cat > "$CFW_UNIT" <<EOF
+[Unit]
+Description=wsm: 80/443 only accept Cloudflare
+After=network-online.target ufw.service firewalld.service netfilter-persistent.service nftables.service docker.service fail2ban.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=$WSM_BIN cf-firewall apply
+ExecStop=$WSM_BIN cf-firewall remove
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  printf 'SHELL=/bin/bash\nPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n23 4 * * 1 root %s cf-firewall refresh >> /var/log/wsm-task.log 2>&1\n' "$WSM_BIN" > "$CFW_CRON"
+  chmod 644 "$CFW_CRON"
+  systemctl daemon-reload
+  systemctl enable wsm-cf-firewall >/dev/null 2>&1
+  systemctl start wsm-cf-firewall >/dev/null 2>&1 || true
+}
+
+cfw_enable() {
+  if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
+    warn "检测到 firewalld 正在运行, 它重载时可能清掉本规则"
+    confirm "仍然继续?" n || return 0
+  fi
+  echo "开启后: 只有 Cloudflare 能连本机 80/443 端口,"
+  echo "  直接用 IP 访问、或没开橙云的域名, 都会打不开。"
+  echo "  SSH 和其他端口不受影响。"
+  echo "  Xboard 节点要用开了橙云的域名对接面板。"
+  echo
+  cfw_check_sites
+  cfw_check_ports
+  echo
+  if ((CFW_BAD)); then
+    warn "有 $CFW_BAD 个域名没走橙云, 开启后它们会打不开"
+    confirm "仍然开启?" n || return 0
+  else
+    confirm "确认开启源站保护?" y || return 0
+  fi
+  cfw_ensure_iptables || return 1
+  info "获取 Cloudflare IP 段 ..."
+  cfw_fetch || return 1
+  cfw_apply_rules || return 1
+  cfw_install_unit || { cfw_remove_rules; return 1; }
+  info "源站保护已开启 ($(grep -c . "$CFW_IPS") 个 IP 段, 每周一自动更新)"
+  echo "  网站打不开时, SSH 执行: wsm cf-firewall off"
+}
+
+cfw_disable() {
+  systemctl disable --now wsm-cf-firewall >/dev/null 2>&1 || true
+  cfw_remove_rules
+  rm -f "$CFW_UNIT" "$CFW_CRON"
+  systemctl daemon-reload
+  info "源站保护已关闭, 80/443 对所有 IP 开放"
+}
+
+cfw_toggle() { if cfw_active || [[ -f $CFW_UNIT ]]; then confirm "关闭源站保护?" n && cfw_disable; else cfw_enable; fi; }
+
+cfw_refresh() {
+  cfw_fetch || return 1
+  if cfw_active || [[ -f $CFW_UNIT ]]; then cfw_apply_rules || return 1; fi
+  info "Cloudflare IP 列表已更新: $(grep -c . "$CFW_IPS") 个 IP 段"
+}
+
+cfw_cli() {  # wsm cf-firewall [on|off|apply|remove|refresh|status]
+  case ${1:-status} in
+    on) cfw_enable ;;
+    off) cfw_disable ;;
+    apply) cfw_apply_rules ;;
+    remove) cfw_remove_rules ;;
+    refresh) cfw_refresh ;;
+    *) echo "源站保护: $(cfw_state)" ;;
+  esac
+}
+
+# ---------------- Fail2ban 管理
+f2b_installed() { command -v fail2ban-client >/dev/null 2>&1; }
+
+f2b_state() {
+  f2b_installed || { echo "未安装"; return 0; }
+  printf '%s  自启: %s' "$(svc_state fail2ban)" \
+    "$(systemctl is-enabled --quiet fail2ban 2>/dev/null && echo "${G}开${N}" || echo "${Y}关${N}")"
+}
+
+f2b_fix_sshd() {  # 没有 auth.log 的系统 (Debian 12 等), sshd 规则改读 systemd 日志, 否则 fail2ban 启动失败
+  local f=/etc/fail2ban/jail.d/wsm.local
+  [[ -f /var/log/auth.log || -f /var/log/secure ]] && return 0
+  [[ $PM == apt ]] && pkg_install python3-systemd >/dev/null 2>&1
+  if [[ -f $f ]] && grep -q '^\[sshd\]' "$f" && ! grep -q '^backend *= *systemd' "$f"; then
+    sed -i '/^\[sshd\]/a backend = systemd' "$f"
+  fi
+  return 0
+}
+
+f2b_wl_get() {  # 白名单 IP, 每行一个 (不含本机地址)
+  local line="" x
+  if [[ -f $F2B_WL ]]; then line=$(grep -m1 '^ignoreip' "$F2B_WL")
+  elif [[ -f /etc/fail2ban/jail.d/wsm.local ]]; then line=$(grep -m1 '^ignoreip' /etc/fail2ban/jail.d/wsm.local); fi
+  line=${line#*=}
+  for x in $line; do [[ $x == 127.0.0.1/8 || $x == ::1 ]] || echo "$x"; done
+  return 0
+}
+
+f2b_wl_set() {  # f2b_wl_set IP... (覆盖保存)
+  mkdir -p /etc/fail2ban/jail.d
+  {
+    echo "# managed by wsm - 白名单里的 IP 永远不会被 Fail2ban 封禁"
+    echo "[DEFAULT]"
+    echo "ignoreip = 127.0.0.1/8 ::1${*:+ $*}"
+  } > "$F2B_WL"
+  systemctl is-active --quiet fail2ban 2>/dev/null && fail2ban-client reload >/dev/null 2>&1
+  return 0
+}
+
+f2b_start() {
+  f2b_fix_sshd
+  if systemctl restart fail2ban 2>/dev/null && sleep 1 && systemctl is-active --quiet fail2ban; then
+    info "Fail2ban 已启动"
+  else
+    err "Fail2ban 启动失败, 最近日志:"
+    journalctl -u fail2ban -n 10 --no-pager 2>/dev/null | tail -10
+    return 1
+  fi
+}
+
+f2b_bans() {
+  systemctl is-active --quiet fail2ban || { warn "Fail2ban 没在运行, 没有封禁"; return 0; }
+  local j n=0
+  for j in $(fail2ban-client status 2>/dev/null | sed -n 's/.*Jail list:[[:space:]]*//p' | tr ',' ' '); do
+    echo "  [$j] $(fail2ban-client status "$j" 2>/dev/null | sed -n 's/.*Banned IP list:[[:space:]]*//p')"
+    n=$((n + 1))
+  done
+  ((n)) || echo "  (没有启用的规则)"
+}
+
+f2b_menu() {
+  local c l x i ip
+  local -a wl keep
+  while true; do
+    title "Fail2ban 管理"
+    if ! f2b_installed; then
+      echo "  状态: 未安装 (用于封禁多次输错 SSH 密码的 IP)"
+      if confirm "现在安装吗?" n; then (install_fail2ban); pause; continue; fi
+      return 0
+    fi
+    mapfile -t wl < <(f2b_wl_get)
+    echo "  状态: $(f2b_state)"
+    echo "  网站自动封禁: $(guard_ban_state)"
+    echo "  白名单: ${wl[*]:-无}"
+    choose c "操作:" "启动" "停止" "开机自启 开/关" "查看封禁" "解封 IP" \
+      "白名单 添加" "白名单 删除" "返回" || return 0
+    case $c in
+      启动) f2b_start ;;
+      停止) systemctl stop fail2ban && info "已停止 (封禁全部解除)" ;;
+      开机*)
+        if systemctl is-enabled --quiet fail2ban 2>/dev/null; then
+          systemctl disable fail2ban >/dev/null 2>&1 && info "已关闭开机自启 (当前运行状态不变)"
+        else
+          systemctl enable fail2ban >/dev/null 2>&1 && info "已开启开机自启"
+        fi ;;
+      查看*) f2b_bans; pause ;;
+      解封*)
+        systemctl is-active --quiet fail2ban || { warn "Fail2ban 没在运行"; continue; }
+        read -r -p "要解封的 IP (输入 all 解封全部): " ip || continue
+        if [[ $ip == all ]]; then fail2ban-client unban --all >/dev/null && info "已全部解封"
+        elif valid_ip "$ip"; then fail2ban-client unban "$ip" >/dev/null && info "已解封 $ip"
+        else warn "IP 格式不正确"; fi ;;
+      白名单\ 添加)
+        ip=${SSH_CLIENT%% *}
+        [[ -n $ip ]] && echo "  你当前 SSH 登录的 IP: $ip"
+        read -r -p "添加 IP 或网段 (空格分隔): " l || continue
+        [[ -n $l ]] || continue
+        for x in $l; do valid_ip "$x" || { warn "格式不正确: $x"; continue 2; }; done
+        for x in $l; do [[ " ${wl[*]:-} " == *" $x "* ]] || wl+=("$x"); done
+        f2b_wl_set "${wl[@]}"; info "白名单已更新" ;;
+      白名单\ 删除)
+        ((${#wl[@]})) || { warn "白名单是空的"; continue; }
+        i=0; for x in "${wl[@]}"; do i=$((i + 1)); printf "   %2d) %s\n" "$i" "$x"; done
+        read -r -p "删除哪个 (序号或 IP): " l || continue
+        keep=(); i=0
+        for x in "${wl[@]}"; do i=$((i + 1)); [[ $l == "$i" || $l == "$x" ]] || keep+=("$x"); done
+        ((${#keep[@]} < ${#wl[@]})) || { warn "没有匹配的项"; continue; }
+        f2b_wl_set "${keep[@]}"; info "已删除" ;;
+      *) return 0 ;;
+    esac
+  done
+}
+
+menu_security() {
+  local c
+  while true; do
+    title "安全防护"
+    echo "  源站保护: $(cfw_state)"
+    echo "  Fail2ban: $(f2b_state)"
+    cat <<'EOF'
+
+   1) 源站保护 开/关
+      (80/443 只允许 Cloudflare)
+   2) 更新 Cloudflare IP 列表
+   3) Fail2ban 管理
+      (启停/自启/白名单/解封)
+   4) 禁止IP直接访问 (开关)
+   0) 返回
+EOF
+    read -r -p "请选择: " c || return 0
+    case $c in
+      1) (cfw_toggle); pause ;;
+      2) (cfw_refresh); pause ;;
+      3) (f2b_menu) ;;
+      4) (toggle_block_ip); pause ;;
+      0|q) return 0 ;;
+      *) warn "无效选择" ;;
+    esac
+  done
+}
+
 dashboard() {
   local n=0 f phps
   for f in "$META_DIR"/*.conf; do [[ -e $f ]] && n=$((n + 1)); done
@@ -4308,6 +4643,7 @@ main_menu() {
     mi 8 "软件商店" "Node/Docker/PG..."
     mi 9 "网站防篡改" "锁定/检测/还原"
     mi 10 "更新脚本" "从 Git 仓库一键更新"
+    mi 11 "安全防护" "源站保护/Fail2ban"
     echo "  0) 退出"
     read -r -p "请选择: " c || exit 0
     case $c in
@@ -4321,6 +4657,7 @@ main_menu() {
       8) menu_store ;;
       9) (menu_tamper) ;;
       10) update_menu ;;
+      11) menu_security ;;
       0|q) exit 0 ;;
       *) warn "无效选择" ;;
     esac
@@ -4339,6 +4676,8 @@ wsm v$WSM_VER - Web Server Manager
   wsm xboard-update [域名]          更新 Xboard
   wsm xboard-info [域名]            Xboard 后台地址/管理员, 重置管理员密码
   wsm guard [域名] [on|off]         防 CC / 防恶意 bot
+  wsm cf-firewall [on|off|refresh]  源站保护: 80/443 只允许 Cloudflare
+  wsm fail2ban                      Fail2ban 管理 (启停/自启/白名单/解封)
   wsm xboard-domains [站点]         设置主页/订阅/节点三个域名
   wsm add-proxy [域名] [后端URL]    新建反向代理
   wsm sftp                          SFTP 账号管理
@@ -4389,6 +4728,8 @@ case ${1:-menu} in
   rollback)     update_rollback ;;
   stats)        stats_cli "${2:-}" "${3:-1}" ;;
   guard)        guard_cli "${2:-}" "${3:-}" ;;
+  cf-firewall)  cfw_cli "${2:-}" ;;
+  fail2ban)     f2b_menu ;;
   add-proxy)    add_site proxy "${2:-}" "${3:-}" ;;
   add-redirect) add_site redirect "${2:-}" "${3:-}" ;;
   ssl)          use_site "${2:-}" && ssl_pick_method "$SITE" ;;
