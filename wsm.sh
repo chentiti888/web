@@ -18,8 +18,9 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="2.8.5"
+WSM_VER="2.8.6"
 # CHANGELOG-BEGIN  (更新时会显示比当前版本新的条目, 新的写在最上面)
+# v2.8.6 wsm 日志自动轮转; 还原后的提示更准确; 静态检查清理
 # v2.8.5 异地备份新增 Cloudflare R2 / Backblaze B2 (用密钥, 不会过期, 不用浏览器授权)
 # v2.8.4 谷歌网盘支持用自己的 client_id (rclone 共用授权将停用); 已添加的网盘可一键更换授权
 # v2.8.3 新增服务器时区设置 (系统与服务 → 8); 设置定时任务时显示服务器时间; 安装环境时 UTC 服务器提示改为北京时间
@@ -283,8 +284,8 @@ php_installed() {
 ini_set_kv() {  # ini_set_kv 文件 键 值
   local f=$1 k=$2 v=$3
   touch "$f"
-  if grep -qE "^$k[[:space:]]*=" "$f"; then
-    sed -i -E "s|^$k[[:space:]]*=.*|$k = $v|" "$f"
+  if grep -qE "^${k}[[:space:]]*=" "$f"; then
+    sed -i -E "s|^${k}[[:space:]]*=.*|$k = $v|" "$f"
   else
     echo "$k = $v" >> "$f"
   fi
@@ -4805,7 +4806,9 @@ fb_restore() {  # fb_restore [备份文件]
   echo "  网站 $(list_site_names | wc -l) 个, 数据库 $okdb 个"
   echo "  接下来:"
   echo "   - 把域名解析改到本机 IP: $(public_ip_cached)"
-  echo "   - 源站保护 / Telegram 告警等开关需要在本机重新开一次"
+  echo "   - 定时备份、Telegram 告警、异地目标已跟着还原, 本机会照常执行"
+  echo "   - 源站保护需要在本机重新开一次 (安全防护 → 1)"
+  echo "   - 旧服务器不用了的话, 记得关掉它的定时备份, 免得两台一起往网盘传"
   [[ -n $FB_EXTRAS ]] && echo "   - 检查机器人等额外程序是否正常运行 (Python 版本不同时可能要重装依赖)"
   return 0
 }
@@ -5044,6 +5047,21 @@ realip_write() {  # 生成/更新真实 IP 配置, nginx 检测不通过就恢�
   [[ -n $gold ]] && mv -f "$gold" "$GUARD_CONF"
   warn "Cloudflare 真实 IP 配置没生效 (可能已有其他 real_ip 设置)"
   return 1
+}
+
+wsm_logrotate() {  # wsm 自己的日志按周轮转, 保留 4 份
+  [[ -d /etc/logrotate.d ]] || return 0
+  [[ -f /etc/logrotate.d/wsm ]] && return 0
+  cat > /etc/logrotate.d/wsm <<'EOF'
+/var/log/wsm-*.log {
+    weekly
+    rotate 4
+    compress
+    missingok
+    notifempty
+    copytruncate
+}
+EOF
 }
 
 realip_ensure() {  # 装了 Nginx 就确保真实 IP 配置和每周更新任务存在
@@ -5589,6 +5607,7 @@ main_menu() {
   SERVER_IP=$(public_ip)
   ui_load
   realip_ensure
+  wsm_logrotate
   while true; do
     dashboard
     echo
