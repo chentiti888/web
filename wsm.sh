@@ -18,8 +18,9 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="2.8.1"
+WSM_VER="2.8.2"
 # CHANGELOG-BEGIN  (更新时会显示比当前版本新的条目, 新的写在最上面)
+# v2.8.2 所有输入框都可以输入 0 返回 (自动提示); 取消输入不会再继续往下执行
 # v2.8.1 所有"返回"改为绿色, "退出"改为红色; 网站管理去掉多余提示
 # v2.8 菜单图标可切换: Nerd 字体图标 (系统与服务 → 8, 或 wsm icons nerd) / 普通符号
 # v2.7.4 图标恢复为原来那套 (保留按列对齐和绿色退出)
@@ -85,12 +86,32 @@ ui_icon_menu() {
 # 用"跳到第 N 列"控制码定位, 图标在不同终端显示 1 格还是 2 格都不影响对齐
 mi() { printf ' %2s) %s\e[8G%s\e[20G%s\n' "$1" "$2" "$3" "${4:-}"; }
 
+# 所有带提示的输入 (read -p): 自动提示 "(0返回)", 输入 0 就取消并返回上一级 (返回值 1)
+# 例外: "按回车继续" 和 "(0-23)" 这类 0 本身有效的数字输入; 不带 -p 的数据读取不受影响
+read() {
+  local -a _rd_a=("$@")
+  local _rd_i _rd_pi=-1 _rd_p="" _rd_var _rd_cancel=1
+  for ((_rd_i = 0; _rd_i < ${#_rd_a[@]}; _rd_i++)); do
+    if [[ ${_rd_a[_rd_i]} == -p ]]; then _rd_pi=$((_rd_i + 1)); _rd_p=${_rd_a[_rd_pi]:-}; break; fi
+  done
+  if ((_rd_pi < 0)); then builtin read "$@"; return; fi
+  _rd_var=${_rd_a[${#_rd_a[@]}-1]}
+  [[ $_rd_p == *按回车* || $_rd_p == *"(0-"* ]] && _rd_cancel=0
+  if ((_rd_cancel)) && [[ $_rd_p == *": " && $_rd_p != 请选择* && $_rd_p != *"0 返回"* \
+        && $_rd_p != *回车取消* && $_rd_p != *回车返回* ]]; then
+    _rd_a[_rd_pi]="${_rd_p%: } ${D}(0返回)${N}: "
+  fi
+  builtin read "${_rd_a[@]}" || return
+  if ((_rd_cancel)) && [[ ${!_rd_var:-} == 0 ]]; then return 1; fi
+  return 0
+}
+
 pause() { echo; read -r -p "${D}按回车键继续...${N}" _ || true; }
 
 confirm() {  # confirm "问题" [y|n]
   local d=${2:-y} a hint
   [[ $d == y ]] && hint="Y/n" || hint="y/N"
-  read -r -p "$1 [$hint] " a || a=""
+  read -r -p "$1 [$hint] " a || return 1
   a=${a:-$d}
   [[ $a =~ ^[Yy] ]]
 }
@@ -99,10 +120,10 @@ ask() {  # ask 变量名 "提示" "默认值"  (变量已有值则跳过)
   local __v=$1 __p=$2 __d=${3:-} __in
   if [[ -n ${!__v:-} ]]; then return 0; fi
   if [[ -n $__d ]]; then
-    read -r -p "$__p [$__d]: " __in || __in=""
+    read -r -p "$__p [$__d]: " __in || return 1
     __in=${__in:-$__d}
   else
-    read -r -p "$__p: " __in || __in=""
+    read -r -p "$__p: " __in || return 1
   fi
   printf -v "$__v" '%s' "$__in"
 }
@@ -132,7 +153,7 @@ choose() {  # choose 结果变量 "标题" 选项1 选项2 ...   (数字选择, 
 
 read_secret() {  # read_secret 变量 "提示"
   local __v=$1 __in
-  read -rs -p "$2: " __in || __in=""
+  read -rs -p "$2: " __in || { echo; return 1; }
   echo
   printf -v "$__v" '%s' "$__in"
 }
@@ -744,7 +765,7 @@ ssl_le_http() {
   local -a n_args=() mail_args=()
   [[ -f $WSM_DIR/email ]] && email=$(cat "$WSM_DIR/email")
   if [[ -z $email ]]; then
-    read -r -p "证书到期通知邮箱 (可留空): " email || email=""
+    read -r -p "证书到期通知邮箱 (可留空): " email || return 1
     [[ -n $email ]] && echo "$email" > "$WSM_DIR/email"
   fi
   if [[ -n $email ]]; then mail_args=(-m "$email"); else mail_args=(--register-unsafely-without-email); fi
@@ -767,13 +788,13 @@ ssl_le_dns() {
   local cf=$WSM_DIR/cloudflare.ini token base n
   if [[ ! -f $cf ]] || confirm "已保存过 Cloudflare Token, 是否重新输入?" n; then
     echo "到 Cloudflare → 我的个人资料 → API 令牌 创建令牌, 权限: 区域→DNS→编辑"
-    read_secret token "粘贴 API Token (输入不显示)"
+    read_secret token "粘贴 API Token (输入不显示)" || return 1
     [[ -n $token ]] || { err "Token 为空"; return 1; }
     printf 'dns_cloudflare_api_token = %s\n' "$token" > "$cf"
     chmod 600 "$cf"
   fi
   base=${DOMAIN#www.}
-  ask base "通配符所属主域名 (将申请 *.主域名)" "$base"
+  ask base "通配符所属主域名 (将申请 *.主域名)" "$base" || return 1
   valid_domain "$base" || { err "域名格式不正确"; return 1; }
   local -a n_args=(-d "$DOMAIN")
   local -A seen=([$DOMAIN]=1)
@@ -1183,10 +1204,10 @@ add_site() {  # add_site 类型 [域名] [后端/跳转目标]
   local type=$1 domain=${2:-} extra=${3:-} aliases="" root=${PRESET_ROOT:-} a u
   command -v nginx >/dev/null 2>&1 || die "还没有安装环境, 请先执行: wsm install"
   title "新建$(type_name "$type")"
-  ask domain "① 主域名 (如 example.com)"
+  ask domain "① 主域名 (如 example.com)" || return 1
   valid_domain "$domain" || die "域名格式不正确: $domain"
   [[ -f $(meta_file "$domain") ]] && die "站点已存在: $domain"
-  read -r -p "② 绑定其他域名 (空格分隔, 可留空, 如 www.$domain): " aliases || aliases=""
+  read -r -p "② 绑定其他域名 (空格分隔, 可留空, 如 www.$domain): " aliases || return 1
   for a in $aliases; do
     valid_domain "$a" || die "域名格式不正确: $a"
     u=$(domain_used "$a") && die "域名 $a 已被站点 $u 使用"
@@ -1197,7 +1218,7 @@ add_site() {  # add_site 类型 [域名] [后端/跳转目标]
   TYPE=$type; DOMAIN=$domain; ALIASES=$aliases
   case $type in
     php|static)
-      ask root "③ 网站根目录" "$WWW_ROOT/$domain"
+      ask root "③ 网站根目录" "$WWW_ROOT/$domain" || return 1
       safe_root "$root" || die "目录不合法: 需为至少两级的普通路径(如 /www/wwwroot/xxx), 且不能在 /etc /usr /root 等系统目录下"
       ROOT=${root%/}
       mkdir -p "$ROOT"
@@ -1211,13 +1232,13 @@ add_site() {  # add_site 类型 [域名] [后端/跳转目标]
       fi
       ;;
     proxy)
-      ask extra "③ 后端地址 (如 http://127.0.0.1:3000)"
+      ask extra "③ 后端地址 (如 http://127.0.0.1:3000)" || return 1
       valid_url "$extra" || die "后端地址格式不正确(不能含空格/引号/分号等)"
       UPSTREAM=$extra
       selinux_tune
       ;;
     redirect)
-      ask extra "③ 跳转到 (如 https://www.example.com, 不带结尾斜杠)"
+      ask extra "③ 跳转到 (如 https://www.example.com, 不带结尾斜杠)" || return 1
       extra=${extra%/}
       valid_url "$extra" || die "跳转地址格式不正确"
       REDIRECT_TO=$extra
@@ -1360,7 +1381,7 @@ site_root_change() {
   need_type php static || return 1
   [[ $TAMPER == 1 ]] && { err "网站处于防篡改锁定状态, 请先在 [网站防篡改] 里解锁"; return 1; }
   local r=""
-  ask r "新的网站根目录" "$ROOT"
+  ask r "新的网站根目录" "$ROOT" || return 1
   safe_root "$r" || { err "目录不合法: 需为至少两级的普通路径, 且不能在系统目录下"; return 1; }
   mkdir -p "$r"
   ROOT=${r%/}
@@ -1382,11 +1403,11 @@ site_target_change() {
   need_type proxy redirect || return 1
   local v=""
   if [[ $TYPE == proxy ]]; then
-    ask v "新的后端地址" "$UPSTREAM"
+    ask v "新的后端地址" "$UPSTREAM" || return 1
     valid_url "$v" || { err "地址格式不正确"; return 1; }
     UPSTREAM=$v
   else
-    ask v "新的跳转目标" "$REDIRECT_TO"
+    ask v "新的跳转目标" "$REDIRECT_TO" || return 1
     v=${v%/}
     valid_url "$v" || { err "地址格式不正确"; return 1; }
     REDIRECT_TO=$v
@@ -1449,7 +1470,7 @@ site_auth() {
       设置*)
         read -r -p "用户名: " u || continue
         [[ $u =~ ^[A-Za-z0-9_.-]{1,32}$ ]] || { warn "用户名只能含字母数字 _ . -"; continue; }
-        read_secret pw "密码 (输入不显示)"
+        read_secret pw "密码 (输入不显示)" || continue
         [[ ${#pw} -ge 4 ]] || { warn "密码至少 4 位"; continue; }
         mkdir -p "$AUTH_DIR"
         touch "$AUTH_DIR/$d.htpasswd"; chmod 640 "$AUTH_DIR/$d.htpasswd"
@@ -1474,7 +1495,7 @@ site_hotlink() {
     "开启静态资源缓存 (30 天)" "关闭静态资源缓存" || return 1
   case $c in
     开启防盗链*)
-      read -r -p "额外允许的域名 (空格分隔, 可留空): " w || w=""
+      read -r -p "额外允许的域名 (空格分隔, 可留空): " w || return 1
       for x in $w; do valid_domain "$x" || { err "格式不正确: $x"; return 1; }; done
       HOTLINK=1; HOTLINK_DOMAINS=$w ;;
     关闭防盗链*) HOTLINK=0 ;;
@@ -2202,17 +2223,17 @@ db_create() {
   need_mysql || return 1
   local name=${1:-} user pw mode
   title "创建数据库"
-  ask name "数据库名"
+  ask name "数据库名" || return 1
   [[ $name =~ ^[A-Za-z0-9_]{1,32}$ ]] || die "名称只能含字母数字下划线, 最长 32"
   user=$name
-  read -r -p "数据库用户名 [$name]: " user || user=""
+  read -r -p "数据库用户名 [$name]: " user || return 1
   user=${user:-$name}
   [[ $user =~ ^[A-Za-z0-9_]{1,32}$ ]] || die "用户名格式不正确"
   choose mode "密码:" "自动生成强密码" "我自己输入" || return 1
   if [[ $mode == 自动* ]]; then
     pw=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 20)
   else
-    read_secret pw "密码 (8-64 位, 字母数字和 ._@#%+=-)"
+    read_secret pw "密码 (8-64 位, 字母数字和 ._@#%+=-)" || return 1
     [[ $pw =~ ^[A-Za-z0-9._@#%+=-]{8,64}$ ]] || die "密码不符合要求"
   fi
   mysql -e "CREATE DATABASE \`$name\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; \
@@ -2229,7 +2250,7 @@ GRANT ALL PRIVILEGES ON \`$name\`.* TO '$user'@'localhost'; FLUSH PRIVILEGES;" \
 db_drop() {
   pick_db || return 1
   local n=$DBNAME u
-  read -r -p "同时删除的用户名 (默认同库名, 填 - 表示不删用户) [$n]: " u || u=""
+  read -r -p "同时删除的用户名 (默认同库名, 填 - 表示不删用户) [$n]: " u || return 1
   u=${u:-$n}
   confirm "确认删除数据库 $n ? 不可恢复" n || return 0
   mysql -e "DROP DATABASE \`$n\`;" || return 1
@@ -2244,7 +2265,7 @@ db_passwd() {
   [[ $u =~ ^[A-Za-z0-9_]{1,32}$ ]] || { err "用户名格式不正确"; return 1; }
   choose mode "新密码:" "自动生成强密码" "我自己输入" || return 1
   if [[ $mode == 自动* ]]; then pw=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 20)
-  else read_secret pw "新密码 (8-64 位)"; [[ $pw =~ ^[A-Za-z0-9._@#%+=-]{8,64}$ ]] || { err "密码不符合要求"; return 1; }; fi
+  else read_secret pw "新密码 (8-64 位)" || return 1; [[ $pw =~ ^[A-Za-z0-9._@#%+=-]{8,64}$ ]] || { err "密码不符合要求"; return 1; }; fi
   mysql -e "ALTER USER '$u'@'localhost' IDENTIFIED BY '$pw'; FLUSH PRIVILEGES;" || return 1
   info "已修改, 新密码: $pw"
 }
@@ -2254,7 +2275,7 @@ install_pma() {
   need_mysql || return 1
   command -v nginx >/dev/null 2>&1 || { err "请先安装环境"; return 1; }
   echo "phpMyAdmin 建议绑定一个不容易被猜到的域名, 并开启 HTTPS 和访问密码。"
-  ask domain "phpMyAdmin 使用的域名 (如 db.example.com)"
+  ask domain "phpMyAdmin 使用的域名 (如 db.example.com)" || return 1
   valid_domain "$domain" || { err "域名格式不正确"; return 1; }
   [[ -f $(meta_file "$domain") ]] && { err "站点已存在"; return 1; }
   root=$WWW_ROOT/$domain
@@ -2365,14 +2386,14 @@ tasks_add() {
   case $kind in
     备份网站)
       pick_site "" || return 1
-      read -r -p "保留最近几份 [7]: " keep || keep=""; keep=${keep:-7}
+      read -r -p "保留最近几份 [7]: " keep || return 1; keep=${keep:-7}
       cmd="$WSM_BIN backup-site $SITE $keep" ;;
     备份数据库)
       pick_db || return 1
-      read -r -p "保留最近几份 [7]: " keep || keep=""; keep=${keep:-7}
+      read -r -p "保留最近几份 [7]: " keep || return 1; keep=${keep:-7}
       cmd="$WSM_BIN backup-db $DBNAME $keep" ;;
     备份全部*)
-      read -r -p "保留最近几份 [7]: " keep || keep=""; keep=${keep:-7}
+      read -r -p "保留最近几份 [7]: " keep || return 1; keep=${keep:-7}
       cmd="$WSM_BIN backup-db --all $keep" ;;
     *)
       read -r -p "要执行的命令: " cmd || return 1
@@ -2382,19 +2403,19 @@ tasks_add() {
   choose freq "执行频率:" "每天" "每周" "每月" "每隔 N 小时" || return 1
   case $freq in
     每隔*)
-      read -r -p "每隔几小时 [6]: " h || h=""; h=${h:-6}
+      read -r -p "每隔几小时 [6]: " h || return 1; h=${h:-6}
       [[ $h =~ ^[0-9]+$ && $h -ge 1 && $h -le 23 ]] || { err "请输入 1-23"; return 1; }
       expr="0 */$h * * *" ;;
     *)
-      read -r -p "几点执行 (0-23) [3]: " h || h=""; h=${h:-3}
-      read -r -p "第几分钟 (0-59) [30]: " m || m=""; m=${m:-30}
+      read -r -p "几点执行 (0-23) [3]: " h || return 1; h=${h:-3}
+      read -r -p "第几分钟 (0-59) [30]: " m || return 1; m=${m:-30}
       [[ $h =~ ^[0-9]+$ && $h -le 23 && $m =~ ^[0-9]+$ && $m -le 59 ]] || { err "时间不合法"; return 1; }
       case $freq in
         每天) expr="$m $h * * *" ;;
-        每周) read -r -p "星期几 (1=周一 ... 7=周日) [1]: " dow || dow=""; dow=${dow:-1}
+        每周) read -r -p "星期几 (1=周一 ... 7=周日) [1]: " dow || return 1; dow=${dow:-1}
               [[ $dow =~ ^[1-7]$ ]] || { err "请输入 1-7"; return 1; }
               expr="$m $h * * $((dow % 7))" ;;
-        每月) read -r -p "每月几号 (1-28) [1]: " dom || dom=""; dom=${dom:-1}
+        每月) read -r -p "每月几号 (1-28) [1]: " dom || return 1; dom=${dom:-1}
               [[ $dom =~ ^[0-9]+$ && $dom -ge 1 && $dom -le 28 ]] || { err "请输入 1-28"; return 1; }
               expr="$m $h $dom * *" ;;
       esac ;;
@@ -2524,7 +2545,7 @@ self_install() {
 cmd_install() {
   install_base
   local v=""
-  read -r -p "安装哪些 PHP 版本? (${PHP_VERSIONS}; 多个用空格分隔, 输入 none 跳过) [8.3]: " v || v=""
+  read -r -p "安装哪些 PHP 版本? (${PHP_VERSIONS}; 多个用空格分隔, 输入 none 跳过) [8.3]: " v || return 1
   v=${v:-8.3}
   if [[ $v != none ]]; then
     for x in $v; do install_php "$x"; done
@@ -3008,7 +3029,7 @@ wp_install() {  # wp_install [域名]
     confirm "WordPress 需要数据库, 现在安装 MariaDB 吗?" y || return 1
     install_db || return 1
   fi
-  ask domain "① 网站域名 (如 blog.example.com)"
+  ask domain "① 网站域名 (如 blog.example.com)" || return 1
   valid_domain "$domain" || die "域名格式不正确: $domain"
   [[ -f $(meta_file "$domain") ]] && die "站点已存在: $domain"
   v=$(domain_used "$domain") && die "域名 $domain 已被站点 $v 使用"
@@ -3173,7 +3194,7 @@ xb_install() {  # xb_install [域名]
     install_redis || return 1
   fi
   install_composer || return 1
-  ask domain "① 网站域名 (如 panel.example.com)"
+  ask domain "① 网站域名 (如 panel.example.com)" || return 1
   valid_domain "$domain" || die "域名格式不正确: $domain"
   [[ -f $(meta_file "$domain") ]] && die "站点已存在: $domain"
   v=$(domain_used "$domain") && die "域名 $domain 已被站点 $v 使用"
@@ -3182,7 +3203,7 @@ xb_install() {  # xb_install [域名]
   if [[ -d $app && -n $(ls -A "$app" 2>/dev/null) ]]; then
     die "目录 $app 里已有文件, 请换一个域名或先清空该目录"
   fi
-  read -r -p "② 管理员邮箱 [admin@$domain]: " email || email=""
+  read -r -p "② 管理员邮箱 [admin@$domain]: " email || return 1
   email=${email:-admin@$domain}
   [[ $email =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]] || die "邮箱格式不正确"
   xb_pick_php || return 1
@@ -3302,8 +3323,8 @@ xb_domains() {  # xb_domains [站点] [订阅域名] [节点域名]
   echo "  建议: 三个域名都解析到本机; 主页开橙云, 订阅和节点两个设为灰云(仅DNS)。"
   echo "  留空 = 不改这一项。"
   if [[ -z $sub && -z $node ]]; then
-    read -r -p "① 订阅域名 (如 sub.example.com): " sub || sub=""
-    read -r -p "② 节点安装/通信域名 (如 node.example.com): " node || node=""
+    read -r -p "① 订阅域名 (如 sub.example.com): " sub || return 1
+    read -r -p "② 节点安装/通信域名 (如 node.example.com): " node || return 1
   fi
   [[ -n $sub || -n $node ]] || { warn "没有输入任何域名"; return 0; }
   for n in $sub $node; do
@@ -3413,7 +3434,7 @@ xb_info() {  # xb_info [域名]: 查看后台地址/管理员, 重置管理员�
     ((${#admins[@]})) || { warn "没有管理员账号可重置"; continue; }
     if ((${#admins[@]} == 1)); then e=${admins[0]}
     else choose e "重置哪个管理员?" "${admins[@]}" || continue; fi
-    read -r -p "新密码 (至少 8 位, 直接回车自动生成): " pw || pw=""
+    read -r -p "新密码 (至少 8 位, 直接回车自动生成): " pw || continue
     if [[ -n $pw && ${#pw} -lt 8 ]]; then warn "密码至少 8 位"; continue; fi
     confirm "确定重置 $e 的密码?" y || continue
     out=$(xb_php_run "$app" "$php" reset "$e" "$pw") || { printf '%s\n' "$out" | tail -5; err "重置失败"; continue; }
@@ -4287,7 +4308,7 @@ fb_gdrive_add() {
   else
     echo "在装了 rclone 的电脑上运行: rclone authorize \"drive\""
     echo "浏览器授权后, 把输出的 {\"access_token\": ... } 整段粘贴到这里:"
-    read -r token || return 1
+    read -r -p "token: " token || return 1
     token=$(printf '%s' "$token" | tr -d '\r')
     [[ $token == \{*refresh_token*\} ]] || { err "token 格式不对"; return 1; }
   fi
@@ -4479,8 +4500,8 @@ fb_settings() {
       设置*)
         echo "备份里有数据库密码、证书私钥等, 放到网盘建议加密。"
         warn "密码一定要记住! 忘了密码, 备份就无法还原"
-        read_secret p1 "加密密码 (至少 8 位)"; [[ ${#p1} -ge 8 ]] || { warn "至少 8 位"; continue; }
-        read_secret p2 "再输入一次"; [[ $p1 == "$p2" ]] || { warn "两次不一样"; continue; }
+        read_secret p1 "加密密码 (至少 8 位)" || continue; [[ ${#p1} -ge 8 ]] || { warn "至少 8 位"; continue; }
+        read_secret p2 "再输入一次" || continue; [[ $p1 == "$p2" ]] || { warn "两次不一样"; continue; }
         FB_PASS=$p1; fb_save; info "已开启加密 (之后的备份生效)" ;;
       关闭*) FB_PASS=""; fb_save; info "已关闭加密" ;;
       *) return 0 ;;
@@ -4548,11 +4569,11 @@ fb_restore() {  # fb_restore [备份文件]
   tarf=$file
   if [[ $file == *.enc ]]; then
     fb_load; pass=$FB_PASS
-    [[ -n $pass ]] || read_secret pass "备份加密密码"
+    [[ -n $pass ]] || read_secret pass "备份加密密码" || { rm -rf "$stage"; return 1; }
     tarf=$stage/bundle.tar
     if ! WSM_FBPASS=$pass openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:WSM_FBPASS -in "$file" -out "$tarf" 2>/dev/null; then
       if [[ -n $FB_PASS ]]; then
-        read_secret pass "本机保存的密码不对, 请输入备份时的加密密码"
+        read_secret pass "本机保存的密码不对, 请输入备份时的加密密码" || { rm -rf "$stage"; return 1; }
         WSM_FBPASS=$pass openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:WSM_FBPASS -in "$file" -out "$tarf" 2>/dev/null \
           || { rm -rf "$stage"; err "密码不对, 无法解密"; return 1; }
       else
@@ -5020,8 +5041,7 @@ ssh_key_files_del() {  # 删除服务器上留存的私钥文件 (公钥不受�
 ssh_key_add() {
   local k
   echo "粘贴公钥 (一整行, ssh-ed25519 / ssh-rsa / ecdsa- 开头; 输入 0 返回):"
-  read -r k || return 1
-  [[ $k == 0 ]] && return 0
+  read -r -p "公钥: " k || return 0
   k=$(printf '%s' "$k" | tr -d '\r')
   [[ -n $k ]] || return 1
   [[ $k == *PRIVATE* ]] && { err "这是私钥! 只能粘贴公钥 (.pub 里的内容)"; return 1; }
