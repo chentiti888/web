@@ -18,8 +18,9 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="2.6"
+WSM_VER="2.6.1"
 # CHANGELOG-BEGIN  (更新时会显示比当前版本新的条目, 新的写在最上面)
+# v2.6.1 异地备份添加服务器时检测密钥登录, 对方关闭了密钥登录可一键帮忙开启; SSH 安全菜单会自动打开被关闭的密钥登录
 # v2.6 全量备份/一键搬家/定时异地备份(谷歌网盘、其他服务器); Telegram 告警; Swap 管理; CF 真实IP对所有站点生效; 防CC不再限速 Xboard 后台; 自动修复旧版 Debian 软件源; 更新时显示更新内容, 更新失败自动回滚; 日志过大提醒
 # v2.5.1 生成的 SSH 私钥保存到 /root/ssh-key/ 方便下载
 # v2.5 SSH 安全: 密钥登录 / 关闭密码登录 / 改端口; 移除 Fail2ban
@@ -4635,8 +4636,15 @@ fb_gdrive_add() {
   fb_target_set "$name" "$folder"
 }
 
+FB_REMOTE_PUBKEY_FIX='f=/etc/ssh/sshd_config; if grep -qE "^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config.d/" $f; then mkdir -p /etc/ssh/sshd_config.d; echo "PubkeyAuthentication yes" > /etc/ssh/sshd_config.d/00-wsm-pubkey.conf; else cp -a $f $f.wsm-bak; sed -i "1i PubkeyAuthentication yes" $f; fi; if sshd -t; then systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || service ssh reload; echo WSM_FIX_OK; fi'
+
+fb_ssh_keytest() {  # fb_ssh_keytest 主机 端口 用户 : 能否用备份密钥免密登录
+  ssh -p "$2" -i "$FB_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o PreferredAuthentications=publickey \
+      -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "$3@$1" true 2>/dev/null
+}
+
 fb_srv_add() {
-  local name host port user dir m
+  local name host port user dir m out
   fb_rclone_ensure || return 1
   read -r -p "给这台服务器起个名字 [srv1]: " name || return 1
   name=${name:-srv1}; fb_name_ok "$name" || return 1
@@ -4668,6 +4676,21 @@ fb_srv_add() {
     cat "$FB_KEY.pub"
     echo
     read -r -p "装好后按回车继续..." _ || return 1
+  fi
+  info "检查密钥登录 ..."
+  if ! fb_ssh_keytest "$host" "$port" "$user"; then
+    warn "对方服务器不接受密钥登录 (多半是 SSH 设置里关闭了 PubkeyAuthentication)"
+    if confirm "帮你在对方服务器开启密钥登录? (需要再输入一次对方密码)" y; then
+      out=$(ssh -p "$port" -o StrictHostKeyChecking=accept-new "$user@$host" "$FB_REMOTE_PUBKEY_FIX" 2>&1)
+      [[ $out == *WSM_FIX_OK* ]] || { err "开启失败:"; printf '%s\n' "$out" | tail -3 >&2; return 1; }
+      sleep 1
+      fb_ssh_keytest "$host" "$port" "$user" || { err "已开启但还是登录不了, 请检查对方 SSH 设置 (AuthorizedKeysFile / PermitRootLogin)"; return 1; }
+      info "对方服务器已开启密钥登录"
+    else
+      echo "  可以在对方服务器上手动执行:"
+      echo '  echo "PubkeyAuthentication yes" > /etc/ssh/sshd_config.d/00-wsm-pubkey.conf && systemctl reload ssh'
+      return 1
+    fi
   fi
   printf 'type = sftp\nhost = %s\nuser = %s\nport = %s\nkey_file = %s\nshell_type = unix\nmd5sum_command = md5sum\nsha1sum_command = sha1sum\n' \
     "$host" "$user" "$port" "$FB_KEY" | fb_rclone_add "$name" || return 1
@@ -5241,6 +5264,7 @@ ssh_apply() {  # ssh_apply 关闭密码(0|1) 端口(空或22=默认)
   [[ -f $SSH_MAIN ]] || { err "找不到 $SSH_MAIN"; return 1; }
   command -v sshd >/dev/null 2>&1 || { err "没有找到 sshd"; return 1; }
   [[ $port == 22 ]] && port=""
+  body+=("PubkeyAuthentication yes")
   if [[ $nopass == 1 ]]; then
     body+=("PasswordAuthentication no" "ChallengeResponseAuthentication no" "PermitRootLogin prohibit-password")
   fi
@@ -5276,7 +5300,14 @@ ssh_apply() {  # ssh_apply 关闭密码(0|1) 端口(空或22=默认)
   ssh_reload
 }
 
+ssh_pubkey_ensure() {  # 系统关闭了密钥登录时自动打开 (不然加了公钥也用不了)
+  [[ $(ssh_eff pubkeyauthentication) == no ]] || return 0
+  ssh_apply "$([[ $(ssh_wsm_get PasswordAuthentication) == no ]] && echo 1 || echo 0)" "$(ssh_wsm_get Port)" \
+    && info "检测到 SSH 关闭了密钥登录, 已自动打开"
+}
+
 ssh_ak_prepare() {
+  ssh_pubkey_ensure
   mkdir -p /root/.ssh; chmod 700 /root/.ssh
   touch "$SSH_AK"; chmod 600 "$SSH_AK"
   [[ -s $SSH_AK && -n $(tail -c1 "$SSH_AK") ]] && echo >> "$SSH_AK"
