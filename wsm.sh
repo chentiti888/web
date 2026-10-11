@@ -18,8 +18,9 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="2.6.2"
+WSM_VER="2.6.3"
 # CHANGELOG-BEGIN  (更新时会显示比当前版本新的条目, 新的写在最上面)
+# v2.6.3 所有选择列表都有 0) 返回, 不会再误删; 输入名字/路径时可输入 0 返回; 远程名称必须字母开头
 # v2.6.2 添加异地目标失败时自动清理残留配置; 同名旧配置可直接覆盖
 # v2.6.1 异地备份添加服务器时检测密钥登录, 对方关闭了密钥登录可一键帮忙开启; SSH 安全菜单会自动打开被关闭的密钥登录
 # v2.6 全量备份/一键搬家/定时异地备份(谷歌网盘、其他服务器); Telegram 告警; Swap 管理; CF 真实IP对所有站点生效; 防CC不再限速 Xboard 后台; 自动修复旧版 Debian 软件源; 更新时显示更新内容, 更新失败自动回滚; 日志过大提醒
@@ -77,15 +78,18 @@ ask() {  # ask 变量名 "提示" "默认值"  (变量已有值则跳过)
   printf -v "$__v" '%s' "$__in"
 }
 
-choose() {  # choose 结果变量 "标题" 选项1 选项2 ...   (数字选择, 默认第1项)
+choose() {  # choose 结果变量 "标题" 选项1 选项2 ...   (数字选择, 默认第1项; 0 = 返回, 返回值 1)
   local __var=$1 __title=$2; shift 2
   local -a __items=("$@")
-  local __i __c
+  local __i __c __last
+  __last=${__items[${#__items[@]}-1]}
   echo "$__title"
   for __i in "${!__items[@]}"; do printf "   %d) %s\n" $((__i + 1)) "${__items[__i]}"; done
+  [[ $__last == 返回* ]] || echo "   0) 返回"
   while true; do
     read -r -p "请选择 [1]: " __c || return 1
     __c=${__c:-1}
+    [[ $__c == 0 || $__c == q ]] && return 1
     if [[ $__c =~ ^[0-9]+$ ]] && ((__c >= 1 && __c <= ${#__items[@]})); then
       printf -v "$__var" '%s' "${__items[__c - 1]}"
       return 0
@@ -4283,7 +4287,8 @@ tg_setup() {
   local tok chat c out
   echo "1. 在 Telegram 找 @BotFather, 发 /newbot 新建一个机器人, 复制它给的 token"
   echo "   (建议新建一个专门告警用的, 不要用正在跑程序的机器人)"
-  read -r -p "2. 粘贴 token: " tok || return 1
+  read -r -p "2. 粘贴 token (输入 0 返回): " tok || return 1
+  [[ $tok == 0 ]] && return 1
   tok=${tok//[[:space:]]/}
   [[ $tok =~ ^[0-9]+:[A-Za-z0-9_-]{30,}$ ]] || { err "token 格式不对"; return 1; }
   out=$(curl -fsS --max-time 15 "https://api.telegram.org/bot$tok/getMe" 2>/dev/null)
@@ -4331,7 +4336,8 @@ tg_units_menu() {
       echo "发现: $cand"
       confirm "全部加入监控?" y && { TG_UNITS="${TG_UNITS:+$TG_UNITS }${cand% }"; tg_save; info "已加入"; } ;;
     手动*)
-      read -r -p "服务名 (如 okbot): " u || return 0
+      read -r -p "服务名 (如 okbot, 输入 0 返回): " u || return 0
+      [[ $u == 0 || -z $u ]] && return 0
       u=${u%.service}
       unit_exists "$u" || { err "没有这个服务: $u"; return 1; }
       [[ " $TG_UNITS " == *" $u "* ]] || { TG_UNITS="${TG_UNITS:+$TG_UNITS }$u"; tg_save; }
@@ -4569,7 +4575,7 @@ fb_rclone_add() {  # fb_rclone_add 名称 < 配置内容 (key = value 行)
 }
 
 fb_name_ok() {  # 远程名称: 字母数字横线; 同名的旧配置没在用就可以覆盖
-  [[ $1 =~ ^[A-Za-z0-9_-]{1,30}$ ]] || { err "名称只能用字母数字 _ -"; return 1; }
+  [[ $1 =~ ^[A-Za-z][A-Za-z0-9_-]{0,29}$ ]] || { err "名称要以字母开头, 只能用字母数字 _ -"; return 1; }
   rclone listremotes 2>/dev/null | grep -qx "$1:" || return 0
   fb_load
   if [[ " $FB_TARGETS " == *" $1:"* ]]; then err "名称 $1 正在作为备份目标使用, 请换个名字"; return 1; fi
@@ -4594,7 +4600,8 @@ fb_target_set() {  # fb_target_set 远程名 目录 : 测试并加入异地目�
 fb_gdrive_add() {
   local name folder log pid i url gurl cb token m
   fb_rclone_ensure || return 1
-  read -r -p "给这个网盘起个名字 [gdrive]: " name || return 1
+  read -r -p "给这个网盘起个名字 [gdrive] (输入 0 返回): " name || return 1
+  [[ $name == 0 ]] && return 1
   name=${name:-gdrive}; fb_name_ok "$name" || return 1
   read -r -p "网盘里的备份文件夹 [wsm-backup]: " folder || return 1
   folder=${folder:-wsm-backup}; folder=${folder#/}
@@ -4653,7 +4660,8 @@ fb_ssh_keytest() {  # fb_ssh_keytest 主机 端口 用户 : 能否用备份密�
 fb_srv_add() {
   local name host port user dir m out
   fb_rclone_ensure || return 1
-  read -r -p "给这台服务器起个名字 [srv1]: " name || return 1
+  read -r -p "给这台服务器起个名字 [srv1] (输入 0 返回): " name || return 1
+  [[ $name == 0 ]] && return 1
   name=${name:-srv1}; fb_name_ok "$name" || return 1
   read -r -p "服务器 IP 或域名: " host || return 1
   [[ $host =~ ^[A-Za-z0-9.:-]+$ ]] || { err "地址格式不对"; return 1; }
@@ -4711,7 +4719,9 @@ fb_target_del() {
   read -r -a arr <<<"$FB_TARGETS"
   ((${#arr[@]})) || { warn "还没有异地目标"; return 0; }
   choose c "移除哪个?" "${arr[@]}" || return 0
+  confirm "确认移除 $c ?" n || return 0
   local keep=""
+  rclone config delete "${c%%:*}" >/dev/null 2>&1
   for t in "${arr[@]}"; do [[ $t == "$c" ]] || keep="${keep:+$keep }$t"; done
   FB_TARGETS=$keep; fb_save
   info "已移除 $c (网盘/服务器上已有的备份不会删除)"
@@ -4794,7 +4804,8 @@ fb_extra_menu() {
           mkdir -p "$WSM_DIR"; printf '%s\n' "${cand[@]}" >> "$FB_EXTRA"; info "已加入"
         fi ;;
       手动*)
-        read -r -p "完整路径 (如 /root/mybot): " p || continue
+        read -r -p "完整路径 (如 /root/mybot, 输入 0 返回): " p || continue
+        [[ $p == 0 || -z $p ]] && continue
         [[ $p == /* && $p != / && -e $p ]] || { warn "路径不存在或不是完整路径"; continue; }
         [[ " ${cur[*]:-} " == *" $p "* ]] && { warn "已经有了"; continue; }
         mkdir -p "$WSM_DIR"; echo "$p" >> "$FB_EXTRA"; info "已加入" ;;
@@ -5365,8 +5376,9 @@ ssh_key_files_del() {  # 删除服务器上留存的私钥文件 (公钥不受�
 
 ssh_key_add() {
   local k
-  echo "粘贴公钥 (一整行, ssh-ed25519 / ssh-rsa / ecdsa- 开头):"
+  echo "粘贴公钥 (一整行, ssh-ed25519 / ssh-rsa / ecdsa- 开头; 输入 0 返回):"
   read -r k || return 1
+  [[ $k == 0 ]] && return 0
   k=$(printf '%s' "$k" | tr -d '\r')
   [[ -n $k ]] || return 1
   [[ $k == *PRIVATE* ]] && { err "这是私钥! 只能粘贴公钥 (.pub 里的内容)"; return 1; }
@@ -5441,7 +5453,8 @@ ssh_port_change() {
   old=$(sftp_port)
   [[ $(ssh_wsm_get PasswordAuthentication) == no ]] && nopass=1
   echo "当前 SSH 端口: $old"
-  read -r -p "新端口 (1024-65535, 输入 22 恢复默认): " new || return 1
+  read -r -p "新端口 (1024-65535, 22 恢复默认, 0 返回): " new || return 1
+  [[ $new == 0 || -z $new ]] && return 0
   if ! [[ $new =~ ^[0-9]+$ ]] || { [[ $new != 22 ]] && ((new < 1024 || new > 65535)); }; then
     err "端口不合法"; return 1
   fi
