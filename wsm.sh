@@ -18,7 +18,13 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="2.5.1"
+WSM_VER="2.6"
+# CHANGELOG-BEGIN  (更新时会显示比当前版本新的条目, 新的写在最上面)
+# v2.6 全量备份/一键搬家/定时异地备份(谷歌网盘、其他服务器); Telegram 告警; Swap 管理; CF 真实IP对所有站点生效; 防CC不再限速 Xboard 后台; 自动修复旧版 Debian 软件源; 更新时显示更新内容, 更新失败自动回滚; 日志过大提醒
+# v2.5.1 生成的 SSH 私钥保存到 /root/ssh-key/ 方便下载
+# v2.5 SSH 安全: 密钥登录 / 关闭密码登录 / 改端口; 移除 Fail2ban
+# v2.4 源站保护: 80/443 只允许 Cloudflare
+# CHANGELOG-END
 WSM_DIR=/etc/wsm
 META_DIR=$WSM_DIR/sites
 CERT_DIR=$WSM_DIR/certs
@@ -179,6 +185,7 @@ ini_set_kv() {  # ini_set_kv 文件 键 值
 
 add_php_repo() {
   [[ $PM == apt ]] || return 0
+  apt_fix_sources
   if [[ $OS_ID == ubuntu ]]; then
     if ! ls /etc/apt/sources.list.d/ 2>/dev/null | grep -qi ondrej; then
       pkg_install software-properties-common
@@ -246,6 +253,49 @@ EOF
   info "PHP $v 就绪 (socket: $(php_sock "$v"))"
 }
 
+# ---------------- 旧版 Debian 软件源修复 (Debian 9/10/11)
+# 1. backports 源已下线, 注释掉   2. Debian 11 安全源正确写法是 bullseye-security
+# 3. 版本已被移到归档站 (deb.debian.org 上没有了) 时, 改用 archive.debian.org
+APT_DIR=/etc/apt
+APT_FIXED=0
+
+apt_fix_sources() {
+  [[ $PM == apt && ${OS_ID:-} == debian && $APT_FIXED == 0 ]] || return 0
+  APT_FIXED=1
+  local code=${OS_CODENAME:-} f sec changed=0
+  [[ $code =~ ^(stretch|buster|bullseye)$ ]] || return 0
+  for f in "$APT_DIR/sources.list" "$APT_DIR"/sources.list.d/*.list; do
+    [[ -f $f ]] || continue
+    if grep -qE "^[[:space:]]*deb(-src)?[[:space:]].*[[:space:]]${code}-backports([[:space:]]|$)" "$f"; then
+      sed -i -E "/^[[:space:]]*deb(-src)?[[:space:]].*[[:space:]]${code}-backports([[:space:]]|$)/s/^/# wsm-disabled: /" "$f"; changed=1
+    fi
+    if [[ $code == bullseye ]] && grep -qE '[[:space:]]bullseye/updates([[:space:]]|$)' "$f"; then
+      sed -i -E 's#^([[:space:]]*deb(-src)?[[:space:]]+(\[[^]]*\][[:space:]]+)?)[a-z]+://[^[:space:]]+[[:space:]]+bullseye/updates#\1http://security.debian.org/debian-security bullseye-security#' "$f"
+      changed=1
+    fi
+  done
+  # 是否已归档: 官方源上没有这个版本了
+  if ! curl -fsI --max-time 10 "http://deb.debian.org/debian/dists/$code/Release" >/dev/null 2>&1 \
+     && curl -fsI --max-time 10 "http://archive.debian.org/debian/dists/$code/Release" >/dev/null 2>&1; then
+    [[ -f $APT_DIR/sources.list.wsm-bak ]] || cp -a "$APT_DIR/sources.list" "$APT_DIR/sources.list.wsm-bak" 2>/dev/null
+    [[ $code == bullseye ]] && sec="$code-security" || sec="$code/updates"
+    {
+      echo "# managed by wsm: Debian $code 已归档, 改用 archive.debian.org (原文件: sources.list.wsm-bak)"
+      echo "deb http://archive.debian.org/debian $code main contrib non-free"
+      echo "deb http://archive.debian.org/debian-security $sec main contrib non-free"
+    } > "$APT_DIR/sources.list"
+    for f in "$APT_DIR"/sources.list.d/*.list; do
+      [[ -f $f ]] || continue
+      sed -i -E "/^[[:space:]]*deb(-src)?[[:space:]].*(\/debian\/?|\/debian-security\/?)[[:space:]]+${code}/s/^/# wsm-disabled: /" "$f"
+    done
+    echo 'Acquire::Check-Valid-Until "false";' > "$APT_DIR/apt.conf.d/99wsm-archive"
+    changed=1
+    warn "Debian $code 已停止维护并归档, 软件源已切换到 archive.debian.org (建议有空重装 Debian 12)"
+  fi
+  ((changed)) && info "已修复 Debian $code 的软件源"
+  return 0
+}
+
 # ================================================================ 基础环境
 firewall_open() {
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
@@ -268,6 +318,7 @@ selinux_tune() {
 install_base() {
   info "安装 Nginx / certbot / 常用工具 ..."
   if [[ $PM == apt ]]; then
+    apt_fix_sources
     apt-get update -y
     pkg_install nginx curl ca-certificates openssl cron certbot unzip tar gzip || die "基础软件安装失败"
     rm -f /etc/nginx/sites-enabled/default
@@ -291,6 +342,8 @@ EOF
   systemctl enable --now nginx
   nginx -t && systemctl reload nginx
   ensure_renew_cron
+  self_install >/dev/null 2>&1
+  realip_ensure
 }
 
 # ================================================================ 站点元数据
@@ -1178,6 +1231,7 @@ del_site() {
   fi
   rm -rf "$CERT_DIR/$d"
   rm -f "$AUTH_DIR/$d.htpasswd" "$META_DIR/$d.paths" "$META_DIR/$d.rewrite" "$(meta_file "$d")"
+  [[ -f $META_DIR/$d.xbpath ]] && { rm -f "$META_DIR/$d.xbpath"; guard_refresh_global; }
   nginx_reload >/dev/null 2>&1
   if [[ -n $ROOT && -d $ROOT ]] && confirm "同时删除网站目录 $ROOT ?" n; then rm -rf -- "$ROOT"; fi
   info "已删除 $d"
@@ -1523,25 +1577,34 @@ guard_cf_ranges() {  # 输出 Cloudflare 回源 IP 段 (先在线获取, 失败�
   printf '%s\n%s\n' "$v4" "$v6" | tr ' ' '\n' | grep -v '^$'
 }
 
-guard_write_global() {  # guard_write_global [noreal]  写全局规则文件
-  local r
+guard_xb_skip_lines() {  # 各 Xboard 站点的后台路径和后台接口 (不限速)
+  local f p
+  for f in "$META_DIR"/*.xbpath; do
+    [[ -s $f ]] || continue
+    p=$(head -1 "$f")
+    [[ $p =~ ^[A-Za-z0-9_-]{4,64}$ ]] || continue
+    printf '    "~^/api/v2/%s/"   1;\n' "$p"
+    printf '    "~^/%s/?(\\?|$)"   1;\n' "$p"
+  done
+  return 0
+}
+
+guard_write_global() {  # 写全局规则文件到 $GUARD_CONF.tmp (真实 IP 在 00-wsm-realip.conf 里)
   {
     echo "# managed by wsm - 防 CC / 防恶意 bot 的公共规则 (站点开启防护后才生效)"
-    if [[ ${1:-} != noreal ]]; then
-      echo "# 站点开了 Cloudflare 橙云时, 取访客真实 IP (否则会把 Cloudflare 的 IP 当成访客)"
-      for r in $(guard_cf_ranges); do echo "set_real_ip_from $r;"; done
-      echo "real_ip_header CF-Connecting-IP;"
-    fi
     cat <<'EOF'
 
-# 不限速、不拦截的请求: Xboard 节点接口 / 订阅链接 / 静态文件
+# 不限速、不拦截的请求: Xboard 节点接口 / 订阅链接 / 后台 / 静态文件
 map $request_uri $wsm_skip {
     default 0;
     ~^/api/v[12]/server/                1;
     ~^/api/v1/client/subscribe          1;
     "~^/[A-Za-z0-9_-]+/[0-9A-Fa-f]{32}/?(\?|$)"   1;
     ~*\.(css|js|mjs|png|jpe?g|gif|svg|ico|webp|avif|woff2?|ttf|eot|map)(\?|$)   1;
-}
+EOF
+    guard_xb_skip_lines
+    echo "}"
+    cat <<'EOF'
 map $wsm_skip $wsm_key {
     1       "";
     default $binary_remote_addr;
@@ -1580,23 +1643,44 @@ EOF
   } > "$GUARD_CONF.tmp"
 }
 
-guard_ensure_global() {  # 全局文件不存在就生成并检测, 失败自动降级/回滚
+guard_ensure_global() {  # 全局文件不存在就生成并检测, 失败回滚
   [[ -f $GUARD_CONF ]] && return 0
   guard_write_global
   mv -f "$GUARD_CONF.tmp" "$GUARD_CONF"
-  if nginx -t >/dev/null 2>&1; then return 0; fi
-  # 可能已有别的 real_ip 配置冲突, 去掉真实 IP 部分再试
-  guard_write_global noreal
-  mv -f "$GUARD_CONF.tmp" "$GUARD_CONF"
-  if nginx -t >/dev/null 2>&1; then
-    warn "已存在其他「真实 IP」配置, 防护规则不再重复设置 Cloudflare 真实 IP"
-    return 0
-  fi
+  nginx -t >/dev/null 2>&1 && return 0
   nginx -t 2>&1 | tail -3 >&2
   rm -f "$GUARD_CONF"
-  err "Nginx 不支持防护规则 (缺少 limit_req / realip / map 模块?)"
+  err "Nginx 不支持防护规则 (缺少 limit_req / map 模块?)"
   return 1
 }
+
+guard_refresh_global() {  # 重新生成全局规则 (Xboard 后台路径变化后), 失败恢复旧文件
+  [[ -f $GUARD_CONF ]] || return 0
+  local bak; bak=$(mktemp); cp -f "$GUARD_CONF" "$bak"
+  guard_write_global
+  mv -f "$GUARD_CONF.tmp" "$GUARD_CONF"
+  if nginx -t >/dev/null 2>&1; then systemctl reload nginx >/dev/null 2>&1; rm -f "$bak"; return 0; fi
+  mv -f "$bak" "$GUARD_CONF"
+  err "防护规则更新失败, 已恢复原规则"; return 1
+}
+
+xb_is_site() { [[ $ROOT == */public && -f ${ROOT%/public}/artisan ]]; }  # 依赖已 load_meta
+
+xb_secure_save() {  # xb_secure_save 域名 后台路径: 记录后台路径, 变化时刷新防护白名单
+  local f=$META_DIR/$1.xbpath
+  [[ $2 =~ ^[A-Za-z0-9_-]{4,64}$ ]] || return 0
+  [[ -f $f && $(head -1 "$f") == "$2" ]] && return 0
+  echo "$2" > "$f"
+  guard_refresh_global
+}
+
+xb_secure_detect() {  # xb_secure_detect 域名: 读取 Xboard 后台路径并记录
+  ( load_meta "$1"; xb_is_site || exit 0
+    out=$(xb_php_run "${ROOT%/public}" "$(php_bin "$PHPVER")" info 2>/dev/null) || exit 1
+    sp=$(printf '%s\n' "$out" | sed -n 's/^SECURE=//p')
+    [[ -n $sp ]] && xb_secure_save "$1" "$sp" )
+}
+
 
 guard_server_lines() {  # 输出站点配置里的防护指令 (依赖 load_meta)
   [[ ${GUARD:-0} == 1 ]] || return 0
@@ -1628,6 +1712,7 @@ guard_set() {  # guard_set 域名 on|off
   load_meta "$1"
   if [[ $2 == on ]]; then
     guard_ensure_global || return 1
+    xb_is_site && { xb_secure_detect "$1" || warn "没读到 Xboard 后台路径, 后台可能会被限速"; }
     GUARD=1
   else
     GUARD=0
@@ -1652,10 +1737,9 @@ guard_menu() {  # guard_menu 域名
     echo "   - 拦截扫描器/攻击工具和高频采集爬虫, 正常搜索引擎不受影响"
     echo "   - 拦截扫描 .env / .git / 备份文件 等敏感文件的请求"
     echo "   - 限制同一个 IP 的请求速度, 防 CC 和刷接口 (超出返回 429)"
-    echo "   - Xboard 的节点通信接口、订阅链接、图片/JS/CSS 等静态文件不受影响"
-    echo "   - 站点用 Cloudflare 橙云时自动识别访客真实 IP"
+    echo "   - Xboard 的节点接口、订阅链接、后台、静态文件不受影响"
     choose c "操作:" "$([[ ${GUARD:-0} == 1 ]] && echo 关闭防护 || echo 开启防护)" "调整强度" \
-      "查看拦截记录" "返回" || return 0
+      "查看拦截记录" "刷新 Xboard 后台白名单" "返回" || return 0
     case $c in
       开启防护) guard_set "$d" on ;;
       关闭防护) guard_set "$d" off ;;
@@ -1666,6 +1750,9 @@ guard_menu() {  # guard_menu 域名
         apply_site && info "强度已改为: $(guard_level_name "$GUARD_LEVEL")"
         ;;
       查看拦截记录) guard_log "$d"; pause ;;
+      刷新*)
+        if xb_is_site; then xb_secure_detect "$d" && info "已刷新 (后台改了路径后用这个)"
+        else warn "这不是 Xboard 站点"; fi ;;
       *) return 0 ;;
     esac
   done
@@ -2413,6 +2500,73 @@ cmd_install() {
   warn "云服务器请在安全组放行 80 / 443 端口"
 }
 
+# ---------------- Swap (虚拟内存)
+# 小内存 VPS 内存吃紧时, 没有 Swap 的话 MariaDB 最容易被系统杀掉
+SWAP_FILE=/swapfile
+SWAP_SYSCTL=/etc/sysctl.d/99-wsm-swap.conf
+
+swap_total() { free -m | awk '/^Swap:/{print $2+0}'; }
+swap_state() { local t; t=$(swap_total); ((t > 0)) && echo "${t}MB" || echo "无"; }
+
+swap_create() {
+  local mem def size avail ok=0
+  mem=$(free -m | awk '/^Mem:/{print $2+0}')
+  if ((mem <= 1024)); then def=1024; elif ((mem <= 4096)); then def=2048; else def=4096; fi
+  echo "  内存 ${mem}MB, 建议 Swap ${def}MB"
+  read -r -p "Swap 大小 (MB) [$def]: " size || return 1
+  size=${size:-$def}
+  [[ $size =~ ^[0-9]+$ ]] && ((size >= 256 && size <= 32768)) || { err "请输入 256-32768"; return 1; }
+  if swapon --show=NAME --noheadings 2>/dev/null | grep -qx "$SWAP_FILE"; then
+    info "关闭旧的 $SWAP_FILE ..."
+    swapoff "$SWAP_FILE" || { err "关闭旧 Swap 失败 (内存可能不够腾出来)"; return 1; }
+  fi
+  rm -f "$SWAP_FILE"
+  avail=$(df -Pm / | awk 'NR==2{print $4}')
+  ((avail > size + 1024)) || { err "磁盘剩余 ${avail}MB, 不够创建 ${size}MB 的 Swap"; return 1; }
+  info "创建 ${size}MB Swap ..."
+  if fallocate -l "${size}M" "$SWAP_FILE" 2>/dev/null; then
+    chmod 600 "$SWAP_FILE"
+    mkswap "$SWAP_FILE" >/dev/null 2>&1 && swapon "$SWAP_FILE" 2>/dev/null && ok=1
+  fi
+  if ((ok == 0)); then  # 部分文件系统不支持 fallocate 的 swap, 改用 dd
+    swapoff "$SWAP_FILE" 2>/dev/null; rm -f "$SWAP_FILE"
+    dd if=/dev/zero of="$SWAP_FILE" bs=1M count="$size" status=none 2>/dev/null && chmod 600 "$SWAP_FILE" \
+      && mkswap "$SWAP_FILE" >/dev/null 2>&1 && swapon "$SWAP_FILE" 2>/dev/null && ok=1
+  fi
+  if ((ok == 0)); then
+    rm -f "$SWAP_FILE"
+    err "创建失败: 这台 VPS 可能不允许 Swap (OpenVZ / LXC 容器常见)"; return 1
+  fi
+  grep -q "^$SWAP_FILE " /etc/fstab || echo "$SWAP_FILE none swap sw 0 0" >> /etc/fstab
+  echo "vm.swappiness = 10" > "$SWAP_SYSCTL"
+  sysctl -q -w vm.swappiness=10 >/dev/null 2>&1
+  info "Swap 已开启: ${size}MB (开机自动挂载, 只在内存不够时使用)"
+}
+
+swap_remove() {
+  grep -q "^$SWAP_FILE " /etc/fstab 2>/dev/null || [[ -f $SWAP_FILE ]] || { warn "没有找到 wsm 创建的 Swap ($SWAP_FILE)"; return 0; }
+  confirm "删除 $SWAP_FILE ?" n || return 0
+  swapoff "$SWAP_FILE" 2>/dev/null
+  rm -f "$SWAP_FILE" "$SWAP_SYSCTL"
+  sed -i "\\|^$SWAP_FILE |d" /etc/fstab
+  info "已删除 Swap"
+}
+
+swap_menu() {
+  local c
+  while true; do
+    title "Swap 虚拟内存"
+    free -m | awk 'NR==1{print "              " $1 "   " $2 "    " $3} /^(Mem|Swap):/{printf "  %-6s %8sMB %7sMB %7sMB\n", $1, $2, $3, $4}'
+    echo "  swappiness: $(cat /proc/sys/vm/swappiness 2>/dev/null) (越小越少用 Swap, 建议 10)"
+    choose c "操作:" "创建 / 调整大小" "删除" "返回" || return 0
+    case $c in
+      创建*) (swap_create); pause ;;
+      删除) (swap_remove); pause ;;
+      *) return 0 ;;
+    esac
+  done
+}
+
 # ================================================================ 软件商店
 APP_IDS=(nodejs pm2 python java git composer supervisor
          mariadb postgresql redis memcached phpmyadmin
@@ -2504,7 +2658,7 @@ app_service() {  # 输出该软件对应的 systemd 服务名(没有则为空)
 app_valid() { local x; for x in "${APP_IDS[@]}"; do [[ $x == "$1" ]] && return 0; done; return 1; }
 
 pkg_refresh() {
-  if [[ $PM == apt && -z ${PKG_REFRESHED:-} ]]; then apt-get update -y >/dev/null 2>&1; PKG_REFRESHED=1; fi
+  if [[ $PM == apt && -z ${PKG_REFRESHED:-} ]]; then apt_fix_sources; apt-get update -y >/dev/null 2>&1; PKG_REFRESHED=1; fi
   return 0
 }
 pkg_remove() {
@@ -3221,6 +3375,7 @@ PHP
   scheme=http; [[ $SSL == 1 ]] && scheme=https
   xb_env_set "$app/.env" APP_URL "$scheme://$domain"
   xb_services "$domain" "$app" "$v"
+  xb_secure_save "$domain" "$secure"
   if confirm "开启防 CC / 防恶意 bot 吗? (节点接口和订阅链接不受影响)" y; then
     guard_set "$domain" on || warn "防护没开成功, 以后可在 [站点设置] 里开启"
   fi
@@ -3363,6 +3518,7 @@ xb_info() {  # xb_info [域名]: 查看后台地址/管理员, 重置管理员�
   while true; do
     out=$(xb_php_run "$app" "$php" info) || { printf '%s\n' "$out" | tail -5; err "读取失败 (数据库或 Redis 没启动?)"; return 1; }
     secure=$(printf '%s\n' "$out" | sed -n 's/^SECURE=//p')
+    [[ -n $secure ]] && xb_secure_save "$DOMAIN" "$secure"
     mapfile -t admins < <(printf '%s\n' "$out" | sed -n 's/^ADMIN=//p')
     title "Xboard 后台信息 · $DOMAIN"
     echo "  后台地址: $scheme://$DOMAIN/$secure"
@@ -3865,6 +4021,24 @@ UPDATE_DEFAULT_URL="https://raw.githubusercontent.com/chentiti888/web/main/wsm.s
 UPDATE_URL=""
 UPDATED=0
 UPD_TMP=""
+SELF_LAST_BAK=""
+
+update_changes() {  # update_changes 新脚本 : 显示比当前版本新的更新内容
+  local v rest n=0
+  while read -r v rest; do
+    [[ $v == "$WSM_VER" ]] && break
+    echo "  ${G}v$v${N}"
+    printf '%s\n' "$rest" | tr ';' '\n' | sed 's/^ *//; /^$/d; s/^/    - /'
+    n=$((n + 1)); ((n >= 8)) && break
+  done < <(sed -n '/^# CHANGELOG-BEGIN/,/^# CHANGELOG-END/p' "$1" | sed -n 's/^# v//p')
+  return 0
+}
+
+update_selftest() {  # 新脚本装好后能不能正常运行
+  local out
+  out=$(timeout 30 bash "$WSM_BIN" version 2>/dev/null) || return 1
+  [[ $out == "$1" ]]
+}
 
 update_load() { UPDATE_URL=""; [[ -f $UPDATE_CONF ]] && source "$UPDATE_CONF"; UPDATE_URL=${UPDATE_URL:-$UPDATE_DEFAULT_URL}; return 0; }
 
@@ -3910,9 +4084,13 @@ update_fetch() {  # -> UPD_TMP
   fi
 }
 
-update_install_file() {  # update_install_file 新文件 : 备份当前版本并替换
+update_install_file() {  # update_install_file 新文件 : 备份当前版本并替换 (-> SELF_LAST_BAK)
   mkdir -p "$SELF_BAK"
-  [[ -f $WSM_BIN ]] && cp -a "$WSM_BIN" "$SELF_BAK/wsm.v${WSM_VER}.$(date +%Y%m%d_%H%M%S).sh"
+  SELF_LAST_BAK=""
+  if [[ -f $WSM_BIN ]]; then
+    SELF_LAST_BAK="$SELF_BAK/wsm.v${WSM_VER}.$(date +%Y%m%d_%H%M%S).sh"
+    cp -a "$WSM_BIN" "$SELF_LAST_BAK"
+  fi
   # shellcheck disable=SC2012
   ls -1t "$SELF_BAK"/wsm.v*.sh 2>/dev/null | tail -n +6 | xargs -r rm -f
   install -m 755 "$1" "$WSM_BIN.new" && mv -f "$WSM_BIN.new" "$WSM_BIN"
@@ -3930,9 +4108,19 @@ update_run() {  # update_run [-y]
   fi
   vnew=$(sed -n 's/^WSM_VER="\(.*\)".*/\1/p' "$UPD_TMP" | head -1)
   echo "  当前: v$WSM_VER   仓库: v${vnew:-?}"
+  if grep -q '^# CHANGELOG-BEGIN' "$UPD_TMP"; then echo "  更新内容:"; update_changes "$UPD_TMP"; fi
   if [[ $yes != -y ]]; then confirm "现在更新?" y || { rm -f "$UPD_TMP"; return 0; }; fi
   update_install_file "$UPD_TMP" || { rm -f "$UPD_TMP"; err "写入失败"; return 1; }
   rm -f "$UPD_TMP"
+  if [[ -n $vnew ]] && ! update_selftest "$vnew"; then
+    if [[ -n $SELF_LAST_BAK && -f $SELF_LAST_BAK ]]; then
+      install -m 755 "$SELF_LAST_BAK" "$WSM_BIN"
+      err "新版本运行自检没通过, 已自动回滚到 v$WSM_VER"
+    else
+      err "新版本运行自检没通过, 请检查"
+    fi
+    return 1
+  fi
   UPDATED=1
   info "已更新到 v${vnew:-?} (旧版本已备份, 可在 [更新脚本] 里回滚)"
 }
@@ -3971,6 +4159,817 @@ update_menu() {
 }
 
 # ================================================================ 菜单
+# ================================================================ Telegram 告警
+# 每 5 分钟检查一次 (cron, 跑完就退出, 不常驻):
+#   服务挂了先自动重启, 重启好了/没好/恢复 都发消息; 磁盘快满; 证书快到期 (每天最多一次); 全量备份结果
+# 同一个问题只提醒一次, 恢复后再发一条, 不刷屏
+TG_CONF=$WSM_DIR/telegram.conf
+TG_STATE=$WSM_DIR/monitor.state
+TG_CRON=/etc/cron.d/wsm-monitor
+TG_TOKEN=""; TG_CHAT=""; TG_ON_BACKUP=1; TG_DISK=90; TG_CERT_DAYS=10; TG_UNITS=""
+declare -A MON=()
+
+tg_load() {
+  TG_TOKEN=""; TG_CHAT=""; TG_ON_BACKUP=1; TG_DISK=90; TG_CERT_DAYS=10; TG_UNITS=""
+  # shellcheck disable=SC1090
+  [[ -f $TG_CONF ]] && source "$TG_CONF"
+  return 0
+}
+
+tg_save() {
+  mkdir -p "$WSM_DIR"
+  {
+    printf 'TG_TOKEN=%q\n' "$TG_TOKEN"; printf 'TG_CHAT=%q\n' "$TG_CHAT"
+    printf 'TG_ON_BACKUP=%q\n' "$TG_ON_BACKUP"; printf 'TG_DISK=%q\n' "$TG_DISK"
+    printf 'TG_CERT_DAYS=%q\n' "$TG_CERT_DAYS"; printf 'TG_UNITS=%q\n' "$TG_UNITS"
+  } > "$TG_CONF"
+  chmod 600 "$TG_CONF"
+}
+
+tg_ready() { tg_load; [[ -n $TG_TOKEN && -n $TG_CHAT ]]; }
+
+tg_send() {  # tg_send 文本
+  tg_ready || return 1
+  local ip=${SERVER_IP:-}
+  [[ -n $ip ]] || ip=$(public_ip)
+  curl -fsS --max-time 15 -o /dev/null "https://api.telegram.org/bot$TG_TOKEN/sendMessage" \
+    --data-urlencode "chat_id=$TG_CHAT" --data-urlencode "disable_web_page_preview=true" \
+    --data-urlencode "text=[$(fb_host)${ip:+ $ip}]
+$1"
+}
+
+tg_event() {  # tg_event 类型 文本 (backup 类型受开关控制)
+  tg_ready || return 0
+  [[ $1 == backup && $TG_ON_BACKUP != 1 ]] && return 0
+  tg_send "$2" || true
+}
+
+mon_state_load() {
+  MON=()
+  local k v
+  [[ -f $TG_STATE ]] || return 0
+  while read -r k v; do [[ -n $k ]] && MON[$k]=$v; done < "$TG_STATE"
+}
+
+mon_state_save() {
+  local k
+  for k in "${!MON[@]}"; do printf '%s %s\n' "$k" "${MON[$k]}"; done > "$TG_STATE"
+}
+
+mon_units() {  # 需要监控的服务 (只看开机自启的)
+  local u v f
+  for u in nginx mariadb redis-server redis; do
+    unit_exists "$u" && systemctl is-enabled --quiet "$u" 2>/dev/null && echo "$u"
+  done
+  for v in $(php_installed); do
+    u=$(php_svc "$v"); systemctl is-enabled --quiet "$u" 2>/dev/null && echo "$u"
+  done
+  for f in /etc/systemd/system/xboard-*.service; do
+    [[ -f $f ]] || continue
+    u=${f##*/}; u=${u%.service}
+    systemctl is-enabled --quiet "$u" 2>/dev/null && echo "$u"
+  done
+  for u in $TG_UNITS; do unit_exists "$u" && echo "$u"; done
+  return 0
+}
+
+mon_check() {  # 定时任务: wsm monitor
+  tg_ready || return 0
+  exec 8>/run/wsm-monitor.lock
+  flock -n 8 || return 0
+  mon_state_load
+  local u pct d days today msgs=() certs=""
+  for u in $(mon_units | sort -u); do
+    if systemctl is-active --quiet "$u"; then
+      if [[ ${MON[svc_$u]:-ok} == down ]]; then msgs+=("✅ $u 已恢复运行"); fi
+      MON[svc_$u]=ok
+      continue
+    fi
+    systemctl restart "$u" >/dev/null 2>&1; sleep 5
+    if systemctl is-active --quiet "$u"; then
+      msgs+=("⚠️ $u 停止运行, 已自动重启恢复")
+      MON[svc_$u]=ok
+    elif [[ ${MON[svc_$u]:-ok} != down ]]; then
+      msgs+=("🔴 $u 停止运行, 自动重启失败! 请尽快登录处理
+$(journalctl -u "$u" -n 3 --no-pager -o cat 2>/dev/null | cut -c1-150)")
+      MON[svc_$u]=down
+    fi
+  done
+  pct=$(df -P / | awk 'NR==2{gsub("%","",$5); print $5+0}')
+  if ((pct >= TG_DISK)) && [[ ${MON[disk]:-ok} != full ]]; then
+    msgs+=("💾 磁盘已用 ${pct}%, 快满了 (超过 ${TG_DISK}%)"); MON[disk]=full
+  elif ((pct < TG_DISK - 5)) && [[ ${MON[disk]:-ok} == full ]]; then
+    msgs+=("✅ 磁盘空间恢复正常 (已用 ${pct}%)"); MON[disk]=ok
+  fi
+  today=$(date +%F)
+  if [[ ${MON[cert_day]:-} != "$today" ]]; then
+    MON[cert_day]=$today
+    while read -r d; do
+      [[ -n $d ]] || continue
+      days=$( (load_meta "$d"; [[ $SSL == 1 && $DISABLED != 1 ]] && cert_days_left) 2>/dev/null)
+      [[ -n $days ]] && ((days < TG_CERT_DAYS)) && certs+="
+  $d 剩 $days 天"
+    done < <(list_site_names)
+    [[ -n $certs ]] && msgs+=("🔐 证书快到期 (自动续期可能失败了):$certs")
+  fi
+  mon_state_save
+  if ((${#msgs[@]})); then tg_send "$(printf '%s\n' "${msgs[@]}")" || true; fi
+  return 0
+}
+
+tg_setup() {
+  local tok chat c out
+  echo "1. 在 Telegram 找 @BotFather, 发 /newbot 新建一个机器人, 复制它给的 token"
+  echo "   (建议新建一个专门告警用的, 不要用正在跑程序的机器人)"
+  read -r -p "2. 粘贴 token: " tok || return 1
+  tok=${tok//[[:space:]]/}
+  [[ $tok =~ ^[0-9]+:[A-Za-z0-9_-]{30,}$ ]] || { err "token 格式不对"; return 1; }
+  out=$(curl -fsS --max-time 15 "https://api.telegram.org/bot$tok/getMe" 2>/dev/null)
+  [[ $out == *'"ok":true'* ]] || { err "token 无效, 或服务器连不上 Telegram"; return 1; }
+  choose c "接收告警的账号:" "自动获取 (先给机器人发一条消息)" "手动填写 chat id" || return 1
+  if [[ $c == 自动* ]]; then
+    echo "3. 打开你的新机器人, 点 Start 或随便发一条消息"
+    read -r -p "   发完后按回车..." _ || return 1
+    out=$(curl -fsS --max-time 15 "https://api.telegram.org/bot$tok/getUpdates" 2>/dev/null)
+    chat=$(printf '%s' "$out" | grep -o '"chat":{"id":-\{0,1\}[0-9]*' | tail -1 | grep -o -- '-\{0,1\}[0-9]*$')
+    [[ -n $chat ]] || { err "没收到消息, 确认已经给机器人发过消息再试"; return 1; }
+  else
+    read -r -p "chat id (个人账号可以问 @userinfobot): " chat || return 1
+  fi
+  [[ $chat =~ ^-?[0-9]+$ ]] || { err "chat id 格式不对"; return 1; }
+  tg_load; TG_TOKEN=$tok; TG_CHAT=$chat; tg_save
+  if tg_send "✅ wsm 告警已连接, 有问题会在这里通知你"; then
+    info "已发送测试消息, 请在 Telegram 查看"
+  else
+    err "测试消息发送失败"; return 1
+  fi
+  [[ -x $WSM_BIN ]] || self_install
+  printf 'SHELL=/bin/bash\nPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n*/5 * * * * root %s monitor >/dev/null 2>&1\n' "$WSM_BIN" > "$TG_CRON"
+  chmod 644 "$TG_CRON"
+  info "告警已开启: 每 5 分钟检查一次"
+}
+
+tg_units_menu() {
+  local c u cand
+  tg_load
+  echo "  默认监控: Nginx / MariaDB / Redis / PHP-FPM / Xboard 队列"
+  echo "  额外监控: ${TG_UNITS:-无}"
+  choose c "操作:" "自动发现 (机器人等自定义服务)" "手动添加服务名" "清空额外监控" "返回" || return 0
+  case $c in
+    自动*)
+      cand=""
+      for u in /etc/systemd/system/*.service; do
+        [[ -f $u && ! -L $u ]] || continue
+        u=${u##*/}; u=${u%.service}
+        case $u in xboard-*|wsm-*) continue ;; esac
+        command -v dpkg >/dev/null 2>&1 && dpkg -S "/etc/systemd/system/$u.service" >/dev/null 2>&1 && continue
+        [[ " $TG_UNITS " == *" $u "* ]] || cand+="$u "
+      done
+      [[ -n $cand ]] || { info "没有发现新的"; return 0; }
+      echo "发现: $cand"
+      confirm "全部加入监控?" y && { TG_UNITS="${TG_UNITS:+$TG_UNITS }${cand% }"; tg_save; info "已加入"; } ;;
+    手动*)
+      read -r -p "服务名 (如 okbot): " u || return 0
+      u=${u%.service}
+      unit_exists "$u" || { err "没有这个服务: $u"; return 1; }
+      [[ " $TG_UNITS " == *" $u "* ]] || { TG_UNITS="${TG_UNITS:+$TG_UNITS }$u"; tg_save; }
+      info "已加入" ;;
+    清空*) TG_UNITS=""; tg_save; info "已清空" ;;
+  esac
+}
+
+tg_menu() {
+  local c v
+  while true; do
+    tg_load
+    title "Telegram 告警"
+    if [[ -n $TG_TOKEN && -n $TG_CHAT ]]; then
+      echo "  状态: $([[ -f $TG_CRON ]] && echo "${G}已开启${N} (每 5 分钟检查)" || echo "${Y}已配置, 定时检查未开启${N}")"
+      echo "  磁盘告警: ${TG_DISK}%   证书提前: ${TG_CERT_DAYS} 天   备份通知: $([[ $TG_ON_BACKUP == 1 ]] && echo 开 || echo 关)"
+    else
+      echo "  状态: 未设置"
+    fi
+    choose c "操作:" "设置机器人 (首次)" "发送测试消息" "立即检查一次" "额外监控的服务" \
+      "告警阈值" "备份结果通知 开/关" "暂停 / 恢复告警" "返回" || return 0
+    case $c in
+      设置*) (tg_setup); pause ;;
+      发送*) tg_send "🔔 测试消息, 告警正常" && info "已发送" || err "发送失败 (先设置机器人)"; pause ;;
+      立即*) (mon_check) && info "检查完成 (有问题才会发消息)"; pause ;;
+      额外*) (tg_units_menu); pause ;;
+      告警*)
+        read -r -p "磁盘使用超过多少 % 告警 [$TG_DISK]: " v || continue
+        [[ -z $v || ( $v =~ ^[0-9]+$ && $v -ge 50 && $v -le 99 ) ]] && TG_DISK=${v:-$TG_DISK}
+        read -r -p "证书剩几天时提醒 [$TG_CERT_DAYS]: " v || continue
+        [[ -z $v || ( $v =~ ^[0-9]+$ && $v -ge 1 && $v -le 60 ) ]] && TG_CERT_DAYS=${v:-$TG_CERT_DAYS}
+        tg_save; info "已保存" ;;
+      备份*) if [[ $TG_ON_BACKUP == 1 ]]; then TG_ON_BACKUP=0; else TG_ON_BACKUP=1; fi; tg_save; info "备份结果通知: $([[ $TG_ON_BACKUP == 1 ]] && echo 开 || echo 关)" ;;
+      暂停*)
+        if [[ -f $TG_CRON ]]; then rm -f "$TG_CRON"; info "已暂停定时检查"
+        elif tg_ready; then
+          [[ -x $WSM_BIN ]] || self_install
+          printf 'SHELL=/bin/bash\nPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n*/5 * * * * root %s monitor >/dev/null 2>&1\n' "$WSM_BIN" > "$TG_CRON"
+          chmod 644 "$TG_CRON"; info "已恢复定时检查"
+        else warn "先设置机器人"; fi ;;
+      *) return 0 ;;
+    esac
+  done
+}
+
+# ================================================================ 全量备份 / 搬家 / 异地备份
+# 一个备份文件 = 全部网站 + 全部数据库(含账号) + 证书 + Nginx/wsm 配置 + Xboard 服务 + 你指定的额外目录
+# 可加密; 可定时; 可自动上传到谷歌网盘 / 其他服务器 (rclone); 新服务器上一条命令还原 (搬家)
+FB_DIR=$BACKUP_DIR/full
+FB_CONF=$WSM_DIR/fullbak.conf
+FB_EXTRA=$WSM_DIR/fullbak-extra.list
+FB_CRON=/etc/cron.d/wsm-fullbak
+FB_KEY=$WSM_DIR/backup_ed25519
+FB_LOG=/var/log/wsm-fullbak.log
+FB_KEEP_LOCAL=3; FB_KEEP_REMOTE=7; FB_TARGETS=""; FB_PASS=""; FB_LAST=""
+
+fb_load() {
+  FB_KEEP_LOCAL=3; FB_KEEP_REMOTE=7; FB_TARGETS=""; FB_PASS=""
+  # shellcheck disable=SC1090
+  [[ -f $FB_CONF ]] && source "$FB_CONF"
+  return 0
+}
+
+fb_save() {
+  mkdir -p "$WSM_DIR"
+  {
+    printf 'FB_KEEP_LOCAL=%q\n' "$FB_KEEP_LOCAL"
+    printf 'FB_KEEP_REMOTE=%q\n' "$FB_KEEP_REMOTE"
+    printf 'FB_TARGETS=%q\n' "$FB_TARGETS"
+    printf 'FB_PASS=%q\n' "$FB_PASS"
+  } > "$FB_CONF"
+  chmod 600 "$FB_CONF"
+}
+
+fb_host() { local h; h=$(hostname -s 2>/dev/null); h=${h//[^A-Za-z0-9-]/_}; echo "${h:-server}"; }
+
+fb_extra_list() {  # 额外备份路径 (存在的才输出)
+  [[ -f $FB_EXTRA ]] || return 0
+  local p
+  while IFS= read -r p; do
+    [[ $p == /* && -e $p ]] && echo "$p"
+  done < "$FB_EXTRA"
+  return 0
+}
+
+fb_extra_detect() {  # 自动发现: 自定义 systemd 服务 + 它们的程序目录/配置, /root 下的 json/env
+  local f wd ef
+  {
+    for f in /etc/systemd/system/*.service; do
+      [[ -f $f && ! -L $f ]] || continue
+      case ${f##*/} in xboard-*|wsm-*) continue ;; esac
+      command -v dpkg >/dev/null 2>&1 && dpkg -S "$f" >/dev/null 2>&1 && continue
+      echo "$f"
+      wd=$(sed -n 's/^WorkingDirectory=-\{0,1\}//p' "$f" | head -1)
+      [[ -n $wd && -d $wd && $wd != / && $wd != /root && $wd != "$WWW_ROOT"* ]] && echo "$wd"
+      ef=$(sed -n 's/^EnvironmentFile=-\{0,1\}//p' "$f" | head -1)
+      [[ -n $ef && -f $ef && ( -z $wd || $ef != "$wd"/* ) ]] && echo "$ef"
+    done
+    for f in /root/*.json /root/*.env; do [[ -f $f ]] && echo "$f"; done
+  } | sort -u
+}
+
+fb_dump_users() {  # 导出数据库账号和权限 (MariaDB 10.2+)
+  local u h
+  mysql -N -e "SELECT user,host FROM mysql.user WHERE user NOT IN ('root','mysql','mariadb.sys','debian-sys-maint','')" 2>/dev/null \
+  | while read -r u h; do
+      mysql -N -e "SHOW CREATE USER '$u'@'$h'" 2>/dev/null | sed 's/^CREATE USER /CREATE USER IF NOT EXISTS /; s/$/;/'
+      mysql -N -e "SHOW GRANTS FOR '$u'@'$h'" 2>/dev/null | sed 's/$/;/'
+    done
+}
+
+fb_create() {  # fb_create [auto] : 生成全量备份 -> FB_LAST
+  fb_load
+  local mode=${1:-} ts host name stage p d need avail rc
+  local -a files=()
+  ts=$(date +%Y%m%d_%H%M%S); host=$(fb_host)
+  mkdir -p "$FB_DIR"; chmod 700 "$FB_DIR"
+  for p in "$WSM_DIR" "$WWW_ROOT" /etc/letsencrypt "$NGX_CONF" /root/.config/rclone \
+           /etc/systemd/system/xboard-*.service /etc/cron.d/xboard-* /etc/cron.d/wsm-* \
+           /etc/php/*/fpm/conf.d/99-wsm.ini /etc/opt/remi/php*/php.d/99-wsm.ini; do
+    [[ -e $p ]] && files+=("${p#/}")
+  done
+  while IFS= read -r p; do files+=("${p#/}"); done < <(fb_extra_list)
+  # 空间检查 (按未压缩大小估算)
+  need=$( (cd / && du -sk "${files[@]}" 2>/dev/null) | awk '{s+=$1} END{print s+0}')
+  avail=$(df -Pk "$FB_DIR" | awk 'NR==2{print $4}')
+  if (( avail < need / 2 + 102400 )); then
+    err "磁盘空间可能不够: 需要约 $((need / 1024))MB, 剩余 $((avail / 1024))MB"
+    [[ $mode == auto ]] && return 1
+    confirm "仍然继续?" n || return 1
+  fi
+  stage=$(mktemp -d "$FB_DIR/.tmp-XXXXXX")
+  info "打包网站和配置 (大约 $((need / 1024))MB, 请稍等) ..."
+  tar -czpf "$stage/files.tar.gz" -C / --ignore-failed-read --warning=no-file-changed \
+      --exclude='storage/logs/*.log' --exclude="${FB_DIR#/}" "${files[@]}" 2>/dev/null
+  rc=$?
+  if (( rc > 1 )); then rm -rf "$stage"; err "打包文件失败"; return 1; fi
+  if command -v mysql >/dev/null 2>&1 && mysql -e "SELECT 1" >/dev/null 2>&1; then
+    info "导出数据库 ..."
+    mkdir -p "$stage/db"
+    while read -r d; do
+      [[ -n $d ]] || continue
+      if ! mysqldump --single-transaction --routines --events --triggers --databases "$d" | gzip > "$stage/db/$d.sql.gz"; then
+        rm -rf "$stage"; err "导出数据库失败: $d"; return 1
+      fi
+    done < <(db_names)
+    fb_dump_users > "$stage/db/users.sql"
+  fi
+  [[ -s $SSH_AK ]] && cp -f "$SSH_AK" "$stage/authorized_keys"
+  {
+    printf 'FB_FORMAT=1\n'
+    printf 'FB_WSM=%q\n' "$WSM_VER"
+    printf 'FB_DATE=%q\n' "$(date '+%F %T')"
+    printf 'FB_HOST=%q\n' "$host"
+    printf 'FB_PHP=%q\n' "$(php_installed | sort -V | tr '\n' ' ')"
+    printf 'FB_REDIS=%q\n' "$( { unit_exists redis-server || unit_exists redis; } && echo 1 || echo 0)"
+    printf 'FB_SITES=%q\n' "$(list_site_names | tr '\n' ' ')"
+    printf 'FB_DBS=%q\n' "$(find "$stage/db" -name '*.sql.gz' 2>/dev/null | sed 's|.*/||; s|\.sql\.gz$||' | sort | tr '\n' ' ')"
+    printf 'FB_EXTRAS=%q\n' "$(fb_extra_list | tr '\n' ' ')"
+  } > "$stage/manifest.env"
+  name="wsm-full-${host}-${ts}.tar"
+  if ! tar -cf "$FB_DIR/$name" -C "$stage" .; then rm -rf "$stage" "${FB_DIR:?}/$name"; err "生成备份文件失败"; return 1; fi
+  rm -rf "$stage"
+  if [[ -n $FB_PASS ]]; then
+    if ! WSM_FBPASS=$FB_PASS openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:WSM_FBPASS \
+         -in "$FB_DIR/$name" -out "$FB_DIR/$name.enc"; then
+      rm -f "${FB_DIR:?}/$name" "${FB_DIR:?}/$name.enc"; err "加密失败"; return 1
+    fi
+    rm -f "${FB_DIR:?}/$name"; name="$name.enc"
+  fi
+  chmod 600 "$FB_DIR/$name"
+  FB_LAST=$FB_DIR/$name
+  # shellcheck disable=SC2012
+  ls -1t "$FB_DIR"/wsm-full-*.tar* 2>/dev/null | tail -n +$((FB_KEEP_LOCAL + 1)) | xargs -r rm -f
+  info "全量备份完成: $FB_LAST ($(du -h "$FB_LAST" | cut -f1))"
+}
+
+fb_upload() {  # fb_upload 文件 : 上传到全部异地目标, 并清理多余的旧备份; 返回失败个数
+  fb_load
+  local f=$1 t old host fails=0
+  [[ -n $FB_TARGETS ]] || return 0
+  command -v rclone >/dev/null 2>&1 || { err "没有安装 rclone, 无法上传"; return 1; }
+  host=$(fb_host)
+  for t in $FB_TARGETS; do
+    info "上传到 $t ..."
+    if rclone copy "$f" "$t" --retries 3 --low-level-retries 10 -q; then
+      rclone lsf "$t" --files-only 2>/dev/null | grep "^wsm-full-${host}-" | sort -r \
+        | tail -n +$((FB_KEEP_REMOTE + 1)) | while read -r old; do rclone deletefile "$t/$old" -q; done
+      info "  上传成功"
+    else
+      err "  上传失败: $t"; fails=$((fails + 1))
+    fi
+  done
+  return "$fails"
+}
+
+fb_run() {  # fb_run [auto] : 备份 + 上传 + 通知 (定时任务调用 wsm backup-all auto)
+  local mode=${1:-} rc=0 size=""
+  exec 9>/run/wsm-fullbak.lock
+  flock -n 9 || { err "已经有一个全量备份正在运行"; return 1; }
+  [[ $mode == auto ]] && echo "===== $(date '+%F %T') 开始全量备份"
+  if fb_create "$mode"; then
+    size=$(du -h "$FB_LAST" | cut -f1)
+    fb_upload "$FB_LAST" || rc=2
+  else
+    rc=1
+  fi
+  if declare -F tg_event >/dev/null; then
+    case $rc in
+      0) tg_event backup "✅ 全量备份完成 ($size)${FB_TARGETS:+, 已上传异地}" ;;
+      2) tg_event backup "⚠️ 全量备份已完成 ($size), 但异地上传失败, 请检查" ;;
+      *) tg_event backup "❌ 全量备份失败, 请登录服务器查看 $FB_LOG" ;;
+    esac
+  fi
+  return "$rc"
+}
+
+# ---------------- 异地目标 (rclone)
+fb_rclone_ensure() {
+  command -v rclone >/dev/null 2>&1 && return 0
+  info "安装 rclone ..."
+  command -v unzip >/dev/null 2>&1 || pkg_install unzip >/dev/null 2>&1
+  curl -fsSL https://rclone.org/install.sh | bash >/dev/null 2>&1 || pkg_install rclone >/dev/null 2>&1
+  command -v rclone >/dev/null 2>&1 || { err "rclone 安装失败, 请检查网络"; return 1; }
+}
+
+fb_rclone_conf() { rclone config file 2>/dev/null | tail -1; }
+
+fb_rclone_add() {  # fb_rclone_add 名称 < 配置内容 (key = value 行)
+  local f; f=$(fb_rclone_conf)
+  [[ -n $f ]] || { err "找不到 rclone 配置文件位置"; return 1; }
+  mkdir -p "$(dirname "$f")"
+  { echo; echo "[$1]"; cat; } >> "$f"
+  chmod 600 "$f"
+}
+
+fb_name_ok() {  # 远程名称: 字母数字横线, 且未被占用
+  [[ $1 =~ ^[A-Za-z0-9_-]{1,30}$ ]] || { err "名称只能用字母数字 _ -"; return 1; }
+  if rclone listremotes 2>/dev/null | grep -qx "$1:"; then err "名称 $1 已存在"; return 1; fi
+}
+
+fb_target_set() {  # fb_target_set 远程名 目录 : 测试并加入异地目标
+  local t="$1:$2"
+  info "测试连接 ..."
+  if ! rclone mkdir "$t" 2>/tmp/wsm_rclone_err || ! rclone lsf "$t" --max-depth 1 >/dev/null 2>>/tmp/wsm_rclone_err; then
+    err "连接失败:"; tail -3 /tmp/wsm_rclone_err >&2; return 1
+  fi
+  fb_load
+  [[ " $FB_TARGETS " == *" $t "* ]] || FB_TARGETS="${FB_TARGETS:+$FB_TARGETS }$t"
+  fb_save
+  info "已添加异地目标: $t"
+}
+
+fb_gdrive_add() {
+  local name folder log pid i url gurl cb token m
+  fb_rclone_ensure || return 1
+  read -r -p "给这个网盘起个名字 [gdrive]: " name || return 1
+  name=${name:-gdrive}; fb_name_ok "$name" || return 1
+  read -r -p "网盘里的备份文件夹 [wsm-backup]: " folder || return 1
+  folder=${folder:-wsm-backup}; folder=${folder#/}
+  [[ $folder =~ ^[A-Za-z0-9._/-]+$ ]] || { err "文件夹名只能用字母数字 . _ - /"; return 1; }
+  choose m "授权方式:" "手机浏览器授权 (推荐)" "粘贴 token (电脑上运行 rclone authorize \"drive\" 得到)" || return 1
+  if [[ $m == 手机* ]]; then
+    log=$(mktemp)
+    rclone authorize drive --auth-no-open-browser > "$log" 2>&1 &
+    pid=$!
+    url=""
+    for i in $(seq 1 30); do
+      url=$(grep -o 'http://127\.0\.0\.1:53682/auth?state=[A-Za-z0-9_-]*' "$log" | head -1)
+      [[ -n $url ]] && break; sleep 0.5
+    done
+    gurl=""
+    [[ -n $url ]] && gurl=$(curl -s -o /dev/null -w '%{redirect_url}' "$url")
+    if [[ $gurl != https://* ]]; then
+      kill "$pid" 2>/dev/null; err "启动授权失败:"; tail -5 "$log" >&2; rm -f "$log"; return 1
+    fi
+    echo
+    echo "① 复制下面整段链接, 用手机浏览器打开, 登录谷歌账号并点「允许」:"
+    echo
+    echo "$gurl"
+    echo
+    echo "② 允许后浏览器会跳到一个打不开的页面 (地址以 http://127.0.0.1:53682 开头),"
+    echo "   这是正常的。把浏览器地址栏里的完整地址复制下来。"
+    read -r -p "③ 粘贴到这里: " cb || { kill "$pid" 2>/dev/null; rm -f "$log"; return 1; }
+    cb=${cb//[[:space:]]/}; cb=${cb/localhost:53682/127.0.0.1:53682}
+    if [[ ! $cb =~ ^http://127\.0\.0\.1:53682/.*code= ]]; then
+      kill "$pid" 2>/dev/null; rm -f "$log"; err "地址不对, 应该以 http://127.0.0.1:53682/ 开头并含有 code="; return 1
+    fi
+    curl -s -o /dev/null "$cb"
+    for i in $(seq 1 40); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
+    kill "$pid" 2>/dev/null
+    token=$(grep -o '{"access_token".*}' "$log" | head -1)
+    [[ -n $token ]] || { err "没有拿到授权:"; tail -5 "$log" >&2; rm -f "$log"; return 1; }
+    rm -f "$log"
+  else
+    echo "在装了 rclone 的电脑上运行: rclone authorize \"drive\""
+    echo "浏览器授权后, 把输出的 {\"access_token\": ... } 整段粘贴到这里:"
+    read -r token || return 1
+    token=$(printf '%s' "$token" | tr -d '\r')
+    [[ $token == \{*refresh_token*\} ]] || { err "token 格式不对"; return 1; }
+  fi
+  printf 'type = drive\nscope = drive\ntoken = %s\n' "$token" | fb_rclone_add "$name" || return 1
+  fb_target_set "$name" "$folder"
+}
+
+fb_srv_add() {
+  local name host port user dir m
+  fb_rclone_ensure || return 1
+  read -r -p "给这台服务器起个名字 [srv1]: " name || return 1
+  name=${name:-srv1}; fb_name_ok "$name" || return 1
+  read -r -p "服务器 IP 或域名: " host || return 1
+  [[ $host =~ ^[A-Za-z0-9.:-]+$ ]] || { err "地址格式不对"; return 1; }
+  read -r -p "SSH 端口 [22]: " port || return 1; port=${port:-22}
+  [[ $port =~ ^[0-9]+$ ]] || { err "端口不对"; return 1; }
+  read -r -p "登录用户 [root]: " user || return 1; user=${user:-root}
+  [[ $user =~ ^[a-z_][a-z0-9_-]*$ ]] || { err "用户名不对"; return 1; }
+  read -r -p "备份放在对方哪个目录 [/root/wsm-backup]: " dir || return 1
+  dir=${dir:-/root/wsm-backup}
+  [[ $dir =~ ^/[A-Za-z0-9._/-]+$ ]] || { err "目录格式不对"; return 1; }
+  if [[ ! -f $FB_KEY ]]; then
+    ssh-keygen -q -t ed25519 -N "" -C "wsm-backup@$(fb_host)" -f "$FB_KEY" || { err "生成密钥失败"; return 1; }
+  fi
+  chmod 600 "$FB_KEY"
+  echo "需要把本机的备份专用公钥装到对方服务器上:"
+  choose m "安装方式:" "自动安装 (输入一次对方的登录密码)" "手动安装 (对方已关闭密码登录时用)" || return 1
+  if [[ $m == 自动* ]]; then
+    if command -v ssh-copy-id >/dev/null 2>&1; then
+      ssh-copy-id -i "$FB_KEY.pub" -p "$port" -o StrictHostKeyChecking=accept-new "$user@$host" || { err "安装公钥失败"; return 1; }
+    else
+      ssh -p "$port" -o StrictHostKeyChecking=accept-new "$user@$host" \
+        'umask 077; mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys' < "$FB_KEY.pub" || { err "安装公钥失败"; return 1; }
+    fi
+  else
+    echo "在对方服务器上运行 wsm → 安全防护 → SSH 安全 → 粘贴已有公钥, 粘贴下面这一行:"
+    echo
+    cat "$FB_KEY.pub"
+    echo
+    read -r -p "装好后按回车继续..." _ || return 1
+  fi
+  printf 'type = sftp\nhost = %s\nuser = %s\nport = %s\nkey_file = %s\nshell_type = unix\nmd5sum_command = md5sum\nsha1sum_command = sha1sum\n' \
+    "$host" "$user" "$port" "$FB_KEY" | fb_rclone_add "$name" || return 1
+  fb_target_set "$name" "$dir"
+}
+
+fb_target_del() {
+  fb_load
+  local -a arr=()
+  local c t
+  read -r -a arr <<<"$FB_TARGETS"
+  ((${#arr[@]})) || { warn "还没有异地目标"; return 0; }
+  choose c "移除哪个?" "${arr[@]}" || return 0
+  local keep=""
+  for t in "${arr[@]}"; do [[ $t == "$c" ]] || keep="${keep:+$keep }$t"; done
+  FB_TARGETS=$keep; fb_save
+  info "已移除 $c (网盘/服务器上已有的备份不会删除)"
+}
+
+fb_target_test() {
+  fb_load
+  [[ -n $FB_TARGETS ]] || { warn "还没有异地目标"; return 0; }
+  fb_rclone_ensure || return 1
+  local t f
+  f=$(mktemp); echo "wsm test $(date)" > "$f"
+  for t in $FB_TARGETS; do
+    if rclone copyto "$f" "$t/.wsm-test" -q 2>/dev/null && rclone deletefile "$t/.wsm-test" -q 2>/dev/null; then
+      echo "  ${G}✔${N} $t"
+    else
+      echo "  ${R}✘${N} $t  (连接或写入失败)"
+    fi
+  done
+  rm -f "$f"
+}
+
+fb_targets_menu() {
+  local c
+  while true; do
+    fb_load
+    title "异地备份目标"
+    if [[ -n $FB_TARGETS ]]; then for c in $FB_TARGETS; do echo "  - $c"; done
+    else echo "  (还没有, 备份只保存在本机)"; fi
+    choose c "操作:" "添加谷歌网盘" "添加其他服务器 (SFTP)" "测试全部目标" "移除目标" "返回" || return 0
+    case $c in
+      添加谷歌*) (fb_gdrive_add); pause ;;
+      添加其他*) (fb_srv_add); pause ;;
+      测试*) fb_target_test; pause ;;
+      移除*) fb_target_del; pause ;;
+      *) return 0 ;;
+    esac
+  done
+}
+
+# ---------------- 设置
+fb_schedule() {
+  local c h m dow expr line
+  line=$(grep -v '^#' "$FB_CRON" 2>/dev/null | grep backup-all | head -1)
+  echo "  当前: ${line:+$(echo "$line" | awk '{print $1, $2, $3, $4, $5}')}${line:-未设置}"
+  choose c "定时全量备份:" "每天" "每周" "关闭定时备份" || return 0
+  if [[ $c == 关闭* ]]; then rm -f "$FB_CRON"; info "已关闭定时备份"; return 0; fi
+  [[ -x $WSM_BIN ]] || self_install
+  read -r -p "几点执行 (0-23) [4]: " h || return 1; h=${h:-4}
+  read -r -p "第几分钟 (0-59) [10]: " m || return 1; m=${m:-10}
+  [[ $h =~ ^[0-9]+$ && $h -le 23 && $m =~ ^[0-9]+$ && $m -le 59 ]] || { err "时间不对"; return 1; }
+  expr="$m $h * * *"
+  if [[ $c == 每周 ]]; then
+    read -r -p "星期几 (1=周一 ... 7=周日) [1]: " dow || return 1; dow=${dow:-1}
+    [[ $dow =~ ^[1-7]$ ]] || { err "请输入 1-7"; return 1; }
+    expr="$m $h * * $((dow % 7))"
+  fi
+  printf 'SHELL=/bin/bash\nPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n%s root %s backup-all auto >> %s 2>&1\n' \
+    "$expr" "$WSM_BIN" "$FB_LOG" > "$FB_CRON"
+  chmod 644 "$FB_CRON"
+  info "已设置: $c $(printf '%02d:%02d' "$h" "$m") 自动全量备份${FB_TARGETS:+, 并上传异地}"
+}
+
+fb_extra_menu() {
+  local c p
+  local -a cand=() cur=()
+  while true; do
+    mapfile -t cur < <(grep -v '^[[:space:]]*$' "$FB_EXTRA" 2>/dev/null)
+    title "额外备份的目录/文件"
+    echo "  (网站、数据库、证书、wsm 和 Xboard 配置会自动备份, 这里加其他的,"
+    echo "   比如机器人程序目录 /root/mybot、它的 .service 文件)"
+    if ((${#cur[@]})); then for p in "${cur[@]}"; do echo "  - $p$([[ -e $p ]] || echo "  ${R}(不存在)${N}")"; done
+    else echo "  (无)"; fi
+    choose c "操作:" "自动发现" "手动添加" "删除" "返回" || return 0
+    case $c in
+      自动*)
+        mapfile -t cand < <(fb_extra_detect | grep -vxF -f <(printf '%s\n' "${cur[@]:-}"))
+        ((${#cand[@]})) || { info "没有发现新的"; continue; }
+        echo "发现这些可能需要备份的:"; printf '   %s\n' "${cand[@]}"
+        if confirm "全部加入?" y; then
+          mkdir -p "$WSM_DIR"; printf '%s\n' "${cand[@]}" >> "$FB_EXTRA"; info "已加入"
+        fi ;;
+      手动*)
+        read -r -p "完整路径 (如 /root/mybot): " p || continue
+        [[ $p == /* && $p != / && -e $p ]] || { warn "路径不存在或不是完整路径"; continue; }
+        [[ " ${cur[*]:-} " == *" $p "* ]] && { warn "已经有了"; continue; }
+        mkdir -p "$WSM_DIR"; echo "$p" >> "$FB_EXTRA"; info "已加入" ;;
+      删除)
+        ((${#cur[@]})) || continue
+        choose p "删除哪个?" "${cur[@]}" || continue
+        grep -vxF -- "$p" "$FB_EXTRA" > "$FB_EXTRA.tmp"; mv -f "$FB_EXTRA.tmp" "$FB_EXTRA"; info "已删除" ;;
+      *) return 0 ;;
+    esac
+  done
+}
+
+fb_settings() {
+  local c v p1 p2
+  while true; do
+    fb_load
+    title "全量备份设置"
+    echo "  本机保留: $FB_KEEP_LOCAL 份   异地保留: $FB_KEEP_REMOTE 份"
+    echo "  加密:     $([[ -n $FB_PASS ]] && echo "${G}已开启${N}" || echo 未开启)"
+    choose c "操作:" "本机保留份数" "异地保留份数" "设置/修改加密密码" "关闭加密" "返回" || return 0
+    case $c in
+      本机*) read -r -p "本机保留几份 [3]: " v || continue; v=${v:-3}
+             [[ $v =~ ^[0-9]+$ && $v -ge 1 ]] && { FB_KEEP_LOCAL=$v; fb_save; info "已保存"; } || warn "请输入数字" ;;
+      异地*) read -r -p "异地保留几份 [7]: " v || continue; v=${v:-7}
+             [[ $v =~ ^[0-9]+$ && $v -ge 1 ]] && { FB_KEEP_REMOTE=$v; fb_save; info "已保存"; } || warn "请输入数字" ;;
+      设置*)
+        echo "备份里有数据库密码、证书私钥等, 放到网盘建议加密。"
+        warn "密码一定要记住! 忘了密码, 备份就无法还原"
+        read_secret p1 "加密密码 (至少 8 位)"; [[ ${#p1} -ge 8 ]] || { warn "至少 8 位"; continue; }
+        read_secret p2 "再输入一次"; [[ $p1 == "$p2" ]] || { warn "两次不一样"; continue; }
+        FB_PASS=$p1; fb_save; info "已开启加密 (之后的备份生效)" ;;
+      关闭*) FB_PASS=""; fb_save; info "已关闭加密" ;;
+      *) return 0 ;;
+    esac
+  done
+}
+
+# ---------------- 还原 / 搬家
+fb_pick_remote_file() {  # -> PICKED_FILE (从异地目标下载)
+  PICKED_FILE=""
+  fb_load
+  local t c f
+  local -a arr=() files=()
+  fb_rclone_ensure || return 1
+  if [[ -z $FB_TARGETS ]]; then
+    warn "本机还没有异地目标, 先添加 (用和旧服务器相同的网盘/服务器)"
+    fb_targets_menu; fb_load
+    [[ -n $FB_TARGETS ]] || return 1
+  fi
+  read -r -a arr <<<"$FB_TARGETS"
+  if ((${#arr[@]} == 1)); then t=${arr[0]}; else choose t "从哪里下载?" "${arr[@]}" || return 1; fi
+  mapfile -t files < <(rclone lsf "$t" --files-only 2>/dev/null | grep '^wsm-full-' | sort -r | head -15)
+  ((${#files[@]})) || { err "$t 里没有找到备份"; return 1; }
+  choose f "选择备份 (新→旧):" "${files[@]}" || return 1
+  mkdir -p "$FB_DIR"
+  info "下载 $f ..."
+  rclone copy "$t/$f" "$FB_DIR" -P || { err "下载失败"; return 1; }
+  PICKED_FILE=$FB_DIR/$f
+}
+
+fb_pick_scp_file() {  # -> PICKED_FILE (从旧服务器直接拉取)
+  PICKED_FILE=""
+  local host port user f
+  local -a files=()
+  read -r -p "旧服务器 IP: " host || return 1
+  [[ $host =~ ^[A-Za-z0-9.:-]+$ ]] || { err "地址格式不对"; return 1; }
+  read -r -p "SSH 端口 [22]: " port || return 1; port=${port:-22}
+  read -r -p "用户 [root]: " user || return 1; user=${user:-root}
+  echo "(接下来可能要输入两次旧服务器的密码)"
+  mapfile -t files < <(ssh -p "$port" -o StrictHostKeyChecking=accept-new "$user@$host" \
+    "ls -1t $FB_DIR/wsm-full-*.tar* 2>/dev/null | head -10")
+  ((${#files[@]})) || { err "旧服务器 $FB_DIR 里没有全量备份, 先在旧服务器上做一次全量备份"; return 1; }
+  choose f "选择备份 (新→旧):" "${files[@]}" || return 1
+  [[ $f =~ ^[A-Za-z0-9._/-]+$ ]] || { err "文件名异常"; return 1; }
+  mkdir -p "$FB_DIR"
+  scp -P "$port" -o StrictHostKeyChecking=accept-new "$user@$host:$f" "$FB_DIR/" || { err "下载失败"; return 1; }
+  PICKED_FILE=$FB_DIR/${f##*/}
+}
+
+fb_restore() {  # fb_restore [备份文件]
+  local file=${1:-} src tarf stage pass u v d n okdb=0 bad=0
+  title "从全量备份还原 / 搬家"
+  if [[ -z $file ]]; then
+    choose src "备份文件从哪里来:" "本机已有的全量备份" "从旧服务器直接拉取" "从谷歌网盘/异地服务器下载" "手动输入文件路径" || return 1
+    case $src in
+      本机*) pick_file "$FB_DIR" "wsm-full-*.tar*" || return 1; file=$PICKED_FILE ;;
+      从旧*) fb_pick_scp_file || return 1; file=$PICKED_FILE ;;
+      从谷歌*) fb_pick_remote_file || return 1; file=$PICKED_FILE ;;
+      *) read -r -p "备份文件完整路径: " file || return 1 ;;
+    esac
+  fi
+  [[ -f $file ]] || { err "文件不存在: $file"; return 1; }
+  mkdir -p "$FB_DIR"
+  stage=$(mktemp -d "$FB_DIR/.restore-XXXXXX")
+  tarf=$file
+  if [[ $file == *.enc ]]; then
+    fb_load; pass=$FB_PASS
+    [[ -n $pass ]] || read_secret pass "备份加密密码"
+    tarf=$stage/bundle.tar
+    if ! WSM_FBPASS=$pass openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:WSM_FBPASS -in "$file" -out "$tarf" 2>/dev/null; then
+      if [[ -n $FB_PASS ]]; then
+        read_secret pass "本机保存的密码不对, 请输入备份时的加密密码"
+        WSM_FBPASS=$pass openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:WSM_FBPASS -in "$file" -out "$tarf" 2>/dev/null \
+          || { rm -rf "$stage"; err "密码不对, 无法解密"; return 1; }
+      else
+        rm -rf "$stage"; err "密码不对, 无法解密"; return 1
+      fi
+    fi
+  fi
+  mkdir -p "$stage/b"
+  tar -xf "$tarf" -C "$stage/b" 2>/dev/null || { rm -rf "$stage"; err "备份文件损坏或格式不对"; return 1; }
+  [[ -f $stage/b/manifest.env && -f $stage/b/files.tar.gz ]] || { rm -rf "$stage"; err "这不是 wsm 全量备份"; return 1; }
+  local FB_FORMAT="" FB_WSM="" FB_DATE="" FB_HOST="" FB_PHP="" FB_REDIS=0 FB_SITES="" FB_DBS="" FB_EXTRAS=""
+  # shellcheck disable=SC1091
+  source "$stage/b/manifest.env"
+  echo
+  echo "  备份时间: $FB_DATE   来自: $FB_HOST (wsm v$FB_WSM)"
+  echo "  网站:     ${FB_SITES:-无}"
+  echo "  数据库:   ${FB_DBS:-无}"
+  echo "  PHP:      ${FB_PHP:-无}"
+  echo "  额外内容: ${FB_EXTRAS:-无}"
+  echo
+  warn "会覆盖本机同名的网站、数据库和配置"
+  confirm "确认还原?" n || { rm -rf "$stage"; return 0; }
+
+  info "检查并安装运行环境 ..."
+  command -v nginx >/dev/null 2>&1 || install_base
+  for v in $FB_PHP; do php_installed | grep -qx "$v" || install_php "$v"; done
+  if [[ -n $FB_DBS ]] && ! command -v mysql >/dev/null 2>&1; then install_db; fi
+  if [[ $FB_REDIS == 1 ]] && ! unit_exists redis-server && ! unit_exists redis; then install_redis; fi
+
+  for u in /etc/systemd/system/xboard-*.service; do [[ -f $u ]] && systemctl stop "${u##*/}" >/dev/null 2>&1; done
+  info "还原网站和配置文件 ..."
+  tar -xzpf "$stage/b/files.tar.gz" -C / || { rm -rf "$stage"; err "解压文件失败"; return 1; }
+
+  n=$(find "$SFTP_DIR" -name '*.conf' 2>/dev/null | wc -l)
+  rm -f "$SFTP_DIR"/*.conf 2>/dev/null
+
+  if [[ -n $FB_DBS ]]; then
+    info "还原数据库 ..."
+    for d in $FB_DBS; do
+      if gunzip -c "$stage/b/db/$d.sql.gz" | mysql; then okdb=$((okdb + 1)); else warn "数据库 $d 还原失败"; bad=$((bad + 1)); fi
+    done
+    [[ -s $stage/b/db/users.sql ]] && { mysql < "$stage/b/db/users.sql" || warn "部分数据库账号还原失败"; }
+    mysql -e "FLUSH PRIVILEGES" 2>/dev/null
+  fi
+
+  if [[ -s $stage/b/authorized_keys ]]; then
+    ssh_ak_prepare
+    while IFS= read -r u; do
+      [[ $u =~ ^[[:space:]]*(#|$) ]] && continue
+      grep -qxF -- "$u" "$SSH_AK" || printf '%s\n' "$u" >> "$SSH_AK"
+    done < "$stage/b/authorized_keys"
+  fi
+
+  systemctl daemon-reload
+  for u in /etc/systemd/system/xboard-*.service; do [[ -f $u ]] && systemctl enable --now "${u##*/}" >/dev/null 2>&1; done
+  for u in $FB_EXTRAS; do
+    [[ $u == /etc/systemd/system/*.service && -f $u ]] && systemctl enable --now "${u##*/}" >/dev/null 2>&1
+  done
+
+  info "重新生成站点配置 ..."
+  for d in $(list_site_names); do ( render_site "$d" ) >/dev/null 2>&1 || { warn "站点 $d 配置生成失败, 请到站点设置里检查"; bad=$((bad + 1)); }; done
+  for v in $(php_installed); do systemctl restart "$(php_svc "$v")" >/dev/null 2>&1; done
+  nginx_reload >/dev/null 2>&1
+  ensure_renew_cron
+  self_install >/dev/null 2>&1
+  realip_ensure
+  rm -rf "$stage"
+
+  echo
+  if ((bad)); then warn "还原完成, 但有 $bad 处出错, 请看上面的提示"; else info "还原完成!"; fi
+  echo "  网站 $(list_site_names | wc -l) 个, 数据库 $okdb 个"
+  echo "  接下来:"
+  echo "   - 把域名解析改到本机 IP: $(public_ip_cached)"
+  echo "   - 源站保护 / Telegram 告警等开关需要在本机重新开一次"
+  ((n)) && echo "   - SFTP 账号 ($n 个) 不会迁移, 需要重新创建"
+  [[ -n $FB_EXTRAS ]] && echo "   - 检查机器人等额外程序是否正常运行 (Python 版本不同时可能要重装依赖)"
+  return 0
+}
+
+fb_menu() {
+  local c last
+  while true; do
+    fb_load
+    last=$(ls -1t "$FB_DIR"/wsm-full-*.tar* 2>/dev/null | head -1)
+    title "全量备份 / 搬家"
+    echo "  最近备份: ${last:+$(basename "$last") ($(du -h "$last" | cut -f1))}${last:-无}"
+    echo "  定时备份: $(grep -q backup-all "$FB_CRON" 2>/dev/null && echo "${G}已开启${N}" || echo 未开启)"
+    echo "  异地目标: ${FB_TARGETS:-无 (只存本机)}"
+    echo "  加密:     $([[ -n $FB_PASS ]] && echo 已开启 || echo 未开启)"
+    choose c "操作:" "立即全量备份" "定时自动备份" "异地备份 (谷歌网盘/其他服务器)" \
+      "额外备份的目录" "保留份数 / 加密" "还原 / 搬家到本机" "返回" || return 0
+    case $c in
+      立即*) (fb_run); pause ;;
+      定时*) (fb_schedule); pause ;;
+      异地*) fb_targets_menu ;;
+      额外*) fb_extra_menu ;;
+      保留*) fb_settings ;;
+      还原*) (fb_restore); pause ;;
+      *) return 0 ;;
+    esac
+  done
+}
+
 # ================================================================ 安全防护
 # 源站保护: 用 iptables 让 80/443 只接受 Cloudflare 的连接 (SSH 等其他端口不受影响)
 #   规则放在独立链 WSM_CF 里, 开机由 systemd 服务自动加载, 每周自动更新 Cloudflare IP 段
@@ -4092,8 +5091,7 @@ ExecStop=$WSM_BIN cf-firewall remove
 [Install]
 WantedBy=multi-user.target
 EOF
-  printf 'SHELL=/bin/bash\nPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n23 4 * * 1 root %s cf-firewall refresh >> /var/log/wsm-task.log 2>&1\n' "$WSM_BIN" > "$CFW_CRON"
-  chmod 644 "$CFW_CRON"
+  realip_ensure
   systemctl daemon-reload
   systemctl enable wsm-cf-firewall >/dev/null 2>&1
   systemctl start wsm-cf-firewall >/dev/null 2>&1 || true
@@ -4123,6 +5121,7 @@ cfw_enable() {
   cfw_fetch || return 1
   cfw_apply_rules || return 1
   cfw_install_unit || { cfw_remove_rules; return 1; }
+  realip_write || true
   info "源站保护已开启 ($(grep -c . "$CFW_IPS") 个 IP 段, 每周一自动更新)"
   echo "  网站打不开时, SSH 执行: wsm cf-firewall off"
 }
@@ -4130,18 +5129,14 @@ cfw_enable() {
 cfw_disable() {
   systemctl disable --now wsm-cf-firewall >/dev/null 2>&1 || true
   cfw_remove_rules
-  rm -f "$CFW_UNIT" "$CFW_CRON"
+  rm -f "$CFW_UNIT"
   systemctl daemon-reload
   info "源站保护已关闭, 80/443 对所有 IP 开放"
 }
 
 cfw_toggle() { if cfw_active || [[ -f $CFW_UNIT ]]; then confirm "关闭源站保护?" n && cfw_disable; else cfw_enable; fi; }
 
-cfw_refresh() {
-  cfw_fetch || return 1
-  if cfw_active || [[ -f $CFW_UNIT ]]; then cfw_apply_rules || return 1; fi
-  info "Cloudflare IP 列表已更新: $(grep -c . "$CFW_IPS") 个 IP 段"
-}
+cfw_refresh() { cf_refresh_all; }
 
 cfw_cli() {  # wsm cf-firewall [on|off|apply|remove|refresh|status]
   case ${1:-status} in
@@ -4149,9 +5144,59 @@ cfw_cli() {  # wsm cf-firewall [on|off|apply|remove|refresh|status]
     off) cfw_disable ;;
     apply) cfw_apply_rules ;;
     remove) cfw_remove_rules ;;
-    refresh) cfw_refresh ;;
+    refresh) cf_refresh_all ;;
     *) echo "源站保护: $(cfw_state)" ;;
   esac
+}
+
+# ---------------- Cloudflare 真实 IP (所有站点生效)
+# 只信任来自 Cloudflare IP 段的 CF-Connecting-IP 头, 别人伪造不了; 不走 Cloudflare 的站点不受影响
+REALIP_CONF=$NGX_CONF/00-wsm-realip.conf
+
+realip_state() { [[ -f $REALIP_CONF ]] && echo "${G}已启用${N} (所有站点)" || echo "未启用"; }
+
+realip_write() {  # 生成/更新真实 IP 配置, nginx 检测不通过就恢复
+  command -v nginx >/dev/null 2>&1 || return 0
+  local r list old="" gold=""
+  if [[ -s $CFW_IPS ]]; then list=$(cat "$CFW_IPS"); else list=$(guard_cf_ranges); fi
+  [[ -f $REALIP_CONF ]] && { old=$(mktemp); cp -f "$REALIP_CONF" "$old"; }
+  # 旧版防 CC 规则里也写过真实 IP, 先去掉, 否则重复报错
+  if [[ -f $GUARD_CONF ]] && grep -q real_ip_header "$GUARD_CONF"; then
+    gold=$(mktemp); cp -f "$GUARD_CONF" "$gold"
+    guard_write_global; mv -f "$GUARD_CONF.tmp" "$GUARD_CONF"
+  fi
+  {
+    echo "# managed by wsm - 网站开了 Cloudflare 橙云时, 日志/统计/限速/IP规则 都用访客真实 IP"
+    for r in $list; do
+      [[ $r =~ ^[0-9a-fA-F:.]+/[0-9]+$ ]] && echo "set_real_ip_from $r;"
+    done
+    echo "real_ip_header CF-Connecting-IP;"
+  } > "$REALIP_CONF"
+  if nginx -t >/dev/null 2>&1; then
+    systemctl reload nginx >/dev/null 2>&1
+    rm -f "$old" "$gold"; return 0
+  fi
+  if [[ -n $old ]]; then mv -f "$old" "$REALIP_CONF"; else rm -f "$REALIP_CONF"; fi
+  [[ -n $gold ]] && mv -f "$gold" "$GUARD_CONF"
+  warn "Cloudflare 真实 IP 配置没生效 (可能已有其他 real_ip 设置)"
+  return 1
+}
+
+realip_ensure() {  # 装了 Nginx 就确保真实 IP 配置和每周更新任务存在
+  command -v nginx >/dev/null 2>&1 || return 0
+  [[ -f $REALIP_CONF ]] || realip_write >/dev/null 2>&1
+  if [[ ! -f $CFW_CRON && -x $WSM_BIN ]]; then
+    printf 'SHELL=/bin/bash\nPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n23 4 * * 1 root %s cf-refresh >> /var/log/wsm-task.log 2>&1\n' "$WSM_BIN" > "$CFW_CRON"
+    chmod 644 "$CFW_CRON"
+  fi
+  return 0
+}
+
+cf_refresh_all() {  # 更新 Cloudflare IP 段: 真实 IP 配置 + 源站保护规则
+  cfw_fetch || return 1
+  realip_write || true
+  if cfw_active || [[ -f $CFW_UNIT ]]; then cfw_apply_rules || return 1; fi
+  info "Cloudflare IP 列表已更新: $(grep -c . "$CFW_IPS") 个 IP 段"
 }
 
 # ---------------- SSH 安全 (密钥登录 / 关闭密码登录 / 改端口)
@@ -4410,6 +5455,7 @@ menu_security() {
   while true; do
     title "安全防护"
     echo "  源站保护: $(cfw_state)"
+    echo "  CF真实IP: $(realip_state)"
     echo "  SSH: $(ssh_state)"
     cat <<'EOF'
 
@@ -4433,6 +5479,21 @@ EOF
   done
 }
 
+logs_clean() {
+  local before after c
+  before=$(du -sm /var/log/nginx 2>/dev/null | awk '{print $1+0}')
+  echo "  网站日志目录 /var/log/nginx 占用 ${before}MB"
+  choose c "清理方式:" "删除旧的日志 (保留当前日志, 推荐)" "删除旧日志 + 清空当前日志" "返回" || return 0
+  [[ $c == 返回 ]] && return 0
+  find /var/log/nginx -type f \( -name '*.gz' -o -name '*.log.[0-9]*' \) -delete 2>/dev/null
+  if [[ $c == *清空* ]]; then
+    confirm "清空后访问统计会从零开始, 继续?" n && find /var/log/nginx -type f -name '*.log' -exec truncate -s 0 {} + 2>/dev/null
+  fi
+  command -v journalctl >/dev/null 2>&1 && journalctl --vacuum-size=200M >/dev/null 2>&1
+  after=$(du -sm /var/log/nginx 2>/dev/null | awk '{print $1+0}')
+  info "清理完成: ${before}MB → ${after}MB (系统日志也压缩到 200MB 以内)"
+}
+
 dashboard() {
   local n=0 f phps
   for f in "$META_DIR"/*.conf; do [[ -e $f ]] && n=$((n + 1)); done
@@ -4444,6 +5505,14 @@ dashboard() {
   printf "  Nginx: %s   站点: %s 个   PHP: %s\n" "$(svc_state nginx)" "$n" "${phps:-未安装}"
   if unit_exists mariadb; then printf "  MariaDB: %s   " "$(svc_state mariadb)"; fi
   printf "磁盘: %s   负载: %s\n" "$(df -h / | awk 'NR==2{print $5}')" "$(cut -d' ' -f1-3 /proc/loadavg)"
+  local logmb
+  logmb=$(du -sm /var/log/nginx 2>/dev/null | awk '{print $1+0}')
+  if (( ${logmb:-0} >= 1024 )); then
+    echo "  ${Y}提示: 网站日志已占用 ${logmb}MB, 6 → 6 可清理${N}"
+  fi
+  if (( $(swap_total) == 0 && $(free -m | awk '/^Mem:/{print $2+0}') <= 4096 )); then
+    echo "  ${Y}提示: 没有 Swap, 内存吃紧时数据库容易被杀, 7 → 6 可创建${N}"
+  fi
 }
 
 menu_tamper() {
@@ -4599,6 +5668,8 @@ menu_backup() {
    6) 查看计划任务
    7) 添加计划任务 (定时备份)
    8) 删除计划任务
+   9) 全量备份 / 搬家 / 异地备份
+      (谷歌网盘/其他服务器, 可定时)
    0) 返回
 EOF
     echo "  备份目录: $BACKUP_DIR"
@@ -4612,6 +5683,7 @@ EOF
       6) tasks_list; pause ;;
       7) (tasks_add); pause ;;
       8) (tasks_del); pause ;;
+      9) fb_menu ;;
       0|q) return 0 ;;
       *) warn "无效选择" ;;
     esac
@@ -4627,6 +5699,9 @@ menu_system() {
    2) 检测并重载 Nginx 配置
    3) 查看 Nginx 全局错误日志
    4) 磁盘与内存使用情况
+   5) Telegram 告警
+      (服务挂了/磁盘满/证书到期/备份结果)
+   6) 清理日志
    0) 返回
 EOF
     read -r -p "请选择: " c || return 0
@@ -4635,6 +5710,8 @@ EOF
       2) nginx -t && systemctl reload nginx && info "配置正确, 已重载"; pause ;;
       3) tail -n 50 /var/log/nginx/error.log 2>/dev/null || warn "暂无日志"; pause ;;
       4) df -h /; echo; free -h; du -sh "$WWW_ROOT" "$BACKUP_DIR" 2>/dev/null; pause ;;
+      5) tg_menu ;;
+      6) (logs_clean); pause ;;
       0|q) return 0 ;;
       *) warn "无效选择" ;;
     esac
@@ -4651,6 +5728,7 @@ menu_software() {
    3) 安装 Redis (含 PHP 扩展)
    4) 安装 Composer
    5) 禁止IP直接访问 (开关)
+   6) Swap 虚拟内存
    0) 返回
 EOF
     read -r -p "请选择: " c || return 0
@@ -4660,6 +5738,7 @@ EOF
       3) (install_redis); pause ;;
       4) (install_composer); pause ;;
       5) (toggle_block_ip); pause ;;
+      6) swap_menu ;;
       0|q) return 0 ;;
       *) warn "无效选择" ;;
     esac
@@ -4669,6 +5748,7 @@ EOF
 main_menu() {
   local c
   SERVER_IP=$(public_ip)
+  realip_ensure
   while true; do
     dashboard
     echo
@@ -4676,9 +5756,9 @@ main_menu() {
     mi 2 "SSL 证书" "申请/自有证书/续期"
     mi 3 "PHP 管理" "版本/扩展/参数"
     mi 4 "数据库" "创建/备份/phpMyAdmin"
-    mi 5 "备份与任务" "网站/数据库/定时"
-    mi 6 "服务与日志" "启停/重载/日志"
-    mi 7 "软件与环境" "Redis/Composer"
+    mi 5 "备份与任务" "全量/异地/搬家"
+    mi 6 "服务与日志" "启停/日志/TG告警"
+    mi 7 "软件与环境" "Redis/Composer/Swap"
     mi 8 "软件商店" "Node/Docker/PG..."
     mi 9 "网站防篡改" "锁定/检测/还原"
     mi 10 "更新脚本" "从 Git 仓库一键更新"
@@ -4717,6 +5797,7 @@ wsm v$WSM_VER - Web Server Manager
   wsm guard [域名] [on|off]         防 CC / 防恶意 bot
   wsm cf-firewall [on|off|refresh]  源站保护: 80/443 只允许 Cloudflare
   wsm ssh                           SSH 安全 (密钥登录/关闭密码/改端口)
+  wsm tg                            Telegram 告警设置
   wsm xboard-domains [站点]         设置主页/订阅/节点三个域名
   wsm add-proxy [域名] [后端URL]    新建反向代理
   wsm sftp                          SFTP 账号管理
@@ -4730,6 +5811,8 @@ wsm v$WSM_VER - Web Server Manager
   wsm renew                         立即续期全部证书
   wsm backup-site [域名] [份数]     备份网站
   wsm backup-db [库名|--all] [份数] 备份数据库
+  wsm backup-all                    全量备份 (网站+数据库+配置), 并上传异地
+  wsm restore-all [文件]            从全量备份还原 / 搬家到本机
   wsm tamper-lock|tamper-unlock [域名]      防篡改: 锁定/解锁网站文件
   wsm tamper-check [域名] [ask|report|restore]  防篡改: 完整性检测/还原
   wsm db-create [库名]              创建数据库
@@ -4745,6 +5828,7 @@ EOF
 # ================================================================ 入口
 [[ -n ${BASH_SOURCE[0]:-} && ${BASH_SOURCE[0]} != "$0" ]] && return 0
 
+[[ ${1:-} == version || ${1:-} == -v || ${1:-} == --version ]] && { echo "$WSM_VER"; exit 0; }
 need_root
 detect_os
 mkdir -p "$META_DIR" "$CERT_DIR" "$AUTH_DIR"
@@ -4768,6 +5852,9 @@ case ${1:-menu} in
   stats)        stats_cli "${2:-}" "${3:-1}" ;;
   guard)        guard_cli "${2:-}" "${3:-}" ;;
   cf-firewall)  cfw_cli "${2:-}" ;;
+  cf-refresh)   cf_refresh_all ;;
+  monitor)      mon_check ;;
+  tg)           tg_menu ;;
   ssh)          ssh_menu ;;
   add-proxy)    add_site proxy "${2:-}" "${3:-}" ;;
   add-redirect) add_site redirect "${2:-}" "${3:-}" ;;
@@ -4778,6 +5865,8 @@ case ${1:-menu} in
   renew)        certbot renew --deploy-hook "systemctl reload nginx" ;;
   backup-site)  backup_site "${2:-}" "${3:-7}" ;;
   backup-db)    backup_db "${2:-}" "${3:-7}" ;;
+  backup-all)   fb_run "${2:-}" ;;
+  restore-all)  fb_restore "${2:-}" ;;
   tamper-lock)  use_site "${2:-}" && tamper_lock "$SITE" ;;
   tamper-unlock) use_site "${2:-}" && tamper_unlock "$SITE" ;;
   tamper-check) tamper_check "${2:-}" "${3:-ask}" ;;
@@ -4786,6 +5875,7 @@ case ${1:-menu} in
   app-list)     app_list ;;
   app-install)  app_install "${2:-}" ;;
   app-uninstall) app_uninstall "${2:-}" ;;
+  version|-v|--version) echo "$WSM_VER" ;;
   help|-h|--help) usage ;;
   *)            usage ;;
 esac
