@@ -18,8 +18,9 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="2.8"
+WSM_VER="2.8.1"
 # CHANGELOG-BEGIN  (更新时会显示比当前版本新的条目, 新的写在最上面)
+# v2.8.1 所有"返回"改为绿色, "退出"改为红色; 网站管理去掉多余提示
 # v2.8 菜单图标可切换: Nerd 字体图标 (系统与服务 → 8, 或 wsm icons nerd) / 普通符号
 # v2.7.4 图标恢复为原来那套 (保留按列对齐和绿色退出)
 # v2.7.2 主菜单说明文字严格对齐, 退出改为绿色
@@ -112,8 +113,11 @@ choose() {  # choose 结果变量 "标题" 选项1 选项2 ...   (数字选择, 
   local __i __c __last
   __last=${__items[${#__items[@]}-1]}
   echo "$__title"
-  for __i in "${!__items[@]}"; do printf "   %d) %s\n" $((__i + 1)) "${__items[__i]}"; done
-  [[ $__last == 返回* ]] || echo "   0) 返回"
+  for __i in "${!__items[@]}"; do
+    if [[ ${__items[__i]} == 返回* ]]; then printf "   %d) %s\n" $((__i + 1)) "${G}${__items[__i]}${N}"
+    else printf "   %d) %s\n" $((__i + 1)) "${__items[__i]}"; fi
+  done
+  [[ $__last == 返回* ]] || echo "   0) ${G}返回${N}"
   while true; do
     read -r -p "请选择 [1]: " __c || return 1
     __c=${__c:-1}
@@ -1816,7 +1820,7 @@ site_settings() {
       ((__k % 2)) && echo || printf ' '
     done
     ((${#__it[@]} % 2)) && echo
-    echo "  0) 返回"
+    echo "  0) ${G}返回${N}"
     read -r -p "请选择: " c || return 0
     case $c in
       1) site_domains "$d" ;;
@@ -5155,8 +5159,8 @@ menu_security() {
       (密钥登录/关闭密码/改端口)
    4) 禁止IP直接访问 (开关)
    5) 网站防篡改
-   0) 返回
 EOF
+    echo "   0) ${G}返回${N}"
     read -r -p "请选择: " c || return 0
     case $c in
       1) (cfw_toggle); pause ;;
@@ -5228,9 +5232,8 @@ menu_sites() {
    7) 站点设置 (域名/SSL/伪静态/防CC...)
    8) 删除站点
    9) 访问统计
-   0) 返回
-  (Xboard 面板在 [程序下载] 里)
 EOF
+    echo "   0) ${G}返回${N}"
     read -r -p "请选择: " c || return 0
     case $c in
       1) list_sites; pause ;;
@@ -5258,8 +5261,8 @@ menu_ssl() {
    3) 站点 SSL 设置 (强制HTTPS)
    4) 立即续期全部证书
    5) 自动续期 开/关
-   0) 返回
 EOF
+    echo "   0) ${G}返回${N}"
     read -r -p "请选择: " c || return 0
     case $c in
       1) list_certs; pause ;;
@@ -5287,8 +5290,8 @@ menu_php() {
    5) 禁用危险函数
    6) PHP-FPM 进程数调优
    7) 重启 PHP-FPM
-   0) 返回
 EOF
+    echo "   0) ${G}返回${N}"
     read -r -p "请选择: " c || return 0
     case $c in
       1) (install_php ""); pause ;;
@@ -5316,8 +5319,8 @@ menu_db() {
    5) 备份数据库
    6) 还原数据库
    7) 安装 phpMyAdmin (网页管理数据库)
-   0) 返回
 EOF
+    echo "   0) ${G}返回${N}"
     read -r -p "请选择: " c || return 0
     case $c in
       1) (db_list); pause ;;
@@ -5348,8 +5351,8 @@ menu_backup() {
    8) 删除计划任务
    9) 全量备份 / 搬家 / 异地备份
       (谷歌网盘/其他服务器, 可定时)
-   0) 返回
 EOF
+    echo "   0) ${G}返回${N}"
     echo "  备份目录: $BACKUP_DIR"
     read -r -p "请选择: " c || return 0
     case $c in
@@ -5382,8 +5385,8 @@ menu_system() {
    6) 清理日志
    7) Swap 虚拟内存
    8) 菜单图标风格 (Nerd/普通)
-   0) 返回
 EOF
+    echo "   0) ${G}返回${N}"
     read -r -p "请选择: " c || return 0
     case $c in
       1) (manage_service); pause ;;
@@ -5417,7 +5420,7 @@ main_menu() {
     mi 7 "$(ico app)" "程序下载" "面板/环境/工具"
     mi 8 "$(ico sec)" "安全防护" "源站/SSH/防篡改"
     mi 9 "$(ico upd)" "更新脚本" "从 Git 仓库更新"
-    printf '  0) %s\e[8G%s\n' "$(ico exit)" "${G}退出${N}"
+    printf '  0) %s\e[8G%s\n' "$(ico exit)" "${R}退出${N}"
     read -r -p "请选择: " c || exit 0
     case $c in
       1) menu_sites ;;
