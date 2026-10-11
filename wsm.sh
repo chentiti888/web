@@ -18,8 +18,11 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="2.8.2"
+WSM_VER="2.8.5"
 # CHANGELOG-BEGIN  (更新时会显示比当前版本新的条目, 新的写在最上面)
+# v2.8.5 异地备份新增 Cloudflare R2 / Backblaze B2 (用密钥, 不会过期, 不用浏览器授权)
+# v2.8.4 谷歌网盘支持用自己的 client_id (rclone 共用授权将停用); 已添加的网盘可一键更换授权
+# v2.8.3 新增服务器时区设置 (系统与服务 → 8); 设置定时任务时显示服务器时间; 安装环境时 UTC 服务器提示改为北京时间
 # v2.8.2 所有输入框都可以输入 0 返回 (自动提示); 取消输入不会再继续往下执行
 # v2.8.1 所有"返回"改为绿色, "退出"改为红色; 网站管理去掉多余提示
 # v2.8 菜单图标可切换: Nerd 字体图标 (系统与服务 → 8, 或 wsm icons nerd) / 普通符号
@@ -60,6 +63,51 @@ pad_w() {
   n=$(( ${#t} + (${#s} - ${#t}) / 3 * 2 ))
   printf '%s%*s' "$s" $((w > n ? w - n : 0)) ''
 }
+# ---------------- 服务器时区 (定时任务/日志都按这个时间)
+tz_get() {
+  local z=""
+  command -v timedatectl >/dev/null 2>&1 && z=$(timedatectl show -p Timezone --value 2>/dev/null)
+  [[ -n $z ]] || z=$(cat /etc/timezone 2>/dev/null)
+  [[ -n $z ]] || z=$(readlink /etc/localtime 2>/dev/null | sed 's#.*/zoneinfo/##')
+  echo "${z:-UTC}"
+}
+
+tz_now() { date '+%F %T %Z'; }
+
+tz_set() {  # tz_set 时区名
+  local z=$1
+  [[ $z =~ ^[A-Za-z0-9_+/-]+$ && -f /usr/share/zoneinfo/$z ]] || { err "没有这个时区: $z"; return 1; }
+  if ! timedatectl set-timezone "$z" 2>/dev/null; then
+    ln -sf "/usr/share/zoneinfo/$z" /etc/localtime && echo "$z" > /etc/timezone || { err "设置失败"; return 1; }
+  fi
+  # 让定时任务按新时区执行
+  systemctl restart cron >/dev/null 2>&1 || systemctl restart crond >/dev/null 2>&1 || true
+  info "时区已改为 $z, 现在时间: $(tz_now)"
+}
+
+tz_menu() {
+  local c z
+  echo "  当前时区: $(tz_get)"
+  echo "  服务器时间: $(tz_now)"
+  echo "  (定时备份/计划任务/日志都按这个时间)"
+  choose c "设置为:" "北京时间 (Asia/Shanghai)" "UTC" "手动输入 (如 Asia/Tokyo)" || return 0
+  case $c in
+    北京*) z=Asia/Shanghai ;;
+    UTC) z=UTC ;;
+    *) read -r -p "时区名: " z || return 0 ;;
+  esac
+  tz_set "$z"
+}
+
+tz_suggest() {  # 时区是 UTC 时建议改成北京时间 (安装环境时调用)
+  case $(tz_get) in
+    UTC|Etc/UTC|Etc/Universal|Universal|GMT|Etc/GMT)
+      echo "  服务器现在是 UTC 时间 ($(tz_now)), 比北京时间慢 8 小时。"
+      confirm "改成北京时间? (定时备份等会按北京时间执行)" y && tz_set Asia/Shanghai ;;
+  esac
+  return 0
+}
+
 # ---------------- 菜单图标风格: plain = 普通符号 (任何终端都能显示), nerd = Nerd 字体图标 (终端需用 Nerd 字体)
 UI_CONF=$WSM_DIR/ui.conf
 ICON_STYLE=plain
@@ -2407,6 +2455,7 @@ tasks_add() {
       [[ $h =~ ^[0-9]+$ && $h -ge 1 && $h -le 23 ]] || { err "请输入 1-23"; return 1; }
       expr="0 */$h * * *" ;;
     *)
+      echo "  服务器时间: $(tz_now)"
       read -r -p "几点执行 (0-23) [3]: " h || return 1; h=${h:-3}
       read -r -p "第几分钟 (0-59) [30]: " m || return 1; m=${m:-30}
       [[ $h =~ ^[0-9]+$ && $h -le 23 && $m =~ ^[0-9]+$ && $m -le 59 ]] || { err "时间不合法"; return 1; }
@@ -2543,6 +2592,7 @@ self_install() {
 }
 
 cmd_install() {
+  tz_suggest
   install_base
   local v=""
   read -r -p "安装哪些 PHP 版本? (${PHP_VERSIONS}; 多个用空格分隔, 输入 none 跳过) [8.3]: " v || return 1
@@ -4252,7 +4302,9 @@ fb_name_ok() {  # 远程名称: 字母数字横线; 同名的旧配置没在用�
 fb_target_set() {  # fb_target_set 远程名 目录 : 测试并加入异地目标
   local t="$1:$2"
   info "测试连接 ..."
-  if ! rclone mkdir "$t" 2>/tmp/wsm_rclone_err || ! rclone lsf "$t" --max-depth 1 >/dev/null 2>>/tmp/wsm_rclone_err; then
+  # 对象存储的令牌通常只能读写指定的桶, 不能建桶, 所以 mkdir 失败不算失败, 能列出目录才算连通
+  rclone mkdir "$t" 2>/tmp/wsm_rclone_err
+  if ! rclone lsf "$t" --max-depth 1 >/dev/null 2>>/tmp/wsm_rclone_err; then
     err "连接失败:"; tail -3 /tmp/wsm_rclone_err >&2
     rclone config delete "$1" >/dev/null 2>&1
     return 1
@@ -4263,8 +4315,79 @@ fb_target_set() {  # fb_target_set 远程名 目录 : 测试并加入异地目�
   info "已添加异地目标: $t"
 }
 
+fb_gdrive_ask_client() {  # -> GD_CID GD_SEC (自己的 client_id, 可留空用 rclone 共用的)
+  GD_CID=""; GD_SEC=""
+  echo "  谷歌会停用 rclone 共用的授权 (2026 年内), 建议用自己的 client_id。"
+  echo "  创建方法: 谷歌云控制台建一个「桌面应用」OAuth 客户端 (详见 rclone.org/drive)"
+  choose GD_CID "用哪个授权:" "自己的 client_id (推荐)" "rclone 共用 (以后会失效)" || return 1
+  if [[ $GD_CID == 自己* ]]; then
+    read -r -p "客户端 ID (以 .apps.googleusercontent.com 结尾): " GD_CID || return 1
+    GD_CID=${GD_CID//[[:space:]]/}
+    [[ $GD_CID =~ ^[0-9A-Za-z_-]+\.apps\.googleusercontent\.com$ ]] || { err "客户端 ID 格式不对"; return 1; }
+    read -r -p "客户端密钥 (GOCSPX- 开头): " GD_SEC || return 1
+    GD_SEC=${GD_SEC//[[:space:]]/}
+    [[ $GD_SEC =~ ^[A-Za-z0-9_-]{10,}$ ]] || { err "客户端密钥格式不对"; return 1; }
+  else
+    GD_CID=""
+  fi
+}
+
+fb_gdrive_auth() {  # fb_gdrive_auth [client_id] [secret] -> GD_TOKEN (手机浏览器授权)
+  local cid=${1:-} sec=${2:-} log pid i url gurl cb m
+  local -a args=(authorize drive)
+  [[ -n $cid ]] && args+=("$cid" "$sec")
+  GD_TOKEN=""
+  choose m "授权方式:" "手机浏览器授权 (推荐)" "粘贴 token (电脑上运行 rclone authorize 得到)" || return 1
+  if [[ $m == 粘贴* ]]; then
+    echo "在装了 rclone 的电脑上运行: rclone authorize \"drive\"${cid:+ \"$cid\" \"$sec\"}"
+    echo "浏览器授权后, 把输出的 {\"access_token\": ... } 整段粘贴到这里:"
+    read -r -p "token: " GD_TOKEN || return 1
+    GD_TOKEN=$(printf '%s' "$GD_TOKEN" | tr -d '\r')
+    [[ $GD_TOKEN == \{*refresh_token*\} ]] || { err "token 格式不对"; GD_TOKEN=""; return 1; }
+    return 0
+  fi
+  log=$(mktemp)
+  rclone "${args[@]}" --auth-no-open-browser > "$log" 2>&1 &
+  pid=$!
+  url=""
+  for i in $(seq 1 30); do
+    url=$(grep -o 'http://127\.0\.0\.1:53682/auth?state=[A-Za-z0-9_-]*' "$log" | head -1)
+    [[ -n $url ]] && break; sleep 0.5
+  done
+  gurl=""
+  [[ -n $url ]] && gurl=$(curl -s -o /dev/null -w '%{redirect_url}' "$url")
+  if [[ $gurl != https://* ]]; then
+    kill "$pid" 2>/dev/null; err "启动授权失败:"; tail -5 "$log" >&2; rm -f "$log"; return 1
+  fi
+  echo
+  echo "① 复制下面整段链接, 用手机浏览器打开, 登录谷歌账号并点「允许」:"
+  [[ -n $cid ]] && echo "   (提示「Google 尚未验证此应用」时, 点 高级 → 继续前往)"
+  echo
+  echo "$gurl"
+  echo
+  echo "② 允许后浏览器会跳到一个打不开的页面 (地址以 http://127.0.0.1:53682 开头),"
+  echo "   这是正常的。把浏览器地址栏里的完整地址复制下来。"
+  read -r -p "③ 粘贴到这里: " cb || { kill "$pid" 2>/dev/null; rm -f "$log"; return 1; }
+  cb=${cb//[[:space:]]/}; cb=${cb/localhost:53682/127.0.0.1:53682}
+  if [[ ! $cb =~ ^http://127\.0\.0\.1:53682/.*code= ]]; then
+    kill "$pid" 2>/dev/null; rm -f "$log"; err "地址不对, 应该以 http://127.0.0.1:53682/ 开头并含有 code="; return 1
+  fi
+  curl -s -o /dev/null "$cb"
+  for i in $(seq 1 40); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
+  kill "$pid" 2>/dev/null
+  GD_TOKEN=$(grep -o '{"access_token".*}' "$log" | head -1)
+  [[ -n $GD_TOKEN ]] || { err "没有拿到授权:"; tail -5 "$log" >&2; rm -f "$log"; return 1; }
+  rm -f "$log"
+}
+
+fb_gdrive_conf() {  # fb_gdrive_conf client_id secret token : 输出 rclone 配置内容
+  printf 'type = drive\nscope = drive\n'
+  [[ -n $1 ]] && printf 'client_id = %s\nclient_secret = %s\n' "$1" "$2"
+  printf 'token = %s\n' "$3"
+}
+
 fb_gdrive_add() {
-  local name folder log pid i url gurl cb token m
+  local name folder
   fb_rclone_ensure || return 1
   read -r -p "给这个网盘起个名字 [gdrive] (输入 0 返回): " name || return 1
   [[ $name == 0 ]] && return 1
@@ -4272,48 +4395,39 @@ fb_gdrive_add() {
   read -r -p "网盘里的备份文件夹 [wsm-backup]: " folder || return 1
   folder=${folder:-wsm-backup}; folder=${folder#/}
   [[ $folder =~ ^[A-Za-z0-9._/-]+$ ]] || { err "文件夹名只能用字母数字 . _ - /"; return 1; }
-  choose m "授权方式:" "手机浏览器授权 (推荐)" "粘贴 token (电脑上运行 rclone authorize \"drive\" 得到)" || return 1
-  if [[ $m == 手机* ]]; then
-    log=$(mktemp)
-    rclone authorize drive --auth-no-open-browser > "$log" 2>&1 &
-    pid=$!
-    url=""
-    for i in $(seq 1 30); do
-      url=$(grep -o 'http://127\.0\.0\.1:53682/auth?state=[A-Za-z0-9_-]*' "$log" | head -1)
-      [[ -n $url ]] && break; sleep 0.5
-    done
-    gurl=""
-    [[ -n $url ]] && gurl=$(curl -s -o /dev/null -w '%{redirect_url}' "$url")
-    if [[ $gurl != https://* ]]; then
-      kill "$pid" 2>/dev/null; err "启动授权失败:"; tail -5 "$log" >&2; rm -f "$log"; return 1
-    fi
-    echo
-    echo "① 复制下面整段链接, 用手机浏览器打开, 登录谷歌账号并点「允许」:"
-    echo
-    echo "$gurl"
-    echo
-    echo "② 允许后浏览器会跳到一个打不开的页面 (地址以 http://127.0.0.1:53682 开头),"
-    echo "   这是正常的。把浏览器地址栏里的完整地址复制下来。"
-    read -r -p "③ 粘贴到这里: " cb || { kill "$pid" 2>/dev/null; rm -f "$log"; return 1; }
-    cb=${cb//[[:space:]]/}; cb=${cb/localhost:53682/127.0.0.1:53682}
-    if [[ ! $cb =~ ^http://127\.0\.0\.1:53682/.*code= ]]; then
-      kill "$pid" 2>/dev/null; rm -f "$log"; err "地址不对, 应该以 http://127.0.0.1:53682/ 开头并含有 code="; return 1
-    fi
-    curl -s -o /dev/null "$cb"
-    for i in $(seq 1 40); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
-    kill "$pid" 2>/dev/null
-    token=$(grep -o '{"access_token".*}' "$log" | head -1)
-    [[ -n $token ]] || { err "没有拿到授权:"; tail -5 "$log" >&2; rm -f "$log"; return 1; }
-    rm -f "$log"
-  else
-    echo "在装了 rclone 的电脑上运行: rclone authorize \"drive\""
-    echo "浏览器授权后, 把输出的 {\"access_token\": ... } 整段粘贴到这里:"
-    read -r -p "token: " token || return 1
-    token=$(printf '%s' "$token" | tr -d '\r')
-    [[ $token == \{*refresh_token*\} ]] || { err "token 格式不对"; return 1; }
-  fi
-  printf 'type = drive\nscope = drive\ntoken = %s\n' "$token" | fb_rclone_add "$name" || return 1
+  fb_gdrive_ask_client || return 1
+  fb_gdrive_auth "$GD_CID" "$GD_SEC" || return 1
+  fb_gdrive_conf "$GD_CID" "$GD_SEC" "$GD_TOKEN" | fb_rclone_add "$name" || return 1
   fb_target_set "$name" "$folder"
+}
+
+fb_gdrive_reauth() {  # 已有的谷歌网盘换成自己的 client_id 并重新授权 (目标和文件夹不变)
+  fb_load
+  local t n bak f
+  local -a gds=()
+  fb_rclone_ensure || return 1
+  for t in $FB_TARGETS; do
+    n=${t%%:*}
+    rclone config show "$n:" 2>/dev/null | grep -q '^type = drive' && gds+=("$n")
+  done
+  ((${#gds[@]})) || { warn "还没有添加谷歌网盘"; return 0; }
+  if ((${#gds[@]} == 1)); then n=${gds[0]}; else choose n "哪个网盘?" "${gds[@]}" || return 0; fi
+  if rclone config show "$n:" 2>/dev/null | grep -q '^client_id = '; then
+    echo "  $n 已经在用自己的 client_id, 继续会重新授权"
+  else
+    echo "  $n 现在用的是 rclone 共用授权"
+  fi
+  fb_gdrive_ask_client || return 1
+  fb_gdrive_auth "$GD_CID" "$GD_SEC" || return 1
+  f=$(fb_rclone_conf); bak=$(mktemp); cp -a "$f" "$bak"
+  rclone config delete "$n" >/dev/null 2>&1
+  fb_gdrive_conf "$GD_CID" "$GD_SEC" "$GD_TOKEN" | fb_rclone_add "$n" || { cp -a "$bak" "$f"; rm -f "$bak"; return 1; }
+  info "测试连接 ..."
+  if rclone lsf "$n:" --max-depth 1 >/dev/null 2>&1; then
+    rm -f "$bak"; info "$n 已更换授权, 备份照常进行"
+  else
+    cp -a "$bak" "$f"; rm -f "$bak"; err "新授权连接失败, 已恢复原来的配置"; return 1
+  fi
 }
 
 FB_REMOTE_PUBKEY_FIX='f=/etc/ssh/sshd_config; if grep -qE "^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config.d/" $f; then mkdir -p /etc/ssh/sshd_config.d; echo "PubkeyAuthentication yes" > /etc/ssh/sshd_config.d/00-wsm-pubkey.conf; else cp -a $f $f.wsm-bak; sed -i "1i PubkeyAuthentication yes" $f; fi; if sshd -t; then systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || service ssh reload; echo WSM_FIX_OK; fi'
@@ -4378,6 +4492,46 @@ fb_srv_add() {
   fb_target_set "$name" "$dir"
 }
 
+fb_r2_add() {  # Cloudflare R2 (S3 兼容, 用密钥, 不会过期)
+  local name ep ak sk bucket acc
+  fb_rclone_ensure || return 1
+  echo "  需要: R2 的 访问密钥 ID / 机密访问密钥 / 终结点地址 / 存储桶名"
+  echo "  (Cloudflare → R2 → 管理 API 令牌 → 创建, 权限选「对象读和写」)"
+  read -r -p "给它起个名字 [r2]: " name || return 1
+  name=${name:-r2}; fb_name_ok "$name" || return 1
+  read -r -p "终结点地址 (https://xxxx.r2.cloudflarestorage.com, 也可只填账号 ID): " ep || return 1
+  ep=${ep//[[:space:]]/}; ep=${ep%/}
+  if [[ $ep =~ ^[0-9a-f]{32}$ ]]; then ep="https://$ep.r2.cloudflarestorage.com"; fi
+  [[ $ep =~ ^https://[0-9a-f]{32}(\.(eu|fedramp))?\.r2\.cloudflarestorage\.com(/.*)?$ ]] || { err "终结点地址格式不对"; return 1; }
+  if [[ $ep =~ \.com/([A-Za-z0-9._-]+)$ ]]; then bucket=${BASH_REMATCH[1]}; ep=${ep%/*}; fi
+  read -r -p "访问密钥 ID: " ak || return 1; ak=${ak//[[:space:]]/}
+  [[ $ak =~ ^[A-Za-z0-9]{20,64}$ ]] || { err "访问密钥 ID 格式不对"; return 1; }
+  read_secret sk "机密访问密钥 (输入不显示)" || return 1; sk=${sk//[[:space:]]/}
+  [[ $sk =~ ^[A-Za-z0-9]{30,128}$ ]] || { err "机密访问密钥格式不对"; return 1; }
+  read -r -p "存储桶名 [${bucket:-wsm-backup}]: " acc || return 1
+  bucket=${acc:-${bucket:-wsm-backup}}
+  [[ $bucket =~ ^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$ ]] || { err "存储桶名格式不对 (小写字母数字和 -)"; return 1; }
+  printf 'type = s3\nprovider = Cloudflare\naccess_key_id = %s\nsecret_access_key = %s\nendpoint = %s\nacl = private\nno_check_bucket = true\n' \
+    "$ak" "$sk" "$ep" | fb_rclone_add "$name" || return 1
+  fb_target_set "$name" "$bucket/$(fb_host)"
+}
+
+fb_b2_add() {  # Backblaze B2 (用应用密钥, 不会过期)
+  local name kid key bucket
+  fb_rclone_ensure || return 1
+  echo "  需要: B2 的 keyID / applicationKey / 存储桶名 (Backblaze → Application Keys 创建)"
+  read -r -p "给它起个名字 [b2]: " name || return 1
+  name=${name:-b2}; fb_name_ok "$name" || return 1
+  read -r -p "keyID: " kid || return 1; kid=${kid//[[:space:]]/}
+  [[ $kid =~ ^[A-Za-z0-9]{12,40}$ ]] || { err "keyID 格式不对"; return 1; }
+  read_secret key "applicationKey (输入不显示)" || return 1; key=${key//[[:space:]]/}
+  [[ $key =~ ^[A-Za-z0-9/+]{20,64}$ ]] || { err "applicationKey 格式不对"; return 1; }
+  read -r -p "存储桶名: " bucket || return 1
+  [[ $bucket =~ ^[A-Za-z0-9-]{6,50}$ ]] || { err "存储桶名格式不对"; return 1; }
+  printf 'type = b2\naccount = %s\nkey = %s\n' "$kid" "$key" | fb_rclone_add "$name" || return 1
+  fb_target_set "$name" "$bucket/$(fb_host)"
+}
+
 fb_target_del() {
   fb_load
   local -a arr=()
@@ -4416,11 +4570,15 @@ fb_targets_menu() {
     title "异地备份目标"
     if [[ -n $FB_TARGETS ]]; then for c in $FB_TARGETS; do echo "  - $c"; done
     else echo "  (还没有, 备份只保存在本机)"; fi
-    choose c "操作:" "添加谷歌网盘" "添加其他服务器 (SFTP)" "测试全部目标" "移除目标" "返回" || return 0
+    choose c "操作:" "添加 Cloudflare R2 (推荐)" "添加 Backblaze B2" "添加其他服务器 (SFTP)" \
+      "添加谷歌网盘" "测试全部目标" "谷歌网盘换成自己的授权" "移除目标" "返回" || return 0
     case $c in
+      添加\ Cloudflare*) (fb_r2_add); pause ;;
+      添加\ Backblaze*) (fb_b2_add); pause ;;
       添加谷歌*) (fb_gdrive_add); pause ;;
       添加其他*) (fb_srv_add); pause ;;
       测试*) fb_target_test; pause ;;
+      谷歌网盘换*) (fb_gdrive_reauth); pause ;;
       移除*) fb_target_del; pause ;;
       *) return 0 ;;
     esac
@@ -4432,6 +4590,7 @@ fb_schedule() {
   local c h m dow expr line
   line=$(grep -v '^#' "$FB_CRON" 2>/dev/null | grep backup-all | head -1)
   echo "  当前: ${line:+$(echo "$line" | awk '{print $1, $2, $3, $4, $5}')}${line:-未设置}"
+  echo "  服务器时间: $(tz_now) (按这个时间执行; 不对的话到 系统与服务 → 8 改时区)"
   choose c "定时全量备份:" "每天" "每周" "关闭定时备份" || return 0
   if [[ $c == 关闭* ]]; then rm -f "$FB_CRON"; info "已关闭定时备份"; return 0; fi
   [[ -x $WSM_BIN ]] || self_install
@@ -4661,7 +4820,7 @@ fb_menu() {
     echo "  定时备份: $(grep -q backup-all "$FB_CRON" 2>/dev/null && echo "${G}已开启${N}" || echo 未开启)"
     echo "  异地目标: ${FB_TARGETS:-无 (只存本机)}"
     echo "  加密:     $([[ -n $FB_PASS ]] && echo 已开启 || echo 未开启)"
-    choose c "操作:" "立即全量备份" "定时自动备份" "异地备份 (谷歌网盘/其他服务器)" \
+    choose c "操作:" "立即全量备份" "定时自动备份" "异地备份 (R2/B2/服务器/网盘)" \
       "额外备份的目录" "保留份数 / 加密" "还原 / 搬家到本机" "返回" || return 0
     case $c in
       立即*) (fb_run); pause ;;
@@ -5404,7 +5563,8 @@ menu_system() {
       (服务挂了/磁盘满/证书到期/备份结果)
    6) 清理日志
    7) Swap 虚拟内存
-   8) 菜单图标风格 (Nerd/普通)
+   8) 服务器时区 (定时任务按它执行)
+   9) 菜单图标风格 (Nerd/普通)
 EOF
     echo "   0) ${G}返回${N}"
     read -r -p "请选择: " c || return 0
@@ -5416,7 +5576,8 @@ EOF
       5) tg_menu ;;
       6) (logs_clean); pause ;;
       7) swap_menu ;;
-      8) (ui_icon_menu); ui_load; pause ;;
+      8) (tz_menu); pause ;;
+      9) (ui_icon_menu); ui_load; pause ;;
       0|q) return 0 ;;
       *) warn "无效选择" ;;
     esac
@@ -5474,6 +5635,7 @@ wsm v$WSM_VER - Web Server Manager
   wsm ssh                           SSH 安全 (密钥登录/关闭密码/改端口)
   wsm tg                            Telegram 告警设置
   wsm icons nerd|plain              菜单图标: Nerd 字体图标 / 普通符号
+  wsm timezone [Asia/Shanghai]      查看 / 设置服务器时区
   wsm xboard-domains [站点]         设置主页/订阅/节点三个域名
   wsm add-proxy [域名] [后端URL]    新建反向代理
   wsm update [-y]                   从 Git 仓库更新脚本 (-y 不确认)
@@ -5511,6 +5673,7 @@ mkdir -p "$META_DIR" "$CERT_DIR" "$AUTH_DIR"
 case ${1:-menu} in
   menu)         main_menu ;;
   icons)        ui_icon_set "${2:-}" ;;
+  timezone)     if [[ -n ${2:-} ]]; then tz_set "$2"; else echo "时区: $(tz_get)  时间: $(tz_now)"; fi ;;
   install)      cmd_install ;;
   php-install)  install_php "${2:-}" ;;
   db-install)   install_db ;;
