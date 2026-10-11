@@ -18,8 +18,9 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="2.6.1"
+WSM_VER="2.6.2"
 # CHANGELOG-BEGIN  (更新时会显示比当前版本新的条目, 新的写在最上面)
+# v2.6.2 添加异地目标失败时自动清理残留配置; 同名旧配置可直接覆盖
 # v2.6.1 异地备份添加服务器时检测密钥登录, 对方关闭了密钥登录可一键帮忙开启; SSH 安全菜单会自动打开被关闭的密钥登录
 # v2.6 全量备份/一键搬家/定时异地备份(谷歌网盘、其他服务器); Telegram 告警; Swap 管理; CF 真实IP对所有站点生效; 防CC不再限速 Xboard 后台; 自动修复旧版 Debian 软件源; 更新时显示更新内容, 更新失败自动回滚; 日志过大提醒
 # v2.5.1 生成的 SSH 私钥保存到 /root/ssh-key/ 方便下载
@@ -4567,16 +4568,22 @@ fb_rclone_add() {  # fb_rclone_add 名称 < 配置内容 (key = value 行)
   chmod 600 "$f"
 }
 
-fb_name_ok() {  # 远程名称: 字母数字横线, 且未被占用
+fb_name_ok() {  # 远程名称: 字母数字横线; 同名的旧配置没在用就可以覆盖
   [[ $1 =~ ^[A-Za-z0-9_-]{1,30}$ ]] || { err "名称只能用字母数字 _ -"; return 1; }
-  if rclone listremotes 2>/dev/null | grep -qx "$1:"; then err "名称 $1 已存在"; return 1; fi
+  rclone listremotes 2>/dev/null | grep -qx "$1:" || return 0
+  fb_load
+  if [[ " $FB_TARGETS " == *" $1:"* ]]; then err "名称 $1 正在作为备份目标使用, 请换个名字"; return 1; fi
+  confirm "已有一个叫 $1 的旧配置 (之前添加失败留下的?), 覆盖它?" y || return 1
+  rclone config delete "$1" >/dev/null 2>&1
 }
 
 fb_target_set() {  # fb_target_set 远程名 目录 : 测试并加入异地目标
   local t="$1:$2"
   info "测试连接 ..."
   if ! rclone mkdir "$t" 2>/tmp/wsm_rclone_err || ! rclone lsf "$t" --max-depth 1 >/dev/null 2>>/tmp/wsm_rclone_err; then
-    err "连接失败:"; tail -3 /tmp/wsm_rclone_err >&2; return 1
+    err "连接失败:"; tail -3 /tmp/wsm_rclone_err >&2
+    rclone config delete "$1" >/dev/null 2>&1
+    return 1
   fi
   fb_load
   [[ " $FB_TARGETS " == *" $t "* ]] || FB_TARGETS="${FB_TARGETS:+$FB_TARGETS }$t"
