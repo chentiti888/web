@@ -18,8 +18,10 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="2.7.2"
+WSM_VER="2.8"
 # CHANGELOG-BEGIN  (更新时会显示比当前版本新的条目, 新的写在最上面)
+# v2.8 菜单图标可切换: Nerd 字体图标 (系统与服务 → 8, 或 wsm icons nerd) / 普通符号
+# v2.7.4 图标恢复为原来那套 (保留按列对齐和绿色退出)
 # v2.7.2 主菜单说明文字严格对齐, 退出改为绿色
 # v2.7.1 主菜单和程序下载分类加上单色图标
 # v2.7 菜单重新整理 (9 项); 软件商店改为程序下载, 按 面板/网站环境/开发运行/系统工具 分类; Xboard 移到程序下载, 新增 3x-ui; 删除文件工具和 SFTP 账号; Swap 移到系统与服务, 防篡改移到安全防护
@@ -56,6 +58,28 @@ pad_w() {
   n=$(( ${#t} + (${#s} - ${#t}) / 3 * 2 ))
   printf '%s%*s' "$s" $((w > n ? w - n : 0)) ''
 }
+# ---------------- 菜单图标风格: plain = 普通符号 (任何终端都能显示), nerd = Nerd 字体图标 (终端需用 Nerd 字体)
+UI_CONF=$WSM_DIR/ui.conf
+ICON_STYLE=plain
+declare -A ICO_PLAIN=([web]="⌂" [ssl]="◈" [php]="◇" [db]="▤" [bak]="⇅" [sys]="◎" [app]="⇩" [sec]="◆" [upd]="↻" [exit]="×" [c_panel]="▣" [c_web]="◫" [c_dev]="❯" [c_tool]="▥")
+declare -A ICO_NERD=([web]="" [ssl]="" [php]="" [db]="" [bak]="" [sys]="" [app]="" [sec]="" [upd]="" [exit]="" [c_panel]="" [c_web]="" [c_dev]="" [c_tool]="")
+ui_load() { ICON_STYLE=plain; [[ -f $UI_CONF ]] && source "$UI_CONF"; [[ $ICON_STYLE == nerd ]] || ICON_STYLE=plain; return 0; }
+ico() { if [[ $ICON_STYLE == nerd ]]; then printf '%s' "${ICO_NERD[$1]:-}"; else printf '%s' "${ICO_PLAIN[$1]:-}"; fi; }
+ui_icon_set() {  # ui_icon_set plain|nerd
+  [[ $1 == nerd || $1 == plain ]] || { err "只能是 nerd 或 plain"; return 1; }
+  mkdir -p "$WSM_DIR"; printf 'ICON_STYLE=%s\n' "$1" > "$UI_CONF"; ICON_STYLE=$1
+  info "菜单图标: $([[ $1 == nerd ]] && echo "Nerd 字体图标" || echo "普通符号")"
+}
+ui_icon_menu() {
+  local c
+  ui_load
+  echo "  当前: $([[ $ICON_STYLE == nerd ]] && echo "Nerd 字体图标" || echo "普通符号")"
+  echo "  Nerd 图标更清晰, 但终端必须用 Nerd 字体 (如 JetBrains Mono Nerd),"
+  echo "  否则会显示成方框。没把握就用普通符号。"
+  choose c "选择:" "Nerd 字体图标" "普通符号" || return 0
+  if [[ $c == Nerd* ]]; then ui_icon_set nerd; else ui_icon_set plain; fi
+}
+
 # mi 序号 图标 名称 说明 : 主菜单一行
 # 用"跳到第 N 列"控制码定位, 图标在不同终端显示 1 格还是 2 格都不影响对齐
 mi() { printf ' %2s) %s\e[8G%s\e[20G%s\n' "$1" "$2" "$3" "${4:-}"; }
@@ -2614,7 +2638,7 @@ APP_IDS=(xboard 3xui
          nodejs pm2 python java git supervisor docker
          rclone ffmpeg imagemagick monitor)
 
-app_cat_icon() { case $1 in 面板程序) echo "▣" ;; 网站环境) echo "◫" ;; 开发运行) echo "❯" ;; *) echo "▥" ;; esac; }
+app_cat_icon() { case $1 in 面板程序) ico c_panel ;; 网站环境) ico c_web ;; 开发运行) ico c_dev ;; *) ico c_tool ;; esac; }
 
 app_cat() {
   case $1 in
@@ -2938,6 +2962,7 @@ app_list() {
 
 menu_store() {
   local c i id cat last st
+  ui_load
   while true; do
     title "程序下载"
     i=0; last=""
@@ -5356,6 +5381,7 @@ menu_system() {
       (服务挂了/磁盘满/证书到期/备份结果)
    6) 清理日志
    7) Swap 虚拟内存
+   8) 菜单图标风格 (Nerd/普通)
    0) 返回
 EOF
     read -r -p "请选择: " c || return 0
@@ -5367,6 +5393,7 @@ EOF
       5) tg_menu ;;
       6) (logs_clean); pause ;;
       7) swap_menu ;;
+      8) (ui_icon_menu); ui_load; pause ;;
       0|q) return 0 ;;
       *) warn "无效选择" ;;
     esac
@@ -5376,20 +5403,21 @@ EOF
 main_menu() {
   local c
   SERVER_IP=$(public_ip)
+  ui_load
   realip_ensure
   while true; do
     dashboard
     echo
-    mi 1 "⌂" "网站管理" "新建/设置/删除"
-    mi 2 "◈" "SSL 证书" "申请/续期"
-    mi 3 "◇" "PHP 管理" "版本/扩展/参数"
-    mi 4 "▤" "数据库" "创建/备份/phpMyAdmin"
-    mi 5 "⇅" "备份与搬家" "全量/异地/定时"
-    mi 6 "◎" "系统与服务" "服务/日志/Swap/告警"
-    mi 7 "⇩" "程序下载" "面板/环境/工具"
-    mi 8 "◆" "安全防护" "源站/SSH/防篡改"
-    mi 9 "↻" "更新脚本" "从 Git 仓库更新"
-    printf '  0) %s\e[8G%s\n' "×" "${G}退出${N}"
+    mi 1 "$(ico web)" "网站管理" "新建/设置/删除"
+    mi 2 "$(ico ssl)" "SSL 证书" "申请/续期"
+    mi 3 "$(ico php)" "PHP 管理" "版本/扩展/参数"
+    mi 4 "$(ico db)" "数据库" "创建/备份/phpMyAdmin"
+    mi 5 "$(ico bak)" "备份与搬家" "全量/异地/定时"
+    mi 6 "$(ico sys)" "系统与服务" "服务/日志/Swap/告警"
+    mi 7 "$(ico app)" "程序下载" "面板/环境/工具"
+    mi 8 "$(ico sec)" "安全防护" "源站/SSH/防篡改"
+    mi 9 "$(ico upd)" "更新脚本" "从 Git 仓库更新"
+    printf '  0) %s\e[8G%s\n' "$(ico exit)" "${G}退出${N}"
     read -r -p "请选择: " c || exit 0
     case $c in
       1) menu_sites ;;
@@ -5422,6 +5450,7 @@ wsm v$WSM_VER - Web Server Manager
   wsm cf-firewall [on|off|refresh]  源站保护: 80/443 只允许 Cloudflare
   wsm ssh                           SSH 安全 (密钥登录/关闭密码/改端口)
   wsm tg                            Telegram 告警设置
+  wsm icons nerd|plain              菜单图标: Nerd 字体图标 / 普通符号
   wsm xboard-domains [站点]         设置主页/订阅/节点三个域名
   wsm add-proxy [域名] [后端URL]    新建反向代理
   wsm update [-y]                   从 Git 仓库更新脚本 (-y 不确认)
@@ -5458,6 +5487,7 @@ mkdir -p "$META_DIR" "$CERT_DIR" "$AUTH_DIR"
 
 case ${1:-menu} in
   menu)         main_menu ;;
+  icons)        ui_icon_set "${2:-}" ;;
   install)      cmd_install ;;
   php-install)  install_php "${2:-}" ;;
   db-install)   install_db ;;
