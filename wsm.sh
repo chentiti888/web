@@ -5,12 +5,12 @@
 #  网站: PHP / 静态 / 反向代理 / 域名重定向, 多域名绑定, 伪静态, 子路径反代,
 #        访问密码, 防盗链, IP 黑白名单, Gzip, 静态缓存, 停用/启用, 日志分析,
 #        防篡改(文件锁定 + 可写目录禁PHP + 完整性基线检测/自动还原)
-#        WordPress 一键部署, SFTP 账号(隔离到网站目录), 访问统计(PV/IP/流量/TOP/蜘蛛)
-#        文件工具(大文件/解压/打包/批量替换/编辑/木马扫描), 在线更新(Git 仓库)
+#        WordPress 一键部署, 访问统计(PV/IP/流量/TOP/蜘蛛), 在线更新(Git 仓库)
+#        全量备份/一键搬家/异地备份, Telegram 告警, SSH 密钥登录, 源站保护
 #  证书: Let's Encrypt(HTTP) / 通配符(Cloudflare DNS) / 自有证书 / 自签名, 自动续期
 #  PHP : 7.4-8.4 多版本共存, 扩展, 参数, 禁用函数, FPM 进程数
 #  其他: MariaDB + phpMyAdmin, Redis, Composer, 备份/还原, 计划任务, 服务管理,
-#        软件商店 (Node.js/PM2/Python/Java/Docker/PostgreSQL/Memcached 等)
+#        程序下载: 面板 (Xboard / 3x-ui), 网站环境, 开发运行环境, 系统工具
 #  系统: Debian 10+ / Ubuntu 20.04+ (推荐)   RHEL 系 (Rocky/Alma/CentOS) 尽力支持
 #
 #  用法: bash wsm.sh install      首次安装环境 (之后直接用 wsm 命令)
@@ -18,8 +18,11 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="2.6.3"
+WSM_VER="2.7.2"
 # CHANGELOG-BEGIN  (更新时会显示比当前版本新的条目, 新的写在最上面)
+# v2.7.2 主菜单说明文字严格对齐, 退出改为绿色
+# v2.7.1 主菜单和程序下载分类加上单色图标
+# v2.7 菜单重新整理 (9 项); 软件商店改为程序下载, 按 面板/网站环境/开发运行/系统工具 分类; Xboard 移到程序下载, 新增 3x-ui; 删除文件工具和 SFTP 账号; Swap 移到系统与服务, 防篡改移到安全防护
 # v2.6.3 所有选择列表都有 0) 返回, 不会再误删; 输入名字/路径时可输入 0 返回; 远程名称必须字母开头
 # v2.6.2 添加异地目标失败时自动清理残留配置; 同名旧配置可直接覆盖
 # v2.6.1 异地备份添加服务器时检测密钥登录, 对方关闭了密钥登录可一键帮忙开启; SSH 安全菜单会自动打开被关闭的密钥登录
@@ -53,8 +56,9 @@ pad_w() {
   n=$(( ${#t} + (${#s} - ${#t}) / 3 * 2 ))
   printf '%s%*s' "$s" $((w > n ? w - n : 0)) ''
 }
-# mi 序号 名称 说明 : 主菜单一行 (名称列固定 12 格, 手机窄屏也不换行)
-mi() { printf ' %2s) ' "$1"; pad_w "$2" 12; printf '%s\n' "${3:-}"; }
+# mi 序号 图标 名称 说明 : 主菜单一行
+# 用"跳到第 N 列"控制码定位, 图标在不同终端显示 1 格还是 2 格都不影响对齐
+mi() { printf ' %2s) %s\e[8G%s\e[20G%s\n' "$1" "$2" "$3" "${4:-}"; }
 
 pause() { echo; read -r -p "${D}按回车键继续...${N}" _ || true; }
 
@@ -1226,7 +1230,6 @@ del_site() {
   use_site "${1:-}" || return 1
   local d=$DOMAIN
   confirm "确认删除站点 $d ? 此操作不可恢复" n || return 0
-  sftp_purge_domain "$d"
   xb_purge "$d" "$ROOT"
   rm -f "$NGX_CONF/$d.conf"
   [[ $TAMPER == 1 && -d $ROOT ]] && chattr -R -i "$ROOT" 2>/dev/null
@@ -1782,7 +1785,7 @@ site_settings() {
     echo
     local -a __it=("域名绑定" "SSL/HTTPS" "切换PHP版本" "网站根目录" "后端/跳转目标" "伪静态规则" \
       "反代子路径" "访问密码" "防盗链/缓存" "IP黑白名单" "Gzip压缩" "停用/启用" \
-      "查看Nginx配置" "日志统计" "备份此站点" "修复权限" "网站防篡改" "文件工具" "防CC/防恶意bot")
+      "查看Nginx配置" "日志统计" "备份此站点" "修复权限" "网站防篡改" "防CC/防恶意bot")
     local __k
     for __k in "${!__it[@]}"; do
       printf '%3d) ' $((__k + 1)); pad_w "${__it[__k]}" 14
@@ -1809,8 +1812,7 @@ site_settings() {
       15) backup_site "$d" 7 ;;
       16) need_type php static && [[ -d $ROOT ]] && fix_perms_dir "$ROOT" && info "权限已修复" ;;
       17) need_type php static && tamper_menu "$d" ;;
-      18) need_type php static && files_menu "$d" ;;
-      19) guard_menu "$d" ;;
+      18) guard_menu "$d" ;;
       0|q) return 0 ;;
       *) warn "无效选择" ;;
     esac
@@ -2135,7 +2137,7 @@ php_fpm_tune() {
 }
 
 # ================================================================ 数据库
-need_mysql() { command -v mysql >/dev/null 2>&1 || { err "还没安装 MariaDB, 请先在 [软件与环境] 里安装"; return 1; }; }
+need_mysql() { command -v mysql >/dev/null 2>&1 || { err "还没安装 MariaDB, 请先在 [程序下载] 里安装"; return 1; }; }
 
 install_db() {
   info "安装 MariaDB ..."
@@ -2573,20 +2575,58 @@ swap_menu() {
   done
 }
 
-# ================================================================ 软件商店
-APP_IDS=(nodejs pm2 python java git composer supervisor
-         mariadb postgresql redis memcached phpmyadmin
-         docker rclone ffmpeg imagemagick monitor)
+# ---------------- 3x-ui 面板 (官方脚本: github.com/MHSanaei/3x-ui)
+xui_install() {
+  echo "将运行 3x-ui 官方安装脚本, 安装过程中按提示设置面板端口和账号密码。"
+  warn "节点不要用 80/443 端口 (被 Nginx 占用); 开了源站保护也不影响其他端口"
+  confirm "开始安装?" y || return 0
+  bash <(curl -fsSL https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh) \
+    || { err "安装失败, 请检查网络"; return 1; }
+}
+
+xui_menu() {
+  local c
+  while true; do
+    title "3x-ui 面板"
+    echo "  Xray 多协议节点面板 (x-ui 增强版)"
+    if ! app_installed 3xui; then
+      echo "  状态: ${Y}未安装${N}"
+      choose c "操作:" "安装" "返回" || return 0
+      [[ $c == 安装 ]] && { (xui_install); pause; continue; }
+      return 0
+    fi
+    echo "  状态: ${G}已安装${N}   服务: $(svc_state x-ui)"
+    choose c "操作:" "打开 x-ui 管理菜单" "查看面板地址和账号" "重启" "更新" "卸载" "返回" || return 0
+    case $c in
+      打开*) x-ui ;;
+      查看*) x-ui settings 2>/dev/null || /usr/local/x-ui/x-ui setting -show true; pause ;;
+      重启) systemctl restart x-ui && info "已重启"; pause ;;
+      更新) x-ui update; pause ;;
+      卸载) (app_uninstall 3xui); pause ;;
+      *) return 0 ;;
+    esac
+  done
+}
+
+# ================================================================ 程序下载 (原软件商店)
+APP_IDS=(xboard 3xui
+         webbase mariadb redis composer phpmyadmin postgresql memcached
+         nodejs pm2 python java git supervisor docker
+         rclone ffmpeg imagemagick monitor)
+
+app_cat_icon() { case $1 in 面板程序) echo "▣" ;; 网站环境) echo "◫" ;; 开发运行) echo "❯" ;; *) echo "▥" ;; esac; }
 
 app_cat() {
   case $1 in
-    nodejs|pm2|python|java|git|composer|supervisor) echo "开发与运行环境" ;;
-    mariadb|postgresql|redis|memcached|phpmyadmin) echo "数据库与缓存" ;;
-    *) echo "系统与工具" ;;
+    xboard|3xui) echo "面板程序" ;;
+    webbase|mariadb|redis|composer|phpmyadmin|postgresql|memcached) echo "网站环境" ;;
+    nodejs|pm2|python|java|git|supervisor|docker) echo "开发运行" ;;
+    *) echo "系统工具" ;;
   esac
 }
 app_name() {
   case $1 in
+    xboard) echo "Xboard 面板" ;; 3xui) echo "3x-ui 面板" ;; webbase) echo "Nginx 网站环境" ;;
     nodejs) echo "Node.js" ;; pm2) echo "PM2" ;; python) echo "Python3" ;; java) echo "Java (JRE)" ;;
     git) echo "Git" ;; composer) echo "Composer" ;; supervisor) echo "Supervisor" ;;
     mariadb) echo "MariaDB" ;; postgresql) echo "PostgreSQL" ;; redis) echo "Redis" ;;
@@ -2597,6 +2637,9 @@ app_name() {
 }
 app_desc() {
   case $1 in
+    xboard) echo "机场面板, 自动建站+数据库+队列" ;;
+    3xui) echo "Xray 多协议节点面板 (x-ui 增强版)" ;;
+    webbase) echo "Nginx + 证书工具 + PHP, 建站必装" ;;
     nodejs) echo "JS 运行环境 + npm" ;; pm2) echo "Node 项目进程守护" ;;
     python) echo "Python3 + pip + venv" ;; java) echo "OpenJDK 运行环境" ;;
     git) echo "代码版本管理" ;; composer) echo "PHP 依赖管理" ;;
@@ -2611,6 +2654,9 @@ app_desc() {
 }
 app_installed() {
   case $1 in
+    xboard) [[ -n $(xb_sites) ]] ;;
+    3xui) command -v x-ui >/dev/null 2>&1 || [[ -x /usr/local/x-ui/x-ui ]] ;;
+    webbase) command -v nginx >/dev/null 2>&1 ;;
     nodejs) command -v node >/dev/null 2>&1 ;;
     pm2) command -v pm2 >/dev/null 2>&1 ;;
     python) command -v python3 >/dev/null 2>&1 && command -v pip3 >/dev/null 2>&1 ;;
@@ -2633,6 +2679,9 @@ app_installed() {
 }
 app_version() {
   case $1 in
+    xboard) echo "$(xb_sites | wc -l) 个站点" ;;
+    3xui) /usr/local/x-ui/x-ui -v 2>/dev/null | head -1 ;;
+    webbase) nginx -v 2>&1 | sed 's#.*/##' ;;
     nodejs) echo "$(node -v 2>/dev/null) / npm $(npm -v 2>/dev/null)" ;;
     pm2) pm2 -v 2>/dev/null | tail -1 ;;
     python) python3 --version 2>&1 ;;
@@ -2654,6 +2703,7 @@ app_version() {
 }
 app_service() {  # 输出该软件对应的 systemd 服务名(没有则为空)
   case $1 in
+    3xui) echo x-ui ;; webbase) echo nginx ;;
     mariadb) echo mariadb ;; postgresql) echo postgresql ;; memcached) echo memcached ;;
     docker) echo docker ;;
     redis) if unit_exists redis-server; then echo redis-server; else echo redis; fi ;;
@@ -2783,6 +2833,9 @@ app_install() {
   app_valid "${1:-}" || { err "未知软件: ${1:-}"; return 1; }
   pkg_refresh
   case $1 in
+    xboard) xb_install ;;
+    3xui) xui_install ;;
+    webbase) if command -v nginx >/dev/null 2>&1; then install_base; else cmd_install; fi ;;
     nodejs) install_nodejs ;;
     pm2) install_pm2 ;;
     python) install_python ;;
@@ -2809,6 +2862,9 @@ app_uninstall() {
   app_valid "${1:-}" || { err "未知软件: ${1:-}"; return 1; }
   local svc; svc=$(app_service "$1")
   case $1 in
+    xboard) warn "Xboard 是网站, 请到 [网站管理] → [删除站点] 删除对应的站点"; return 0 ;;
+    3xui) confirm_typed "确认卸载 3x-ui (面板和节点配置都会删除)" || return 0; x-ui uninstall ;;
+    webbase) warn "卸载 Nginx 会让所有网站停止访问, 这里不提供卸载"; return 0 ;;
     nodejs) pkg_remove nodejs; pkg_remove npm 2>/dev/null; rm -f /etc/apt/sources.list.d/nodesource.list ;;
     pm2) npm rm -g pm2; systemctl disable pm2-root >/dev/null 2>&1; rm -f /etc/systemd/system/pm2-root.service ;;
     python) warn "Python3 是系统组件, 只卸载 pip 和 venv"; if [[ $PM == apt ]]; then pkg_remove python3-pip python3-venv; else pkg_remove python3-pip; fi ;;
@@ -2842,6 +2898,7 @@ app_uninstall() {
 app_manage() {
   local id=$1 c svc
   local -a opts
+  case $id in xboard) xb_app_menu; return 0 ;; 3xui) xui_menu; return 0 ;; esac
   while true; do
     title "$(app_name "$id")"
     echo "  简介: $(app_desc "$id")"
@@ -2882,13 +2939,14 @@ app_list() {
 menu_store() {
   local c i id cat last st
   while true; do
-    title "软件商店"
+    title "程序下载"
     i=0; last=""
     for id in "${APP_IDS[@]}"; do
       i=$((i + 1))
       cat=$(app_cat "$id")
-      if [[ $cat != "$last" ]]; then echo; echo "  ${B}${cat}${N}"; last=$cat; fi
+      if [[ $cat != "$last" ]]; then echo; echo "  ${B}$(app_cat_icon "$cat") ${cat}${N}"; last=$cat; fi
       if app_installed "$id"; then st="${G}已装${N}"; else st="${D}未装${N}"; fi
+      [[ $id == xboard ]] && app_installed xboard && st="${G}$(xb_sites | wc -l) 个站点${N}"
       printf "  %2d) " "$i"; pad_w "$(app_name "$id")" 16; echo "$st"
     done
     echo
@@ -2896,220 +2954,6 @@ menu_store() {
     [[ -z $c || $c == 0 || $c == q ]] && return 0
     if [[ $c =~ ^[0-9]+$ ]] && ((c >= 1 && c <= ${#APP_IDS[@]})); then app_manage "${APP_IDS[c - 1]}"
     else warn "无效选择"; fi
-  done
-}
-
-# ================================================================ SFTP 账号
-# 原理: 复用系统自带的 OpenSSH (internal-sftp + chroot), 不新增任何常驻进程。
-#       每个账号被关进 /www/sftp/<用户>/ , 里面只挂载(bind)对应网站目录, 看不到系统其他文件。
-#       账号用户 ID 与 Web 运行用户相同, 上传的文件天然属于网站用户, 不会有权限问题。
-SFTP_DIR=$WSM_DIR/sftp
-SFTP_HOME=/www/sftp
-SFTP_GROUP=wsm-sftp
-SFTP_MAIN=/etc/ssh/sshd_config
-SFTP_DROPIN=/etc/ssh/sshd_config.d/99-wsm-sftp.conf
-SFTP_MARK="# wsm-sftp"
-
-sshd_service() { if unit_exists ssh; then echo ssh; else echo sshd; fi; }
-
-sftp_port() {
-  local p
-  p=$(sshd -T 2>/dev/null | awk '$1=="port"{print $2; exit}')
-  echo "${p:-22}"
-}
-
-sftp_block() {
-  cat <<'EOS'
-Match Group wsm-sftp
-    ChrootDirectory %h
-    ForceCommand internal-sftp -u 022
-    PasswordAuthentication yes
-    AllowTcpForwarding no
-    X11Forwarding no
-    PermitTTY no
-EOS
-}
-
-sftp_ensure_conf() {
-  command -v sshd >/dev/null 2>&1 || [[ -x /usr/sbin/sshd ]] || { err "没有检测到 OpenSSH 服务端 (sshd), 请先安装 openssh-server"; return 1; }
-  getent group "$SFTP_GROUP" >/dev/null 2>&1 || groupadd "$SFTP_GROUP" || return 1
-  mkdir -p "$SFTP_HOME" "$SFTP_DIR"
-  chown root:root "$SFTP_HOME"; chmod 755 "$SFTP_HOME"
-  local main=$SFTP_MAIN bak
-  [[ -f $main ]] || { err "找不到 $main, 无法配置 SFTP"; return 1; }
-  [[ -f $SFTP_DROPIN ]] && return 0
-  grep -qs "^$SFTP_MARK begin" "$main" && return 0
-  bak=$(mktemp); cp -a "$main" "$bak"
-  if grep -qE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/' "$main"; then
-    mkdir -p "$(dirname "$SFTP_DROPIN")"
-    sftp_block > "$SFTP_DROPIN"
-  else
-    { echo; echo "$SFTP_MARK begin"; sftp_block; echo "$SFTP_MARK end"; } >> "$main"
-  fi
-  if ! sshd -t 2>/dev/null; then
-    rm -f "$SFTP_DROPIN"; cp -a "$bak" "$main"; rm -f "$bak"
-    err "sshd 配置检测未通过, 已自动回滚 (没有改动 SSH)"; return 1
-  fi
-  rm -f "$bak"
-  systemctl reload "$(sshd_service)" 2>/dev/null || systemctl restart "$(sshd_service)" 2>/dev/null || true
-  info "已启用 SFTP 隔离配置 (已重载 SSH, 当前登录不受影响)"
-}
-
-sftp_default_user() {
-  local u
-  u=$(printf '%s' "$1" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9' '_')
-  u="s_${u}"
-  echo "${u:0:32}"
-}
-
-sftp_gen_pw() { openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 16; }
-
-sftp_ask_pw() {  # -> SFTP_PW
-  local mode
-  choose mode "密码:" "自动生成强密码" "我自己输入" || return 1
-  if [[ $mode == 自动* ]]; then SFTP_PW=$(sftp_gen_pw)
-  else
-    read_secret SFTP_PW "密码 (8-64 位, 字母数字和 ._@#%+=-)"
-    [[ $SFTP_PW =~ ^[A-Za-z0-9._@#%+=-]{8,64}$ ]] || { err "密码不符合要求"; return 1; }
-  fi
-}
-
-sftp_add() {
-  use_site "" || return 1
-  need_type php static || return 1
-  [[ -d $ROOT ]] || { err "网站目录不存在: $ROOT"; return 1; }
-  local d=$DOMAIN root=$ROOT u def perm home opt uid gid shell
-  sftp_ensure_conf || return 1
-  def=$(sftp_default_user "$d")
-  read -r -p "SFTP 用户名 [$def]: " u || return 1
-  u=${u:-$def}
-  [[ $u =~ ^[a-z][a-z0-9_]{2,31}$ ]] || { err "用户名: 小写字母开头, 3-32 位小写字母/数字/下划线"; return 1; }
-  id "$u" >/dev/null 2>&1 && { err "系统里已存在用户 $u"; return 1; }
-  choose perm "权限:" "读写 (可上传 / 修改 / 删除)" "只读 (只能查看 / 下载)" || return 1
-  sftp_ask_pw || return 1
-  home=$SFTP_HOME/$u
-  uid=$(id -u "$WEB_USER"); gid=$(id -g "$WEB_USER")
-  shell=$(command -v nologin 2>/dev/null || echo /usr/sbin/nologin)
-  mkdir -p "$home/www"
-  chown root:root "$home"; chmod 755 "$home"
-  if ! useradd -o -u "$uid" -g "$gid" -G "$SFTP_GROUP" -d "$home" -M -s "$shell" "$u"; then
-    rmdir "$home/www" "$home" 2>/dev/null; err "创建用户失败"; return 1
-  fi
-  echo "$u:$SFTP_PW" | chpasswd || { userdel -f "$u" 2>/dev/null; rmdir "$home/www" "$home" 2>/dev/null; err "设置密码失败"; return 1; }
-  opt=bind; [[ $perm == 只读* ]] && opt=bind,ro
-  if ! mount --bind "$root" "$home/www"; then
-    userdel -f "$u" 2>/dev/null; rmdir "$home/www" "$home" 2>/dev/null; err "挂载网站目录失败"; return 1
-  fi
-  [[ $opt == bind,ro ]] && mount -o remount,bind,ro "$home/www" 2>/dev/null
-  printf '%s %s none %s 0 0\n' "$root" "$home/www" "$opt" >> /etc/fstab
-  systemctl daemon-reload >/dev/null 2>&1 || true
-  {
-    printf 'DOMAIN=%q\n' "$d"
-    printf 'ROOT=%q\n' "$root"
-    printf 'PERM=%q\n' "$([[ $opt == bind,ro ]] && echo ro || echo rw)"
-  } > "$SFTP_DIR/$u.conf"
-  echo; info "SFTP 账号已创建"
-  echo "  协议:   SFTP (不是 FTP)"
-  echo "  地址:   $(public_ip_cached)"
-  echo "  端口:   $(sftp_port)  (就是 SSH 端口)"
-  echo "  用户:   $u"
-  echo "  密码:   $SFTP_PW"
-  echo "  权限:   $([[ $opt == bind,ro ]] && echo 只读 || echo 读写)"
-  echo "  登录后: 看到的 /www 目录就是网站根目录 ($d)"
-  echo
-  echo "  客户端: FileZilla / Xftp / WinSCP / 手机 Termius 均可, 选择 SFTP 协议"
-  [[ $TAMPER == 1 ]] && warn "该网站处于防篡改锁定状态, 账号暂时无法写入; 需要时先到 [网站防篡改] 临时解锁"
-  return 0
-}
-
-sftp_users() {
-  local f
-  for f in "$SFTP_DIR"/*.conf; do [[ -e $f ]] && basename "$f" .conf; done
-  return 0
-}
-
-sftp_list() {
-  local u n=0
-  printf "%-18s %-20s %s\n" "用户" "网站" "权限"
-  while read -r u; do
-    [[ -n $u ]] || continue
-    n=$((n + 1))
-    ( # shellcheck disable=SC1090
-      DOMAIN=""; PERM=rw; source "$SFTP_DIR/$u.conf"
-      printf "%-18s %-20s %s%s\n" "${u:0:17}" "${DOMAIN:0:19}" "$([[ $PERM == ro ]] && echo 只读 || echo 读写)" \
-        "$(mountpoint -q "$SFTP_HOME/$u/www" 2>/dev/null || echo '  (未挂载!)')"
-    )
-  done < <(sftp_users)
-  ((n)) || echo "(还没有 SFTP 账号)"
-  return 0
-}
-
-sftp_pick_user() {  # -> SFTP_USER
-  SFTP_USER=""
-  local u i=0 c
-  local -a arr=()
-  while read -r u; do [[ -n $u ]] && arr+=("$u"); done < <(sftp_users)
-  ((${#arr[@]})) || { warn "还没有 SFTP 账号"; return 1; }
-  echo "选择账号:"
-  for u in "${arr[@]}"; do i=$((i + 1)); printf "   %2d) %s\n" "$i" "$u"; done
-  read -r -p "输入序号或用户名 (回车取消): " c || return 1
-  [[ -z $c ]] && return 1
-  if [[ $c =~ ^[0-9]+$ ]] && ((c >= 1 && c <= ${#arr[@]})); then SFTP_USER=${arr[c - 1]}; return 0; fi
-  [[ " ${arr[*]} " == *" $c "* ]] && { SFTP_USER=$c; return 0; }
-  err "无效选择"; return 1
-}
-
-sftp_passwd() {
-  sftp_pick_user || return 1
-  sftp_ask_pw || return 1
-  echo "$SFTP_USER:$SFTP_PW" | chpasswd || { err "修改失败"; return 1; }
-  info "已修改 $SFTP_USER 的密码: $SFTP_PW"
-}
-
-sftp_remove_user() {  # 只卸载挂载点并删除账号, 绝不删除网站文件
-  local u=$1 home=$SFTP_HOME/$1
-  [[ $u =~ ^[a-z][a-z0-9_]{2,31}$ ]] || return 1
-  if mountpoint -q "$home/www" 2>/dev/null; then
-    umount "$home/www" 2>/dev/null || umount -l "$home/www" 2>/dev/null \
-      || { err "卸载 $home/www 失败, 已中止 (未删除任何文件)"; return 1; }
-  fi
-  sed -i "\\|^[^ ]* $home/www |d" /etc/fstab
-  systemctl daemon-reload >/dev/null 2>&1 || true
-  if id "$u" >/dev/null 2>&1; then userdel -f "$u" >/dev/null 2>&1 || true; fi
-  id "$u" >/dev/null 2>&1 && { err "账号 $u 删除失败"; return 1; }
-  rmdir "$home/www" "$home" 2>/dev/null
-  rm -f "$SFTP_DIR/$u.conf"
-  return 0
-}
-
-sftp_del() {
-  sftp_pick_user || return 1
-  confirm "删除 SFTP 账号 $SFTP_USER ? (网站文件不会被删除)" n || return 0
-  sftp_remove_user "$SFTP_USER" && info "已删除 $SFTP_USER"
-}
-
-sftp_purge_domain() {  # 删除站点时调用: 清理该站点的全部 SFTP 账号
-  local u
-  while read -r u; do
-    [[ -n $u ]] || continue
-    if ( DOMAIN=""; source "$SFTP_DIR/$u.conf"; [[ $DOMAIN == "$1" ]] ); then sftp_remove_user "$u" >/dev/null; fi
-  done < <(sftp_users)
-  return 0
-}
-
-sftp_menu() {
-  local c
-  while true; do
-    title "SFTP 账号"
-    echo "  复用系统 SSH, 不增加常驻进程; 每个账号只能看到自己的网站目录"
-    choose c "操作:" "添加账号" "账号列表" "修改密码" "删除账号" "返回" || return 0
-    case $c in
-      添加*) (sftp_add); pause ;;
-      账号*) sftp_list; pause ;;
-      修改*) (sftp_passwd); pause ;;
-      删除*) (sftp_del); pause ;;
-      *) return 0 ;;
-    esac
   done
 }
 
@@ -3395,7 +3239,7 @@ PHP
   [[ $SSL == 1 ]] || warn "还没启用 HTTPS, 建议到 [SSL 证书] 里开启"
   echo "  以后更新: wsm xboard-update $domain"
   echo "  忘了后台地址/密码: wsm xboard-info $domain"
-  echo "  想把主页/订阅/节点分成不同域名: wsm xboard-domains  (或 网站管理 → 15)"
+  echo "  想把主页/订阅/节点分成不同域名: wsm xboard-domains  (或 程序下载 → Xboard 面板)"
   return 0
 }
 
@@ -3550,6 +3394,34 @@ xb_info() {  # xb_info [域名]: 查看后台地址/管理员, 重置管理员�
     echo "  管理员:   $e"
     echo "  新密码:   $np"
     pause
+  done
+}
+
+xb_sites() {  # 列出 Xboard 站点
+  local d
+  while read -r d; do
+    [[ -n $d ]] || continue
+    ( load_meta "$d" 2>/dev/null; xb_is_site ) && echo "$d"
+  done < <(list_site_names)
+  return 0
+}
+
+xb_app_menu() {
+  local c d
+  while true; do
+    title "Xboard 面板"
+    echo "  机场面板: 自动建站 + 数据库 + Redis + 队列服务 + 定时任务"
+    d=$(xb_sites | tr '\n' ' ')
+    echo "  已部署: ${d:-无}"
+    choose c "操作:" "新建 Xboard 站点" "更新 Xboard" "域名分离 (主页/订阅/节点)" \
+      "后台地址 / 重置管理员密码" "返回" || return 0
+    case $c in
+      新建*) (xb_install); pause ;;
+      更新*) (xb_update ""); pause ;;
+      域名*) (xb_domains ""); pause ;;
+      后台*) (xb_info "") ;;
+      *) return 0 ;;
+    esac
   done
 }
 
@@ -3749,275 +3621,19 @@ stats_cli() {  # wsm stats [域名] [1|y|7|30|all]
   if [[ -z $d ]]; then stat_overview "$r" "$r"; else pick_site "$d" || return 1; stat_show "$d" "$r" "$r"; fi
 }
 
-# ================================================================ 文件工具
-files_ok() {
-  [[ -n ${ROOT:-} && -d $ROOT ]] && safe_root "$ROOT" && return 0
-  err "网站目录不可用: ${ROOT:-空}"; return 1
+# ================================================================ 通用小工具
+sshd_service() { if unit_exists ssh; then echo ssh; else echo sshd; fi; }
+
+ssh_port_now() {  # 当前 SSH 端口
+  local p
+  p=$(sshd -T 2>/dev/null | awk '$1=="port"{print $2; exit}')
+  echo "${p:-22}"
 }
-files_unlocked() {
-  [[ $TAMPER == 1 ]] || return 0
-  warn "网站处于防篡改锁定状态, 请先到 [网站防篡改] 临时解锁"; return 1
-}
+
 files_trunc() {  # files_trunc 文本 [最大宽度]  (太长时保留结尾)
   local s=$1 n=${2:-30}
   if ((${#s} > n)); then s="~${s: -$((n - 1))}"; fi
   printf '%s' "$s"
-}
-
-files_dirsize() {
-  title "目录大小排行"
-  du -h --max-depth=1 "$ROOT" 2>/dev/null | sort -rh | head -15 | while IFS=$'\t' read -r sz p; do
-    if [[ $p == "$ROOT" ]]; then p="(整个网站)"; else p=${p#"$ROOT"/}; fi
-    printf '  %7s  %s\n' "$sz" "$(files_trunc "$p" 28)"
-  done
-}
-
-files_bigfiles() {
-  local n s p
-  read -r -p "查找大于多少 MB 的文件 [20]: " n || return 1
-  n=${n:-20}
-  [[ $n =~ ^[0-9]+$ && $n -ge 1 ]] || { err "请输入数字"; return 1; }
-  echo "大于 ${n}MB 的文件 (前 20 个):"
-  find "$ROOT" -type f -size +"${n}"M -printf '%s\t%P\n' 2>/dev/null | sort -t$'\t' -k1,1nr | head -20 |
-  while IFS=$'\t' read -r s p; do printf '  %8s  %s\n' "$(hb "$s")" "$(files_trunc "$p" 28)"; done
-  return 0
-}
-
-files_recent() {
-  local r m t p
-  choose r "查看多久内改动过的文件:" "最近 1 小时" "最近 24 小时" "最近 7 天" || return 1
-  case $r in *1\ 小时) m=60 ;; *24*) m=1440 ;; *) m=10080 ;; esac
-  echo "改动过的文件 (最新 40 个):"
-  find "$ROOT" -type f -mmin -"$m" -printf '%T@\t%Tm-%Td %TH:%TM\t%P\n' 2>/dev/null | sort -t$'\t' -k1,1nr | head -40 |
-  while IFS=$'\t' read -r _ t p; do printf '  %s  %s\n' "$t" "$(files_trunc "$p" 24)"; done
-  return 0
-}
-
-files_find_name() {
-  local kw
-  read -r -p "文件名包含: " kw || return 1
-  [[ -n $kw ]] || return 1
-  find "$ROOT" -iname "*$kw*" -printf '%P\n' 2>/dev/null | head -40 | while read -r p; do echo "  $(files_trunc "$p" 36)"; done
-  return 0
-}
-
-files_find_text() {
-  local kw line
-  read -r -p "文件内容包含 (区分大小写): " kw || return 1
-  [[ -n $kw ]] || return 1
-  grep -rInF --exclude-dir=.git --exclude-dir=node_modules -- "$kw" "$ROOT" 2>/dev/null | head -30 |
-  while IFS= read -r line; do line=${line#"$ROOT"/}; echo "  ${line:0:70}"; done
-  return 0
-}
-
-files_scan() {
-  local n=0 f
-  title "可疑代码扫描"
-  echo "  按常见木马特征做简单检查, 只能作参考, 可能有误报"
-  echo
-  echo "${B}含可疑特征的 PHP 文件${N}"
-  while IFS= read -r -d '' f; do
-    n=$((n + 1)); echo "  $(files_trunc "${f#"$ROOT"/}" 36)"
-  done < <(grep -rIlZE --include='*.php' --include='*.phtml' --include='*.php5' --exclude-dir=.git \
-    -e 'eval[[:space:]]*\([[:space:]]*(base64_decode|gzinflate|gzuncompress|str_rot13)' \
-    -e 'assert[[:space:]]*\([[:space:]]*\$_(POST|GET|REQUEST|COOKIE)' \
-    -e '(system|shell_exec|passthru|exec|popen|proc_open)[[:space:]]*\([[:space:]]*\$_(POST|GET|REQUEST|COOKIE)' \
-    -e 'base64_decode[[:space:]]*\([[:space:]]*\$_(POST|GET|REQUEST)' \
-    -e 'FilesMan|c99shell|r57shell|b374k' "$ROOT" 2>/dev/null)
-  ((n)) || echo "  (未发现)"
-  echo
-  echo "${B}上传目录里的 PHP 文件 (正常情况下不该有)${N}"
-  n=0
-  while IFS= read -r f; do
-    n=$((n + 1)); echo "  $(files_trunc "${f#"$ROOT"/}" 36)"
-  done < <(find "$ROOT" -type f \( -name '*.php' -o -name '*.phtml' -o -name '*.php5' \) \( -path '*/uploads/*' -o -path '*/upload/*' \) 2>/dev/null | head -30)
-  ((n)) || echo "  (未发现)"
-  return 0
-}
-
-files_extract() {
-  files_unlocked || return 1
-  local f dest target tmp src cnt top
-  read -r -p "压缩包路径 (zip / tar.gz / tgz / tar.bz2 / tar.xz / tar): " f || return 1
-  [[ -f $f ]] || { err "文件不存在: $f"; return 1; }
-  read -r -p "解压到 (相对网站目录, 回车=网站根目录): " dest || return 1
-  dest=${dest#/}
-  target=$(realpath -m "$ROOT/$dest")
-  case $target in "$ROOT"|"$ROOT"/*) ;; *) err "目标必须在网站目录内"; return 1 ;; esac
-  tmp=$(mktemp -d "$(dirname "$ROOT")/.wsm-x.XXXXXX") || { err "无法创建临时目录"; return 1; }
-  case $f in
-    *.zip)
-      command -v unzip >/dev/null 2>&1 || pkg_install unzip >/dev/null 2>&1 || { err "需要 unzip, 安装失败"; rm -rf "$tmp"; return 1; }
-      unzip -q -o "$f" -d "$tmp" ;;
-    *.tar.gz|*.tgz) tar -xzf "$f" -C "$tmp" ;;
-    *.tar.bz2|*.tbz2) tar -xjf "$f" -C "$tmp" ;;
-    *.tar.xz|*.txz) tar -xJf "$f" -C "$tmp" ;;
-    *.tar) tar -xf "$f" -C "$tmp" ;;
-    *) err "不支持的格式"; rm -rf "$tmp"; return 1 ;;
-  esac || { err "解压失败"; rm -rf "$tmp"; return 1; }
-  find "$tmp" -type l -delete 2>/dev/null   # 删除压缩包里的符号链接, 防止指向系统文件
-  src=$tmp
-  cnt=$(find "$tmp" -mindepth 1 -maxdepth 1 | wc -l)
-  if ((cnt == 1)); then
-    top=$(find "$tmp" -mindepth 1 -maxdepth 1)
-    if [[ -d $top ]] && confirm "压缩包最外层只有一个目录 ($(basename "$top")), 去掉这一层?" y; then src=$top; fi
-  fi
-  cnt=$(find "$src" -type f | wc -l)
-  if ! confirm "将 $cnt 个文件解压到 ${target}, 同名文件会被覆盖, 继续?" y; then rm -rf "$tmp"; return 0; fi
-  mkdir -p "$target"
-  cp -a "$src"/. "$target"/ || { err "复制失败"; rm -rf "$tmp"; return 1; }
-  rm -rf "$tmp"
-  fix_perms_dir "$target"
-  info "已解压 $cnt 个文件到 $target (已修正所有者和权限)"
-}
-
-files_pack() {
-  local out def
-  def=/root/${DOMAIN}_$(date +%Y%m%d_%H%M).tar.gz
-  read -r -p "保存到 [$def]: " out || return 1
-  out=${out:-$def}
-  [[ $out == /* ]] || { err "请填绝对路径"; return 1; }
-  case $out in "$WWW_ROOT"/*|"$ROOT"/*) err "不能保存在网站目录里 (会被公开下载)"; return 1 ;; esac
-  mkdir -p "$(dirname "$out")"
-  tar -czf "$out" -C "$(dirname "$ROOT")" "$(basename "$ROOT")" || { err "打包失败"; return 1; }
-  chmod 600 "$out"
-  info "已打包: $out ($(du -h "$out" | cut -f1))"
-}
-
-files_replace() {
-  files_unlocked || return 1
-  local find repl kind n f fe re bk dl i=0
-  local -a inc=() list=()
-  read -r -p "查找的文本: " find || return 1
-  [[ -n $find ]] || { err "不能为空"; return 1; }
-  read -r -p "替换为 (留空=删除这段文本): " repl || return 1
-  choose kind "文件范围:" "PHP 文件" "HTML / JS / CSS" "配置类 (.env .conf .ini .json .xml .yml)" "所有文本文件" || return 1
-  case $kind in
-    PHP*) inc=(--include='*.php' --include='*.phtml') ;;
-    HTML*) inc=(--include='*.html' --include='*.htm' --include='*.js' --include='*.css') ;;
-    配置*) inc=(--include='.env*' --include='*.conf' --include='*.ini' --include='*.json' --include='*.xml' --include='*.yml' --include='*.yaml') ;;
-  esac
-  mapfile -d '' -t list < <(grep -rIlZF ${inc[@]+"${inc[@]}"} --exclude-dir=.git --exclude-dir=node_modules -- "$find" "$ROOT" 2>/dev/null)
-  n=${#list[@]}
-  ((n)) || { warn "没有找到包含该文本的文件"; return 0; }
-  echo "找到 $n 个文件:"
-  for f in "${list[@]}"; do
-    i=$((i + 1)); ((i > 15)) && { echo "  ... 还有 $((n - 15)) 个"; break; }
-    echo "  $(files_trunc "${f#"$ROOT"/}" 36)"
-  done
-  confirm "替换以上文件里的所有匹配?" n || return 0
-  bk=$BACKUP_DIR/replace/${DOMAIN}_$(date +%Y%m%d_%H%M%S).tar.gz
-  mkdir -p "$(dirname "$bk")"
-  for f in "${list[@]}"; do printf '%s\0' "${f#"$ROOT"/}"; done | tar -czf "$bk" -C "$ROOT" --null -T - \
-    || { err "备份失败, 已取消 (没有改动任何文件)"; return 1; }
-  dl=$'\001'
-  fe=$(printf '%s' "$find" | sed 's/[][\.*^$]/\\&/g')
-  re=$(printf '%s' "$repl" | sed 's/[\&]/\\&/g')
-  for f in "${list[@]}"; do sed -i "s${dl}${fe}${dl}${re}${dl}g" "$f"; done
-  info "已替换 $n 个文件。替换前的原文件备份在: $bk"
-}
-
-files_edit() {
-  files_unlocked || return 1
-  local rel p ed bakd bakf sum1 sum2 out c
-  local -a cand=()
-  for c in wp-config.php .env config.php .htaccess index.php; do [[ -f $ROOT/$c ]] && cand+=("$c"); done
-  cand+=("手动输入路径")
-  choose rel "编辑哪个文件:" "${cand[@]}" || return 1
-  if [[ $rel == 手动* ]]; then read -r -p "相对网站目录的路径: " rel || return 1; fi
-  rel=${rel#/}
-  [[ -n $rel ]] || return 1
-  p=$(realpath -m "$ROOT/$rel")
-  case $p in "$ROOT"/*) ;; *) err "文件必须在网站目录内"; return 1 ;; esac
-  ed=$(command -v nano || command -v vim || command -v vi || true)
-  if [[ -z $ed ]]; then pkg_install nano >/dev/null 2>&1; ed=$(command -v nano || true); fi
-  [[ -n $ed ]] || { err "没有可用的编辑器 (nano/vim)"; return 1; }
-  if [[ ! -f $p ]]; then confirm "文件不存在, 新建它?" n || return 0; fi
-  bakd=$BACKUP_DIR/edit/$DOMAIN; mkdir -p "$bakd"
-  bakf=""
-  if [[ -f $p ]]; then bakf=$bakd/$(basename "$p").$(date +%Y%m%d_%H%M%S); cp -a "$p" "$bakf"; fi
-  sum1=$(sha256sum "$p" 2>/dev/null | cut -d' ' -f1)
-  "$ed" "$p"
-  sum2=$(sha256sum "$p" 2>/dev/null | cut -d' ' -f1)
-  if [[ $sum1 == "$sum2" ]]; then info "没有改动"; return 0; fi
-  if [[ $p == *.php && -n ${PHPVER:-} ]] && command -v "$(php_bin "$PHPVER")" >/dev/null 2>&1; then
-    if ! out=$("$(php_bin "$PHPVER")" -l "$p" 2>&1); then
-      err "PHP 语法检查没通过:"; echo "$out" | head -5
-      if [[ -n $bakf ]] && confirm "还原成修改前的版本?" y; then cp -a "$bakf" "$p"; info "已还原"; return 0; fi
-    else info "PHP 语法检查通过"; fi
-  fi
-  chown "$WEB_USER:$WEB_USER" "$p" 2>/dev/null
-  info "已保存${bakf:+, 修改前的版本备份在 $bakf}"
-}
-
-files_clean() {
-  files_unlocked || return 1
-  local n d f
-  local -a junk=() dirs=()
-  mapfile -d '' -t junk < <(find "$ROOT" -type f \( -name '.DS_Store' -o -name 'Thumbs.db' -o -name '*.swp' -o -name '*~' \) -print0 2>/dev/null)
-  for d in wp-content/cache wp-content/upgrade; do [[ -d $ROOT/$d ]] && dirs+=("$ROOT/$d"); done
-  echo "垃圾文件 (.DS_Store / Thumbs.db / *.swp / *~): ${#junk[@]} 个"
-  for d in "${dirs[@]}"; do echo "缓存目录 ${d#"$ROOT"/}: $(du -sh "$d" 2>/dev/null | cut -f1)"; done
-  n=$(( ${#junk[@]} + ${#dirs[@]} ))
-  ((n)) || { info "没有需要清理的内容"; return 0; }
-  confirm "全部清理?" n || return 0
-  for f in "${junk[@]}"; do rm -f -- "$f"; done
-  for d in "${dirs[@]}"; do find "$d" -mindepth 1 -delete 2>/dev/null; done
-  info "清理完成"
-}
-
-files_default_page() {
-  files_unlocked || return 1
-  local t=static f bakd
-  [[ ${TYPE:-} == php ]] && t=php
-  bakd=$BACKUP_DIR/edit/$DOMAIN
-  if [[ -e $ROOT/index.php || -e $ROOT/index.html ]]; then
-    confirm "会替换现有首页 (旧文件自动备份), 继续?" n || return 0
-    mkdir -p "$bakd"
-    for f in index.php index.html; do
-      [[ -e $ROOT/$f ]] && cp -a "$ROOT/$f" "$bakd/$f.$(date +%Y%m%d_%H%M%S)"
-    done
-    rm -f "$ROOT/index.php" "$ROOT/index.html"
-  fi
-  write_default_page "$ROOT" "$t" "$DOMAIN"
-  chown "$WEB_USER:$WEB_USER" "$ROOT/index.php" "$ROOT/index.html" 2>/dev/null
-  info "已生成默认首页 ($([[ $t == php ]] && echo 'index.php, 带数据库测试' || echo 'index.html'))"
-}
-
-files_menu() {
-  local d=$1 c
-  load_meta "$d"
-  files_ok || return 1
-  while true; do
-    load_meta "$d"
-    title "文件工具 · $d"
-    echo "  目录: $ROOT"
-    choose c "操作:" "目录大小排行" "查找大文件" "最近改动的文件" "搜索文件名" "搜索文件内容" \
-      "可疑代码扫描" "解压到网站目录" "打包网站目录" "批量替换文本" "编辑文件" "清理垃圾文件" "生成默认首页" "修复权限" "返回" || return 0
-    case $c in
-      目录*) files_dirsize ;;
-      查找*) files_bigfiles ;;
-      最近*) files_recent ;;
-      搜索文件名) files_find_name ;;
-      搜索文件内容) files_find_text ;;
-      可疑*) files_scan ;;
-      解压*) files_extract ;;
-      打包*) files_pack ;;
-      批量*) files_replace ;;
-      编辑*) files_edit ;;
-      清理*) files_clean ;;
-      生成*) files_default_page ;;
-      修复*) files_unlocked && confirm "把所有者改为 $WEB_USER, 目录 755 / 文件 644 ?" y && { fix_perms_dir "$ROOT"; info "权限已修复"; } ;;
-      *) return 0 ;;
-    esac
-    pause
-  done
-}
-
-menu_files() {
-  use_site "" || { pause; return 0; }
-  need_type php static || { pause; return 0; }
-  files_menu "$SITE"
 }
 
 # ================================================================ 在线更新
@@ -4886,7 +4502,7 @@ fb_pick_scp_file() {  # -> PICKED_FILE (从旧服务器直接拉取)
 }
 
 fb_restore() {  # fb_restore [备份文件]
-  local file=${1:-} src tarf stage pass u v d n okdb=0 bad=0
+  local file=${1:-} src tarf stage pass u v d okdb=0 bad=0
   title "从全量备份还原 / 搬家"
   if [[ -z $file ]]; then
     choose src "备份文件从哪里来:" "本机已有的全量备份" "从旧服务器直接拉取" "从谷歌网盘/异地服务器下载" "手动输入文件路径" || return 1
@@ -4941,8 +4557,7 @@ fb_restore() {  # fb_restore [备份文件]
   info "还原网站和配置文件 ..."
   tar -xzpf "$stage/b/files.tar.gz" -C / || { rm -rf "$stage"; err "解压文件失败"; return 1; }
 
-  n=$(find "$SFTP_DIR" -name '*.conf' 2>/dev/null | wc -l)
-  rm -f "$SFTP_DIR"/*.conf 2>/dev/null
+  rm -rf "$WSM_DIR/sftp" 2>/dev/null
 
   if [[ -n $FB_DBS ]]; then
     info "还原数据库 ..."
@@ -4982,7 +4597,6 @@ fb_restore() {  # fb_restore [备份文件]
   echo "  接下来:"
   echo "   - 把域名解析改到本机 IP: $(public_ip_cached)"
   echo "   - 源站保护 / Telegram 告警等开关需要在本机重新开一次"
-  ((n)) && echo "   - SFTP 账号 ($n 个) 不会迁移, 需要重新创建"
   [[ -n $FB_EXTRAS ]] && echo "   - 检查机器人等额外程序是否正常运行 (Python 版本不同时可能要重装依赖)"
   return 0
 }
@@ -5266,7 +4880,7 @@ ssh_nopass_now() { [[ $(ssh_eff passwordauthentication) == no ]]; }
 
 ssh_state() {
   printf '密码登录%s · 密钥%s个 · 端口%s' \
-    "$(ssh_nopass_now && echo "${G}关${N}" || echo "${Y}开${N}")" "$(ssh_key_count)" "$(sftp_port)"
+    "$(ssh_nopass_now && echo "${G}关${N}" || echo "${Y}开${N}")" "$(ssh_key_count)" "$(ssh_port_now)"
 }
 
 ssh_reload() {
@@ -5420,7 +5034,6 @@ ssh_key_del() {
 ssh_nopass_on() {
   ((  $(ssh_key_count) > 0 )) || { err "还没有密钥, 请先 [生成新密钥] 或 [粘贴已有公钥]"; return 1; }
   echo "关闭后只能用密钥登录, 密码登录全部拒绝。"
-  echo "(wsm 创建的 SFTP 账号仍可用密码)"
   warn "请先新开一个窗口, 用密钥登录测试成功, 再继续!"
   confirm "已经用密钥登录成功了吗?" n || { info "已取消, 没有改动"; return 0; }
   ssh_apply 1 "$(ssh_wsm_get Port)" || return 1
@@ -5450,7 +5063,7 @@ ssh_fw_open() {  # 防火墙放行新端口
 
 ssh_port_change() {
   local old new nopass=0
-  old=$(sftp_port)
+  old=$(ssh_port_now)
   [[ $(ssh_wsm_get PasswordAuthentication) == no ]] && nopass=1
   echo "当前 SSH 端口: $old"
   read -r -p "新端口 (1024-65535, 22 恢复默认, 0 返回): " new || return 1
@@ -5484,7 +5097,7 @@ ssh_menu() {
     title "SSH 安全"
     echo "  密码登录: $(ssh_nopass_now && echo "${G}已关闭 (只能用密钥)${N}" || echo "${Y}开启${N}")"
     echo "  已添加密钥: $(ssh_key_count) 个"
-    echo "  SSH 端口: $(sftp_port)"
+    echo "  SSH 端口: $(ssh_port_now)"
     echo "  推荐顺序: 生成密钥 → 新窗口测试 → 关闭密码登录"
     choose c "操作:" "生成新密钥" "粘贴已有公钥" "查看/删除公钥" "删除服务器上的私钥文件" \
       "关闭密码登录" "恢复密码登录" "修改 SSH 端口" "返回" || return 0
@@ -5516,6 +5129,7 @@ menu_security() {
    3) SSH 安全
       (密钥登录/关闭密码/改端口)
    4) 禁止IP直接访问 (开关)
+   5) 网站防篡改
    0) 返回
 EOF
     read -r -p "请选择: " c || return 0
@@ -5524,6 +5138,7 @@ EOF
       2) (cfw_refresh); pause ;;
       3) ssh_menu ;;
       4) (toggle_block_ip); pause ;;
+      5) (menu_tamper) ;;
       0|q) return 0 ;;
       *) warn "无效选择" ;;
     esac
@@ -5562,7 +5177,7 @@ dashboard() {
     echo "  ${Y}提示: 网站日志已占用 ${logmb}MB, 6 → 6 可清理${N}"
   fi
   if (( $(swap_total) == 0 && $(free -m | awk '/^Mem:/{print $2+0}') <= 4096 )); then
-    echo "  ${Y}提示: 没有 Swap, 内存吃紧时数据库容易被杀, 7 → 6 可创建${N}"
+    echo "  ${Y}提示: 没有 Swap, 内存吃紧时数据库容易被杀, 6 → 7 可创建${N}"
   fi
 }
 
@@ -5585,17 +5200,11 @@ menu_sites() {
    4) 新建静态站点
    5) 新建反向代理
    6) 新建域名重定向
-   7) 站点设置 (域名/SSL/伪静态...)
+   7) 站点设置 (域名/SSL/伪静态/防CC...)
    8) 删除站点
    9) 访问统计
-  10) 网站防篡改
-  11) SFTP 账号
-  12) 文件工具
-  13) 新建 Xboard
-  14) 更新 Xboard
-  15) 设置 Xboard 域名 (主页/订阅/节点)
-  16) Xboard 后台信息 / 重置管理员密码
    0) 返回
+  (Xboard 面板在 [程序下载] 里)
 EOF
     read -r -p "请选择: " c || return 0
     case $c in
@@ -5608,13 +5217,6 @@ EOF
       7) (site_settings "") ;;
       8) (del_site ""); pause ;;
       9) (stats_menu); pause ;;
-      10) (menu_tamper) ;;
-      11) sftp_menu ;;
-      12) (menu_files) ;;
-      13) (xb_install); pause ;;
-      14) (xb_update ""); pause ;;
-      15) (xb_domains ""); pause ;;
-      16) (xb_info "") ;;
       0|q) return 0 ;;
       *) warn "无效选择" ;;
     esac
@@ -5709,7 +5311,7 @@ EOF
 menu_backup() {
   local c
   while true; do
-    title "备份与计划任务"
+    title "备份与搬家"
     cat <<'EOF'
    1) 立即备份网站
    2) 立即备份数据库
@@ -5744,7 +5346,7 @@ EOF
 menu_system() {
   local c
   while true; do
-    title "服务与日志"
+    title "系统与服务"
     cat <<'EOF'
    1) 服务管理 (启停/重启/自启)
    2) 检测并重载 Nginx 配置
@@ -5753,6 +5355,7 @@ menu_system() {
    5) Telegram 告警
       (服务挂了/磁盘满/证书到期/备份结果)
    6) 清理日志
+   7) Swap 虚拟内存
    0) 返回
 EOF
     read -r -p "请选择: " c || return 0
@@ -5763,33 +5366,7 @@ EOF
       4) df -h /; echo; free -h; du -sh "$WWW_ROOT" "$BACKUP_DIR" 2>/dev/null; pause ;;
       5) tg_menu ;;
       6) (logs_clean); pause ;;
-      0|q) return 0 ;;
-      *) warn "无效选择" ;;
-    esac
-  done
-}
-
-menu_software() {
-  local c
-  while true; do
-    title "软件与环境"
-    cat <<'EOF'
-   1) 安装/修复基础环境
-   2) 安装 MariaDB
-   3) 安装 Redis (含 PHP 扩展)
-   4) 安装 Composer
-   5) 禁止IP直接访问 (开关)
-   6) Swap 虚拟内存
-   0) 返回
-EOF
-    read -r -p "请选择: " c || return 0
-    case $c in
-      1) (install_base); pause ;;
-      2) (install_db); pause ;;
-      3) (install_redis); pause ;;
-      4) (install_composer); pause ;;
-      5) (toggle_block_ip); pause ;;
-      6) swap_menu ;;
+      7) swap_menu ;;
       0|q) return 0 ;;
       *) warn "无效选择" ;;
     esac
@@ -5803,18 +5380,16 @@ main_menu() {
   while true; do
     dashboard
     echo
-    mi 1 "网站管理" "新建/设置/删除"
-    mi 2 "SSL 证书" "申请/自有证书/续期"
-    mi 3 "PHP 管理" "版本/扩展/参数"
-    mi 4 "数据库" "创建/备份/phpMyAdmin"
-    mi 5 "备份与任务" "全量/异地/搬家"
-    mi 6 "服务与日志" "启停/日志/TG告警"
-    mi 7 "软件与环境" "Redis/Composer/Swap"
-    mi 8 "软件商店" "Node/Docker/PG..."
-    mi 9 "网站防篡改" "锁定/检测/还原"
-    mi 10 "更新脚本" "从 Git 仓库一键更新"
-    mi 11 "安全防护" "源站保护/SSH密钥"
-    echo "  0) 退出"
+    mi 1 "⌂" "网站管理" "新建/设置/删除"
+    mi 2 "◈" "SSL 证书" "申请/续期"
+    mi 3 "◇" "PHP 管理" "版本/扩展/参数"
+    mi 4 "▤" "数据库" "创建/备份/phpMyAdmin"
+    mi 5 "⇅" "备份与搬家" "全量/异地/定时"
+    mi 6 "◎" "系统与服务" "服务/日志/Swap/告警"
+    mi 7 "⇩" "程序下载" "面板/环境/工具"
+    mi 8 "◆" "安全防护" "源站/SSH/防篡改"
+    mi 9 "↻" "更新脚本" "从 Git 仓库更新"
+    printf '  0) %s\e[8G%s\n' "×" "${G}退出${N}"
     read -r -p "请选择: " c || exit 0
     case $c in
       1) menu_sites ;;
@@ -5823,11 +5398,9 @@ main_menu() {
       4) menu_db ;;
       5) menu_backup ;;
       6) menu_system ;;
-      7) menu_software ;;
-      8) menu_store ;;
-      9) (menu_tamper) ;;
-      10) update_menu ;;
-      11) menu_security ;;
+      7) menu_store ;;
+      8) menu_security ;;
+      9) update_menu ;;
       0|q) exit 0 ;;
       *) warn "无效选择" ;;
     esac
@@ -5851,7 +5424,6 @@ wsm v$WSM_VER - Web Server Manager
   wsm tg                            Telegram 告警设置
   wsm xboard-domains [站点]         设置主页/订阅/节点三个域名
   wsm add-proxy [域名] [后端URL]    新建反向代理
-  wsm sftp                          SFTP 账号管理
   wsm update [-y]                   从 Git 仓库更新脚本 (-y 不确认)
   wsm rollback                      回滚到上一个版本
   wsm stats [域名] [1|y|7|30|all]   访问统计 (不写域名=全站概览)
@@ -5870,7 +5442,7 @@ wsm v$WSM_VER - Web Server Manager
   wsm php-install [版本]            安装 PHP
   wsm del [域名]                    删除站点
   wsm status                        服务状态
-  wsm store                         软件商店 (交互)
+  wsm store                         程序下载 (交互)
   wsm app-list                      软件列表和安装状态
   wsm app-install|app-uninstall <ID>  安装/卸载软件 (ID 见 app-list)
 EOF
@@ -5897,7 +5469,6 @@ case ${1:-menu} in
   xboard-update) xb_update "${2:-}" ;;
   xboard-info)   xb_info "${2:-}" ;;
   xboard-domains) xb_domains "${2:-}" "${3:-}" "${4:-}" ;;
-  sftp)         sftp_menu ;;
   update)       update_run "${2:-}" ;;
   rollback)     update_rollback ;;
   stats)        stats_cli "${2:-}" "${3:-1}" ;;
