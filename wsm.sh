@@ -10,7 +10,7 @@
 #  证书: Let's Encrypt(HTTP) / 通配符(Cloudflare DNS) / 自有证书 / 自签名, 自动续期
 #  PHP : 7.4-8.4 多版本共存, 扩展, 参数, 禁用函数, FPM 进程数
 #  其他: MariaDB + phpMyAdmin, Redis, Composer, 备份/还原, 计划任务, 服务管理,
-#        软件商店 (Node.js/PM2/Python/Java/Docker/PostgreSQL/Memcached/Fail2ban 等)
+#        软件商店 (Node.js/PM2/Python/Java/Docker/PostgreSQL/Memcached 等)
 #  系统: Debian 10+ / Ubuntu 20.04+ (推荐)   RHEL 系 (Rocky/Alma/CentOS) 尽力支持
 #
 #  用法: bash wsm.sh install      首次安装环境 (之后直接用 wsm 命令)
@@ -18,7 +18,7 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="2.4"
+WSM_VER="2.5.1"
 WSM_DIR=/etc/wsm
 META_DIR=$WSM_DIR/sites
 CERT_DIR=$WSM_DIR/certs
@@ -1499,7 +1499,6 @@ ssl_menu() {
 # 原理: 1) 全局文件 01-wsm-guard.conf 定义规则 (只定义, 不生效)
 #       2) 站点开启后, 在站点配置里引用这些规则才生效 (每个站点单独开关)
 #       3) Xboard 的节点通信接口、订阅链接、静态文件不限速也不拦截, 避免误伤
-#       4) 装了 Fail2ban 时可开「自动封禁」: 短时间内被拦截很多次的 IP 封 1 小时
 GUARD_CONF=$NGX_CONF/01-wsm-guard.conf
 
 guard_level_name() { case $1 in 1) echo "宽松" ;; 3) echo "严格" ;; *) echo "标准" ;; esac; }
@@ -1611,46 +1610,6 @@ guard_server_lines() {  # 输出站点配置里的防护指令 (依赖 load_meta
   echo "    limit_conn wsm_conn 60;"
 }
 
-# ---------------- 自动封禁 (Fail2ban)
-GUARD_F2B_FILTER=/etc/fail2ban/filter.d/wsm-guard.conf
-GUARD_F2B_JAIL=/etc/fail2ban/jail.d/wsm-guard.local
-
-guard_ban_on() {
-  if ! command -v fail2ban-client >/dev/null 2>&1; then
-    confirm "自动封禁需要 Fail2ban, 现在安装吗?" y || return 1
-    install_fail2ban || return 1
-  fi
-  mkdir -p /etc/fail2ban/filter.d /etc/fail2ban/jail.d
-  cat > "$GUARD_F2B_FILTER" <<'EOF'
-# managed by wsm - 被 wsm 防护拦截(444)或限速(429)的请求
-[Definition]
-failregex = ^<HOST> \S+ \S+ \[[^\]]*\] "[^"]*" (?:444|429)
-ignoreregex =
-EOF
-  cat > "$GUARD_F2B_JAIL" <<'EOF'
-# managed by wsm - 1 分钟内被拦截 30 次以上的 IP 封 1 小时
-[wsm-guard]
-enabled  = true
-port     = http,https
-filter   = wsm-guard
-logpath  = /var/log/nginx/*.access.log
-findtime = 60
-maxretry = 30
-bantime  = 3600
-EOF
-  systemctl restart fail2ban >/dev/null 2>&1 || { err "Fail2ban 重启失败, 请查看: systemctl status fail2ban"; return 1; }
-  info "自动封禁已开启: 1 分钟内被拦截 30 次以上的 IP 封 1 小时"
-  echo "  查看: fail2ban-client status wsm-guard   解封: fail2ban-client set wsm-guard unbanip <IP>"
-}
-
-guard_ban_off() {
-  rm -f "$GUARD_F2B_FILTER" "$GUARD_F2B_JAIL"
-  command -v fail2ban-client >/dev/null 2>&1 && systemctl restart fail2ban >/dev/null 2>&1
-  info "自动封禁已关闭"
-}
-
-guard_ban_state() { [[ -f $GUARD_F2B_JAIL ]] && echo "开" || echo "关"; }
-
 guard_log() {  # guard_log 域名: 最近被拦截的 IP
   local f="/var/log/nginx/$1.access.log"
   [[ -f $f ]] || { warn "还没有访问日志"; return 0; }
@@ -1663,9 +1622,6 @@ guard_log() {  # guard_log 域名: 最近被拦截的 IP
     | awk '{printf "  %-8s %s\n", $1"次", $2}'
   echo; echo "最近 10 条:"
   tail -n 20000 "$f" | awk '$9==444 || $9==429' | tail -10 | cut -c1-160 | sed 's/^/  /'
-  if [[ -f $GUARD_F2B_JAIL ]] && command -v fail2ban-client >/dev/null 2>&1; then
-    echo; fail2ban-client status wsm-guard 2>/dev/null | grep -E "Currently banned|Banned IP" | sed 's/^/  /'
-  fi
 }
 
 guard_set() {  # guard_set 域名 on|off
@@ -1691,7 +1647,6 @@ guard_menu() {  # guard_menu 域名
     title "防 CC / 防恶意 bot · $d"
     echo "  状态:     $([[ ${GUARD:-0} == 1 ]] && echo "${G}已开启${N}" || echo 未开启)"
     echo "  强度:     $(guard_level_name "${GUARD_LEVEL:-2}") ($(guard_level_desc "${GUARD_LEVEL:-2}"))"
-    echo "  自动封禁: $(guard_ban_state) (所有开启防护的站点共用)"
     echo
     echo "  开启后会:"
     echo "   - 拦截扫描器/攻击工具和高频采集爬虫, 正常搜索引擎不受影响"
@@ -1700,7 +1655,7 @@ guard_menu() {  # guard_menu 域名
     echo "   - Xboard 的节点通信接口、订阅链接、图片/JS/CSS 等静态文件不受影响"
     echo "   - 站点用 Cloudflare 橙云时自动识别访客真实 IP"
     choose c "操作:" "$([[ ${GUARD:-0} == 1 ]] && echo 关闭防护 || echo 开启防护)" "调整强度" \
-      "查看拦截记录" "自动封禁 开/关" "返回" || return 0
+      "查看拦截记录" "返回" || return 0
     case $c in
       开启防护) guard_set "$d" on ;;
       关闭防护) guard_set "$d" off ;;
@@ -1711,10 +1666,6 @@ guard_menu() {  # guard_menu 域名
         apply_site && info "强度已改为: $(guard_level_name "$GUARD_LEVEL")"
         ;;
       查看拦截记录) guard_log "$d"; pause ;;
-      自动封禁*)
-        if [[ -f $GUARD_F2B_JAIL ]]; then confirm "关闭自动封禁?" n && guard_ban_off
-        else guard_ban_on; fi
-        ;;
       *) return 0 ;;
     esac
   done
@@ -2422,7 +2373,6 @@ manage_service() {
   unit_exists mariadb && svcs+=("mariadb")
   unit_exists redis-server && svcs+=("redis-server")
   unit_exists redis && svcs+=("redis")
-  unit_exists fail2ban && svcs+=("fail2ban")
   for x in $(php_installed | sort -V); do svcs+=("$(php_svc "$x")"); done
   echo "服务状态:"
   for x in "${svcs[@]}"; do printf "   %-22s %s\n" "$x" "$(svc_state "$x")"; done
@@ -2466,7 +2416,7 @@ cmd_install() {
 # ================================================================ 软件商店
 APP_IDS=(nodejs pm2 python java git composer supervisor
          mariadb postgresql redis memcached phpmyadmin
-         docker fail2ban rclone ffmpeg imagemagick monitor)
+         docker rclone ffmpeg imagemagick monitor)
 
 app_cat() {
   case $1 in
@@ -2481,7 +2431,7 @@ app_name() {
     git) echo "Git" ;; composer) echo "Composer" ;; supervisor) echo "Supervisor" ;;
     mariadb) echo "MariaDB" ;; postgresql) echo "PostgreSQL" ;; redis) echo "Redis" ;;
     memcached) echo "Memcached" ;; phpmyadmin) echo "phpMyAdmin" ;;
-    docker) echo "Docker" ;; fail2ban) echo "Fail2ban" ;; rclone) echo "Rclone" ;;
+    docker) echo "Docker" ;; rclone) echo "Rclone" ;;
     ffmpeg) echo "FFmpeg" ;; imagemagick) echo "ImageMagick" ;; monitor) echo "监控工具包" ;;
   esac
 }
@@ -2494,7 +2444,7 @@ app_desc() {
     mariadb) echo "MySQL 兼容数据库" ;; postgresql) echo "PostgreSQL 数据库" ;;
     redis) echo "内存缓存 / 队列" ;; memcached) echo "内存缓存" ;;
     phpmyadmin) echo "网页管理数据库" ;;
-    docker) echo "容器运行环境" ;; fail2ban) echo "防暴力破解(SSH/站点密码)" ;;
+    docker) echo "容器运行环境" ;;
     rclone) echo "云存储同步 / 异地备份" ;; ffmpeg) echo "音视频处理" ;;
     imagemagick) echo "图片处理命令行" ;; monitor) echo "htop iotop iftop nload" ;;
   esac
@@ -2514,7 +2464,6 @@ app_installed() {
     memcached) command -v memcached >/dev/null 2>&1 ;;
     phpmyadmin) compgen -G "$WWW_ROOT/*/config.sample.inc.php" >/dev/null 2>&1 ;;
     docker) command -v docker >/dev/null 2>&1 ;;
-    fail2ban) command -v fail2ban-client >/dev/null 2>&1 ;;
     rclone) command -v rclone >/dev/null 2>&1 ;;
     ffmpeg) command -v ffmpeg >/dev/null 2>&1 ;;
     imagemagick) command -v convert >/dev/null 2>&1 || command -v magick >/dev/null 2>&1 ;;
@@ -2537,7 +2486,6 @@ app_version() {
     memcached) memcached -V ;;
     phpmyadmin) echo "(以站点形式安装)" ;;
     docker) docker --version ;;
-    fail2ban) fail2ban-client --version 2>/dev/null | head -1 ;;
     rclone) rclone version 2>/dev/null | head -1 ;;
     ffmpeg) ffmpeg -version 2>/dev/null | head -1 ;;
     imagemagick) (convert -version 2>/dev/null || magick -version 2>/dev/null) | head -1 ;;
@@ -2547,7 +2495,7 @@ app_version() {
 app_service() {  # 输出该软件对应的 systemd 服务名(没有则为空)
   case $1 in
     mariadb) echo mariadb ;; postgresql) echo postgresql ;; memcached) echo memcached ;;
-    docker) echo docker ;; fail2ban) echo fail2ban ;;
+    docker) echo docker ;;
     redis) if unit_exists redis-server; then echo redis-server; else echo redis; fi ;;
     supervisor) if unit_exists supervisor; then echo supervisor; else echo supervisord; fi ;;
   esac
@@ -2664,50 +2612,6 @@ install_docker() {
   warn "容器映射的端口会绕过 ufw 直接对外开放, 数据库等服务请绑定 127.0.0.1"
 }
 
-fail2ban_conf() {  # fail2ban_conf 输出文件
-  local f=$1 ip=${SSH_CLIENT:-}
-  ip=${ip%% *}
-  valid_ip "$ip" || ip=""
-  mkdir -p "$(dirname "$f")"
-  {
-    echo "# managed by wsm"
-    echo "[DEFAULT]"
-    echo "bantime  = 1h"
-    echo "findtime = 10m"
-    echo "maxretry = 5"
-    echo "ignoreip = 127.0.0.1/8 ::1${ip:+ $ip}"
-    echo
-    echo "[sshd]"
-    echo "enabled = true"
-    [[ -f /var/log/auth.log || -f /var/log/secure ]] || echo "backend = systemd"
-    echo
-    echo "[nginx-http-auth]"
-    echo "enabled = true"
-    echo "port    = http,https"
-    echo "logpath = /var/log/nginx/*error.log"
-  } > "$f"
-}
-
-install_fail2ban() {
-  pkg_refresh
-  pkg_install fail2ban || return 1
-  [[ $PM == apt && ! -f /var/log/auth.log ]] && pkg_install python3-systemd >/dev/null 2>&1
-  fail2ban_conf /etc/fail2ban/jail.d/wsm.local
-  local myip=${SSH_CLIENT%% *} x
-  local -a wl=()
-  if [[ -f $F2B_WL ]]; then
-    mapfile -t wl < <(f2b_wl_get)
-    if valid_ip "$myip" && [[ " ${wl[*]:-} " != *" $myip "* ]]; then wl+=("$myip"); fi
-    f2b_wl_set "${wl[@]}"
-  fi
-  systemctl enable --now fail2ban
-  systemctl restart fail2ban
-  sleep 1
-  info "Fail2ban 已启动: SSH 连续输错 5 次封 1 小时, 站点访问密码同理"
-  echo "  已自动把你当前的登录 IP 加入白名单, 避免误封自己"
-  echo "  白名单/解封/开机自启: wsm 主菜单 → 安全防护 → Fail2ban 管理"
-}
-
 install_ffmpeg() {
   pkg_refresh
   if [[ $PM == apt ]]; then pkg_install ffmpeg || return 1
@@ -2732,7 +2636,6 @@ app_install() {
     memcached) install_memcached ;;
     phpmyadmin) install_pma ;;
     docker) install_docker ;;
-    fail2ban) install_fail2ban ;;
     rclone) pkg_install rclone && info "Rclone 已安装, 运行 rclone config 配置云存储" ;;
     ffmpeg) install_ffmpeg ;;
     imagemagick)
@@ -2768,7 +2671,6 @@ app_uninstall() {
       warn "卸载 Docker 不会删除镜像和容器数据 (/var/lib/docker)"
       confirm_typed "确认卸载 Docker" || return 0
       systemctl stop docker; pkg_remove docker.io docker-compose docker-compose-v2 2>/dev/null || pkg_remove docker.io ;;
-    fail2ban) systemctl stop fail2ban; rm -f /etc/fail2ban/jail.d/wsm.local; pkg_remove fail2ban ;;
     rclone) pkg_remove rclone ;;
     ffmpeg) pkg_remove ffmpeg ;;
     imagemagick) if [[ $PM == apt ]]; then pkg_remove imagemagick; else pkg_remove ImageMagick; fi ;;
@@ -4076,7 +3978,6 @@ CFW_IPS=$WSM_DIR/cf-ips.txt
 CFW_UNIT=/etc/systemd/system/wsm-cf-firewall.service
 CFW_CRON=/etc/cron.d/wsm-cf-ips
 CFW_CHAIN=WSM_CF
-F2B_WL=/etc/fail2ban/jail.d/zz-wsm-whitelist.local
 
 cfw_active() { command -v iptables >/dev/null 2>&1 && iptables -w -S "$CFW_CHAIN" >/dev/null 2>&1; }
 
@@ -4179,7 +4080,7 @@ cfw_install_unit() {
   cat > "$CFW_UNIT" <<EOF
 [Unit]
 Description=wsm: 80/443 only accept Cloudflare
-After=network-online.target ufw.service firewalld.service netfilter-persistent.service nftables.service docker.service fail2ban.service
+After=network-online.target ufw.service firewalld.service netfilter-persistent.service nftables.service docker.service
 Wants=network-online.target
 
 [Service]
@@ -4253,114 +4154,252 @@ cfw_cli() {  # wsm cf-firewall [on|off|apply|remove|refresh|status]
   esac
 }
 
-# ---------------- Fail2ban 管理
-f2b_installed() { command -v fail2ban-client >/dev/null 2>&1; }
+# ---------------- SSH 安全 (密钥登录 / 关闭密码登录 / 改端口)
+# 设置写在 /etc/ssh/sshd_config.d/00-wsm-ssh.conf (系统不支持 Include 时写在 sshd_config 开头)
+# 每次修改都先用 sshd -t 检测, 不通过自动恢复; 重启 sshd 不会断开当前连接
+SSH_MAIN=/etc/ssh/sshd_config
+SSH_DROPIN=/etc/ssh/sshd_config.d/00-wsm-ssh.conf
+SSH_AK=/root/.ssh/authorized_keys
 
-f2b_state() {
-  f2b_installed || { echo "未安装"; return 0; }
-  printf '%s  自启: %s' "$(svc_state fail2ban)" \
-    "$(systemctl is-enabled --quiet fail2ban 2>/dev/null && echo "${G}开${N}" || echo "${Y}关${N}")"
+ssh_use_dropin() { grep -qE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/' "$SSH_MAIN" 2>/dev/null; }
+ssh_eff() { sshd -T 2>/dev/null | awk -v k="$1" '$1==k{print $2; exit}'; }
+
+ssh_wsm_get() {  # 读取 wsm 写入的某项设置
+  local src=""
+  if [[ -f $SSH_DROPIN ]]; then src=$(cat "$SSH_DROPIN")
+  else src=$(sed -n '/^# wsm-ssh begin/,/^# wsm-ssh end/p' "$SSH_MAIN" 2>/dev/null); fi
+  printf '%s\n' "$src" | awk -v k="$1" '$1==k{print $2; exit}'
 }
 
-f2b_fix_sshd() {  # 没有 auth.log 的系统 (Debian 12 等), sshd 规则改读 systemd 日志, 否则 fail2ban 启动失败
-  local f=/etc/fail2ban/jail.d/wsm.local
-  [[ -f /var/log/auth.log || -f /var/log/secure ]] && return 0
-  [[ $PM == apt ]] && pkg_install python3-systemd >/dev/null 2>&1
-  if [[ -f $f ]] && grep -q '^\[sshd\]' "$f" && ! grep -q '^backend *= *systemd' "$f"; then
-    sed -i '/^\[sshd\]/a backend = systemd' "$f"
+ssh_key_count() {
+  [[ -f $SSH_AK ]] || { echo 0; return 0; }
+  grep -cvE '^[[:space:]]*(#|$)' "$SSH_AK" || true
+}
+
+ssh_nopass_now() { [[ $(ssh_eff passwordauthentication) == no ]]; }
+
+ssh_state() {
+  printf '密码登录%s · 密钥%s个 · 端口%s' \
+    "$(ssh_nopass_now && echo "${G}关${N}" || echo "${Y}开${N}")" "$(ssh_key_count)" "$(sftp_port)"
+}
+
+ssh_reload() {
+  if systemctl is-active --quiet ssh.socket 2>/dev/null; then
+    systemctl daemon-reload; systemctl restart ssh.socket 2>/dev/null
   fi
-  return 0
+  systemctl restart "$(sshd_service)" 2>/dev/null || systemctl reload "$(sshd_service)" 2>/dev/null
 }
 
-f2b_wl_get() {  # 白名单 IP, 每行一个 (不含本机地址)
-  local line="" x
-  if [[ -f $F2B_WL ]]; then line=$(grep -m1 '^ignoreip' "$F2B_WL")
-  elif [[ -f /etc/fail2ban/jail.d/wsm.local ]]; then line=$(grep -m1 '^ignoreip' /etc/fail2ban/jail.d/wsm.local); fi
-  line=${line#*=}
-  for x in $line; do [[ $x == 127.0.0.1/8 || $x == ::1 ]] || echo "$x"; done
-  return 0
-}
-
-f2b_wl_set() {  # f2b_wl_set IP... (覆盖保存)
-  mkdir -p /etc/fail2ban/jail.d
-  {
-    echo "# managed by wsm - 白名单里的 IP 永远不会被 Fail2ban 封禁"
-    echo "[DEFAULT]"
-    echo "ignoreip = 127.0.0.1/8 ::1${*:+ $*}"
-  } > "$F2B_WL"
-  systemctl is-active --quiet fail2ban 2>/dev/null && fail2ban-client reload >/dev/null 2>&1
-  return 0
-}
-
-f2b_start() {
-  f2b_fix_sshd
-  if systemctl restart fail2ban 2>/dev/null && sleep 1 && systemctl is-active --quiet fail2ban; then
-    info "Fail2ban 已启动"
-  else
-    err "Fail2ban 启动失败, 最近日志:"
-    journalctl -u fail2ban -n 10 --no-pager 2>/dev/null | tail -10
+ssh_apply() {  # ssh_apply 关闭密码(0|1) 端口(空或22=默认)
+  local nopass=$1 port=${2:-} bak dbak f tmp
+  local -a body=()
+  [[ -f $SSH_MAIN ]] || { err "找不到 $SSH_MAIN"; return 1; }
+  command -v sshd >/dev/null 2>&1 || { err "没有找到 sshd"; return 1; }
+  [[ $port == 22 ]] && port=""
+  if [[ $nopass == 1 ]]; then
+    body+=("PasswordAuthentication no" "ChallengeResponseAuthentication no" "PermitRootLogin prohibit-password")
+  fi
+  [[ -n $port ]] && body+=("Port $port")
+  bak=$(mktemp); cp -a "$SSH_MAIN" "$bak"
+  dbak=$(mktemp -d); [[ -d /etc/ssh/sshd_config.d ]] && cp -a /etc/ssh/sshd_config.d "$dbak/"
+  rm -f "$SSH_DROPIN"
+  sed -i '/^# wsm-ssh begin/,/^# wsm-ssh end/d' "$SSH_MAIN"
+  # 端口: 其他地方写的 Port 先注释掉 (Port 会叠加), 恢复默认端口时还原
+  for f in "$SSH_MAIN" /etc/ssh/sshd_config.d/*.conf; do
+    [[ -f $f ]] || continue
+    sed -i -E 's/^#wsm# //' "$f"
+    [[ -n $port ]] && sed -i -E 's/^([[:space:]]*Port[[:space:]])/#wsm# \1/' "$f"
+  done
+  if ((${#body[@]})); then
+    if ssh_use_dropin; then
+      mkdir -p /etc/ssh/sshd_config.d
+      { echo "# managed by wsm (SSH 安全)"; printf '%s\n' "${body[@]}"; } > "$SSH_DROPIN"
+    else
+      tmp=$(mktemp)
+      { echo "# wsm-ssh begin"; printf '%s\n' "${body[@]}"; echo "# wsm-ssh end"; cat "$SSH_MAIN"; } > "$tmp"
+      cat "$tmp" > "$SSH_MAIN"; rm -f "$tmp"
+    fi
+  fi
+  if ! sshd -t 2>/tmp/wsm_sshd_err; then
+    cat "$bak" > "$SSH_MAIN"
+    if [[ -d $dbak/sshd_config.d ]]; then rm -rf /etc/ssh/sshd_config.d; cp -a "$dbak/sshd_config.d" /etc/ssh/; fi
+    rm -rf "$bak" "$dbak"
+    err "SSH 配置检测没通过, 已恢复原配置:"; cat /tmp/wsm_sshd_err >&2
     return 1
   fi
+  rm -rf "$bak" "$dbak"
+  ssh_reload
 }
 
-f2b_bans() {
-  systemctl is-active --quiet fail2ban || { warn "Fail2ban 没在运行, 没有封禁"; return 0; }
-  local j n=0
-  for j in $(fail2ban-client status 2>/dev/null | sed -n 's/.*Jail list:[[:space:]]*//p' | tr ',' ' '); do
-    echo "  [$j] $(fail2ban-client status "$j" 2>/dev/null | sed -n 's/.*Banned IP list:[[:space:]]*//p')"
-    n=$((n + 1))
-  done
-  ((n)) || echo "  (没有启用的规则)"
+ssh_ak_prepare() {
+  mkdir -p /root/.ssh; chmod 700 /root/.ssh
+  touch "$SSH_AK"; chmod 600 "$SSH_AK"
+  [[ -s $SSH_AK && -n $(tail -c1 "$SSH_AK") ]] && echo >> "$SSH_AK"
+  return 0
 }
 
-f2b_menu() {
-  local c l x i ip
-  local -a wl keep
+SSH_KEYDIR=/root/ssh-key
+
+ssh_key_gen() {
+  local name f
+  command -v ssh-keygen >/dev/null 2>&1 || { err "没有找到 ssh-keygen"; return 1; }
+  name="wsm-$(hostname -s 2>/dev/null || echo vps)-$(date +%Y%m%d)"
+  mkdir -p "$SSH_KEYDIR"; chmod 700 "$SSH_KEYDIR"
+  f=$SSH_KEYDIR/$name.key
+  [[ -e $f ]] && f=$SSH_KEYDIR/$name-$(date +%H%M%S).key
+  ssh_ak_prepare
+  ssh-keygen -q -t ed25519 -N "" -C "$name" -f "$f" || { err "生成失败"; return 1; }
+  cat "$f.pub" >> "$SSH_AK"; rm -f "$f.pub"; chmod 600 "$f"
+  info "已生成密钥, 公钥已加入本服务器"
+  echo
+  echo "  ┌ 私钥文件 ────────────────────────────"
+  echo "  │ ${G}$f${N}"
+  echo "  └──────────────────────────────────────"
+  echo "  1. 用 SFTP 下载这个文件 (Termius: 连上服务器 → SFTP"
+  echo "     → 进入 /root/ssh-key/ → 长按文件下载)"
+  echo "  2. Termius: Keychain → + → Import Key → 选择该文件"
+  echo "  3. 主机设置里 Key 选它, 新开窗口测试密钥登录"
+  echo "  4. 测试成功后, 回本菜单 [删除服务器上的私钥文件]"
+  if confirm "需要同时在屏幕上显示私钥内容吗?" n; then
+    echo "------------------------------------------"
+    cat "$f"
+    echo "------------------------------------------"
+  fi
+}
+
+ssh_key_files_del() {  # 删除服务器上留存的私钥文件 (公钥不受影响)
+  local -a fs=()
+  local f
+  for f in "$SSH_KEYDIR"/*.key /root/.ssh/wsm-*; do [[ -f $f && $f != *.pub ]] && fs+=("$f"); done
+  ((${#fs[@]})) || { info "服务器上没有留存的私钥文件"; return 0; }
+  echo "将删除这些私钥文件 (已加入服务器的公钥不受影响):"
+  printf '   %s\n' "${fs[@]}"
+  warn "确认你已经下载并导入客户端, 删除后无法恢复"
+  confirm "确认删除?" n || return 0
+  rm -f -- "${fs[@]}"; rmdir "$SSH_KEYDIR" 2>/dev/null
+  info "已删除"
+}
+
+ssh_key_add() {
+  local k
+  echo "粘贴公钥 (一整行, ssh-ed25519 / ssh-rsa / ecdsa- 开头):"
+  read -r k || return 1
+  k=$(printf '%s' "$k" | tr -d '\r')
+  [[ -n $k ]] || return 1
+  [[ $k == *PRIVATE* ]] && { err "这是私钥! 只能粘贴公钥 (.pub 里的内容)"; return 1; }
+  ssh-keygen -lf /dev/stdin <<<"$k" >/dev/null 2>&1 || { err "不是有效的公钥"; return 1; }
+  ssh_ak_prepare
+  grep -qxF -- "$k" "$SSH_AK" && { warn "这个公钥已经添加过了"; return 0; }
+  printf '%s\n' "$k" >> "$SSH_AK"
+  info "公钥已添加"
+}
+
+ssh_key_list() {
+  [[ -f $SSH_AK ]] || return 0
+  local i=0 line fp
+  while IFS= read -r line; do
+    [[ $line =~ ^[[:space:]]*(#|$) ]] && continue
+    i=$((i + 1))
+    fp=$(ssh-keygen -lf /dev/stdin <<<"$line" 2>/dev/null \
+      | awk '{c=""; for(j=3;j<NF;j++) c=c (c?" ":"") $j; printf "%s %s", $NF, (c?c:"(无备注)")}')
+    printf '   %2d) %s\n' "$i" "${fp:-(无法识别)}"
+  done < "$SSH_AK"
+}
+
+ssh_key_del() {
+  local c total
+  total=$(ssh_key_count)
+  ((total)) || { warn "还没有添加任何公钥"; return 0; }
+  echo "已添加的公钥:"; ssh_key_list
+  read -r -p "删除哪个 (序号, 回车返回): " c || return 0
+  [[ $c =~ ^[0-9]+$ ]] && ((c >= 1 && c <= total)) || return 0
+  if ((total == 1)) && ssh_nopass_now; then
+    err "这是最后一个公钥, 且已关闭密码登录, 删掉就登录不上了"; return 1
+  fi
+  confirm "确认删除第 $c 个公钥?" n || return 0
+  awk -v n="$c" '/^[[:space:]]*(#|$)/{print; next} {i++; if (i != n) print}' "$SSH_AK" > "$SSH_AK.tmp" \
+    && cat "$SSH_AK.tmp" > "$SSH_AK"; rm -f "$SSH_AK.tmp"
+  info "已删除"
+}
+
+ssh_nopass_on() {
+  ((  $(ssh_key_count) > 0 )) || { err "还没有密钥, 请先 [生成新密钥] 或 [粘贴已有公钥]"; return 1; }
+  echo "关闭后只能用密钥登录, 密码登录全部拒绝。"
+  echo "(wsm 创建的 SFTP 账号仍可用密码)"
+  warn "请先新开一个窗口, 用密钥登录测试成功, 再继续!"
+  confirm "已经用密钥登录成功了吗?" n || { info "已取消, 没有改动"; return 0; }
+  ssh_apply 1 "$(ssh_wsm_get Port)" || return 1
+  if ssh_nopass_now; then info "已关闭密码登录, 现在只能用密钥登录"
+  else warn "已写入配置, 但密码登录仍是开启状态 (可能被其他配置覆盖)"; fi
+}
+
+ssh_nopass_off() {
+  confirm "恢复密码登录?" y || return 0
+  ssh_apply 0 "$(ssh_wsm_get Port)" && info "已恢复密码登录"
+}
+
+ssh_fw_open() {  # 防火墙放行新端口
+  local p=$1
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+    ufw allow "$p/tcp" >/dev/null && info "ufw 已放行 $p"
+  fi
+  if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
+    firewall-cmd --permanent --add-port="$p/tcp" >/dev/null && firewall-cmd --reload >/dev/null && info "firewalld 已放行 $p"
+  fi
+  if command -v getenforce >/dev/null 2>&1 && [[ $(getenforce) == Enforcing ]]; then
+    semanage port -a -t ssh_port_t -p tcp "$p" 2>/dev/null || semanage port -m -t ssh_port_t -p tcp "$p" 2>/dev/null \
+      || warn "SELinux 放行端口失败, 请手动执行: semanage port -a -t ssh_port_t -p tcp $p"
+  fi
+  return 0
+}
+
+ssh_port_change() {
+  local old new nopass=0
+  old=$(sftp_port)
+  [[ $(ssh_wsm_get PasswordAuthentication) == no ]] && nopass=1
+  echo "当前 SSH 端口: $old"
+  read -r -p "新端口 (1024-65535, 输入 22 恢复默认): " new || return 1
+  if ! [[ $new =~ ^[0-9]+$ ]] || { [[ $new != 22 ]] && ((new < 1024 || new > 65535)); }; then
+    err "端口不合法"; return 1
+  fi
+  [[ $new == "$old" ]] && { warn "和当前端口一样"; return 0; }
+  if ss -ltnH "sport = :$new" 2>/dev/null | grep -q .; then err "端口 $new 已被占用"; return 1; fi
+  echo "云服务器有安全组的, 先在服务商后台放行 TCP $new"
+  confirm "确认把 SSH 端口改成 $new ?" y || return 0
+  ssh_fw_open "$new"
+  ssh_apply "$nopass" "$new" || return 1
+  sleep 1
+  if ! ss -ltnH "sport = :$new" 2>/dev/null | grep -q .; then
+    err "sshd 没有在 $new 上监听, 恢复为 $old"
+    ssh_apply "$nopass" "$old"; return 1
+  fi
+  info "SSH 端口已改为 $new"
+  warn "别关当前窗口! 新开一个窗口用端口 $new 登录测试"
+  if confirm "新端口登录成功了吗? (选 n 恢复为 $old)" n; then
+    info "完成, 以后用端口 $new 登录"
+  else
+    ssh_apply "$nopass" "$old" && info "已恢复为端口 $old"
+  fi
+}
+
+ssh_menu() {
+  local c
   while true; do
-    title "Fail2ban 管理"
-    if ! f2b_installed; then
-      echo "  状态: 未安装 (用于封禁多次输错 SSH 密码的 IP)"
-      if confirm "现在安装吗?" n; then (install_fail2ban); pause; continue; fi
-      return 0
-    fi
-    mapfile -t wl < <(f2b_wl_get)
-    echo "  状态: $(f2b_state)"
-    echo "  网站自动封禁: $(guard_ban_state)"
-    echo "  白名单: ${wl[*]:-无}"
-    choose c "操作:" "启动" "停止" "开机自启 开/关" "查看封禁" "解封 IP" \
-      "白名单 添加" "白名单 删除" "返回" || return 0
+    title "SSH 安全"
+    echo "  密码登录: $(ssh_nopass_now && echo "${G}已关闭 (只能用密钥)${N}" || echo "${Y}开启${N}")"
+    echo "  已添加密钥: $(ssh_key_count) 个"
+    echo "  SSH 端口: $(sftp_port)"
+    echo "  推荐顺序: 生成密钥 → 新窗口测试 → 关闭密码登录"
+    choose c "操作:" "生成新密钥" "粘贴已有公钥" "查看/删除公钥" "删除服务器上的私钥文件" \
+      "关闭密码登录" "恢复密码登录" "修改 SSH 端口" "返回" || return 0
     case $c in
-      启动) f2b_start ;;
-      停止) systemctl stop fail2ban && info "已停止 (封禁全部解除)" ;;
-      开机*)
-        if systemctl is-enabled --quiet fail2ban 2>/dev/null; then
-          systemctl disable fail2ban >/dev/null 2>&1 && info "已关闭开机自启 (当前运行状态不变)"
-        else
-          systemctl enable fail2ban >/dev/null 2>&1 && info "已开启开机自启"
-        fi ;;
-      查看*) f2b_bans; pause ;;
-      解封*)
-        systemctl is-active --quiet fail2ban || { warn "Fail2ban 没在运行"; continue; }
-        read -r -p "要解封的 IP (输入 all 解封全部): " ip || continue
-        if [[ $ip == all ]]; then fail2ban-client unban --all >/dev/null && info "已全部解封"
-        elif valid_ip "$ip"; then fail2ban-client unban "$ip" >/dev/null && info "已解封 $ip"
-        else warn "IP 格式不正确"; fi ;;
-      白名单\ 添加)
-        ip=${SSH_CLIENT%% *}
-        [[ -n $ip ]] && echo "  你当前 SSH 登录的 IP: $ip"
-        read -r -p "添加 IP 或网段 (空格分隔): " l || continue
-        [[ -n $l ]] || continue
-        for x in $l; do valid_ip "$x" || { warn "格式不正确: $x"; continue 2; }; done
-        for x in $l; do [[ " ${wl[*]:-} " == *" $x "* ]] || wl+=("$x"); done
-        f2b_wl_set "${wl[@]}"; info "白名单已更新" ;;
-      白名单\ 删除)
-        ((${#wl[@]})) || { warn "白名单是空的"; continue; }
-        i=0; for x in "${wl[@]}"; do i=$((i + 1)); printf "   %2d) %s\n" "$i" "$x"; done
-        read -r -p "删除哪个 (序号或 IP): " l || continue
-        keep=(); i=0
-        for x in "${wl[@]}"; do i=$((i + 1)); [[ $l == "$i" || $l == "$x" ]] || keep+=("$x"); done
-        ((${#keep[@]} < ${#wl[@]})) || { warn "没有匹配的项"; continue; }
-        f2b_wl_set "${keep[@]}"; info "已删除" ;;
+      生成*) (ssh_key_gen); pause ;;
+      粘贴*) (ssh_key_add); pause ;;
+      查看*) (ssh_key_del); pause ;;
+      删除服务器*) (ssh_key_files_del); pause ;;
+      关闭*) (ssh_nopass_on); pause ;;
+      恢复*) (ssh_nopass_off); pause ;;
+      修改*) (ssh_port_change); pause ;;
       *) return 0 ;;
     esac
   done
@@ -4371,14 +4410,14 @@ menu_security() {
   while true; do
     title "安全防护"
     echo "  源站保护: $(cfw_state)"
-    echo "  Fail2ban: $(f2b_state)"
+    echo "  SSH: $(ssh_state)"
     cat <<'EOF'
 
    1) 源站保护 开/关
       (80/443 只允许 Cloudflare)
    2) 更新 Cloudflare IP 列表
-   3) Fail2ban 管理
-      (启停/自启/白名单/解封)
+   3) SSH 安全
+      (密钥登录/关闭密码/改端口)
    4) 禁止IP直接访问 (开关)
    0) 返回
 EOF
@@ -4386,7 +4425,7 @@ EOF
     case $c in
       1) (cfw_toggle); pause ;;
       2) (cfw_refresh); pause ;;
-      3) (f2b_menu) ;;
+      3) ssh_menu ;;
       4) (toggle_block_ip); pause ;;
       0|q) return 0 ;;
       *) warn "无效选择" ;;
@@ -4643,7 +4682,7 @@ main_menu() {
     mi 8 "软件商店" "Node/Docker/PG..."
     mi 9 "网站防篡改" "锁定/检测/还原"
     mi 10 "更新脚本" "从 Git 仓库一键更新"
-    mi 11 "安全防护" "源站保护/Fail2ban"
+    mi 11 "安全防护" "源站保护/SSH密钥"
     echo "  0) 退出"
     read -r -p "请选择: " c || exit 0
     case $c in
@@ -4677,7 +4716,7 @@ wsm v$WSM_VER - Web Server Manager
   wsm xboard-info [域名]            Xboard 后台地址/管理员, 重置管理员密码
   wsm guard [域名] [on|off]         防 CC / 防恶意 bot
   wsm cf-firewall [on|off|refresh]  源站保护: 80/443 只允许 Cloudflare
-  wsm fail2ban                      Fail2ban 管理 (启停/自启/白名单/解封)
+  wsm ssh                           SSH 安全 (密钥登录/关闭密码/改端口)
   wsm xboard-domains [站点]         设置主页/订阅/节点三个域名
   wsm add-proxy [域名] [后端URL]    新建反向代理
   wsm sftp                          SFTP 账号管理
@@ -4729,7 +4768,7 @@ case ${1:-menu} in
   stats)        stats_cli "${2:-}" "${3:-1}" ;;
   guard)        guard_cli "${2:-}" "${3:-}" ;;
   cf-firewall)  cfw_cli "${2:-}" ;;
-  fail2ban)     f2b_menu ;;
+  ssh)          ssh_menu ;;
   add-proxy)    add_site proxy "${2:-}" "${3:-}" ;;
   add-redirect) add_site redirect "${2:-}" "${3:-}" ;;
   ssl)          use_site "${2:-}" && ssl_pick_method "$SITE" ;;
