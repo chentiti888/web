@@ -2354,13 +2354,37 @@ install_redis() {
   info "Redis 已安装并监听 127.0.0.1:6379, 已为已装的 PHP 版本加载 redis 扩展"
 }
 
+composer_ver_ok() {  # Composer 版本 >= 2.2 才算可用 (Debian 11 的 apt 版只有 2.0.9, 装不了新项目)
+  local v
+  v=$(COMPOSER_ALLOW_SUPERUSER=1 composer --version 2>/dev/null \
+      | sed -n 's/.*Composer[^0-9]*\([0-9][0-9.]*\).*/\1/p' | head -1)
+  [[ -n $v && $(printf '%s\n2.2\n' "$v" | sort -V | head -1) == 2.2 ]]
+}
+
 install_composer() {
-  if command -v composer >/dev/null 2>&1; then info "Composer 已安装: $(composer --version 2>/dev/null | head -1)"; return 0; fi
-  pkg_install composer >/dev/null 2>&1 && { info "Composer 已安装"; return 0; }
+  if command -v composer >/dev/null 2>&1 && composer_ver_ok; then
+    info "Composer 已安装: $(COMPOSER_ALLOW_SUPERUSER=1 composer --version 2>/dev/null | head -1)"
+    return 0
+  fi
   local php; php=$(command -v php || true)
   [[ -n $php ]] || { err "需要先安装 PHP"; return 1; }
-  curl -fsSL https://getcomposer.org/installer | "$php" -- --install-dir=/usr/local/bin --filename=composer \
-    && info "Composer 已安装" || err "安装失败, 请检查网络"
+  if command -v composer >/dev/null 2>&1; then
+    warn "现有 Composer 版本过旧, 替换为官方最新版 ..."
+    [[ $PM == apt ]] && apt-mark unhold composer >/dev/null 2>&1
+    pkg_remove composer >/dev/null 2>&1 || true
+    rm -f /usr/local/bin/composer
+    hash -r
+  fi
+  # 官方安装器优先, 失败再用阿里云镜像; 不再用系统源 (版本太旧)
+  if ! curl -fsSL --max-time 60 https://getcomposer.org/installer \
+       | "$php" -- --install-dir=/usr/local/bin --filename=composer >/dev/null; then
+    curl -fsSL --max-time 120 https://mirrors.aliyun.com/composer/composer.phar -o /usr/local/bin/composer \
+      && chmod +x /usr/local/bin/composer \
+      || { err "Composer 下载失败, 请检查网络"; return 1; }
+  fi
+  hash -r
+  composer_ver_ok || { err "Composer 安装后版本仍然过旧"; return 1; }
+  info "Composer 已安装: $(COMPOSER_ALLOW_SUPERUSER=1 composer --version 2>/dev/null | head -1)"
 }
 
 toggle_block_ip() {
@@ -3203,7 +3227,7 @@ xb_install() {  # xb_install [域名]
     confirm "Xboard 需要 Redis, 现在安装吗?" y || return 1
     install_redis || return 1
   fi
-  command -v composer >/dev/null 2>&1 || install_composer || return 1
+  install_composer || return 1
   ask domain "① 网站域名 (如 panel.example.com)"
   valid_domain "$domain" || die "域名格式不正确: $domain"
   [[ -f $(meta_file "$domain") ]] && die "站点已存在: $domain"
