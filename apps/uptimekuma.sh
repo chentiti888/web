@@ -4,7 +4,7 @@
 APP_ID=uptimekuma
 APP_NAME="Uptime Kuma"
 APP_DESC="网站/接口/端口在线监控, 掉线告警 (支持 Telegram)"
-APP_VER=1.0
+APP_VER=1.2
 
 UK_REPO=louislam/uptime-kuma
 UK_DIR=/opt/uptime-kuma
@@ -80,11 +80,17 @@ app_uptimekuma_backup_paths() {
   return 0
 }
 
-app_uptimekuma_purge() {
+app_uptimekuma_purge() {  # 停止并移除服务
   systemctl disable --now "$UK_UNIT" >/dev/null 2>&1
   rm -f "/etc/systemd/system/$UK_UNIT.service"; systemctl daemon-reload >/dev/null 2>&1
-  info "已停止并移除 Uptime Kuma 服务"
-  if [[ -d $UK_DIR ]] && confirm "同时删除程序和监控数据 $UK_DIR ?" n; then rm -rf -- "${UK_DIR:?}"; fi
+  echo "   已停止并移除服务 $UK_UNIT"
+}
+app_uptimekuma_files() { [[ -d $UK_DIR ]] && find "$UK_DIR" -mindepth 1 -maxdepth 1 ! -name data; return 0; }
+app_uptimekuma_data() { echo "$UK_DIR/data"; }
+app_uptimekuma_cleanup() {
+  [[ -d $UK_DIR ]] && rmdir "$UK_DIR" 2>/dev/null
+  [[ -d $UK_DIR ]] || userdel "$UK_USER" >/dev/null 2>&1
+  return 0
 }
 
 app_uptimekuma_menu() {  # app_uptimekuma_menu 站点
@@ -94,7 +100,7 @@ app_uptimekuma_menu() {  # app_uptimekuma_menu 站点
     title "Uptime Kuma · $d"
     echo "  访问地址: https://$d/"
     echo "  程序版本: ${cur:-未知}   服务: $(svc_state "$UK_UNIT")"
-    choose c "操作:" "检查更新" "重启" "查看日志" "返回" || return 0
+    choose c "操作:" "检查更新" "重启" "查看日志" "卸载 (删除站点和程序)" "返回" || return 0
     case $c in
       检查更新)
         if app_check_update "Uptime Kuma" "$UK_REPO" "$cur" && confirm "升级到 $PICK_VER ? (监控数据不受影响)" y; then
@@ -112,6 +118,7 @@ app_uptimekuma_menu() {  # app_uptimekuma_menu 站点
         pause ;;
       重启) systemctl restart "$UK_UNIT" && info "已重启"; pause ;;
       查看日志) journalctl -u "$UK_UNIT" -n 40 --no-pager; pause ;;
+      卸载*) (app_site_uninstall "$d"); pause; [[ -f $(meta_file "$d") ]] || return 0 ;;
       *) return 0 ;;
     esac
   done

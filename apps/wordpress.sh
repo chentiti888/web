@@ -4,7 +4,7 @@
 APP_ID=wordpress
 APP_NAME="WordPress"
 APP_DESC="博客 / 企业站, 自动下载+建库+写好配置"
-APP_VER=1.1
+APP_VER=1.2
 
 wp_latest() {  # 官方接口查最新版本号
   curl -fsSL --max-time 15 https://api.wordpress.org/core/version-check/1.7/ 2>/dev/null \
@@ -103,6 +103,12 @@ GRANT ALL PRIVILEGES ON \`$dbn\`.* TO '$dbu'@'localhost'; FLUSH PRIVILEGES;" \
 # ---------------------------------------------------------------- 模块接口
 app_wordpress_install() { wp_install "${1:-}"; }
 
+app_wordpress_dbinfo() {  # 库名 账号 (从 wp-config.php 读)
+  local f=$2/wp-config.php
+  [[ -f $f ]] || return 0
+  echo "$(sed -n "s/.*define( *['\"]DB_NAME['\"], *['\"]\([^'\"]*\)['\"].*/\1/p" "$f" | head -1) $(sed -n "s/.*define( *['\"]DB_USER['\"], *['\"]\([^'\"]*\)['\"].*/\1/p" "$f" | head -1)"
+}
+
 app_wordpress_detect() { [[ -f $ROOT/wp-config.php && -d $ROOT/wp-includes ]]; }
 
 wp_upgrade() {  # wp_upgrade 站点 : 用官方最新包覆盖程序文件 (wp-content 和 wp-config.php 不动)
@@ -134,7 +140,7 @@ app_wordpress_menu() {  # app_wordpress_menu 站点
     echo "  后台地址: $scheme://$d/wp-admin/"
     echo "  网站目录: $root"
     echo "  程序版本: ${cur:-未知}"
-    choose c "操作:" "检查更新" "补齐 PHP 扩展 (插件报缺扩展时用)" "返回" || return 0
+    choose c "操作:" "检查更新" "补齐 PHP 扩展 (插件报缺扩展时用)" "卸载 (删除站点和程序)" "返回" || return 0
     case $c in
       检查更新)
         new=$(wp_latest)
@@ -146,6 +152,7 @@ app_wordpress_menu() {  # app_wordpress_menu 站点
         elif [[ -n $new ]]; then info "已经是最新版"; fi
         pause ;;
       补齐*) ( load_meta "$d"; wp_php_exts "$PHPVER" ); info "已处理"; pause ;;
+      卸载*) (app_site_uninstall "$d"); pause; [[ -f $(meta_file "$d") ]] || return 0 ;;
       *) return 0 ;;
     esac
   done

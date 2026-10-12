@@ -4,7 +4,7 @@
 APP_ID=nezha
 APP_NAME="哪吒监控"
 APP_DESC="多台 VPS 状态监控/告警面板, 二进制直装"
-APP_VER=1.0
+APP_VER=1.2
 
 NZ_REPO=nezhahq/nezha
 NZ_DIR=/opt/nezha/dashboard
@@ -96,12 +96,14 @@ app_nezha_backup_paths() {
   return 0
 }
 
-app_nezha_purge() {
+app_nezha_purge() {  # 停止并移除服务
   systemctl disable --now "$NZ_UNIT" >/dev/null 2>&1
   rm -f "/etc/systemd/system/$NZ_UNIT.service"; systemctl daemon-reload >/dev/null 2>&1
-  info "已停止并移除哪吒面板服务"
-  if [[ -d $NZ_DIR ]] && confirm "同时删除面板程序和数据 $NZ_DIR (所有服务器记录)?" n; then rm -rf -- "${NZ_DIR:?}"; fi
+  echo "   已停止并移除服务 $NZ_UNIT"
 }
+app_nezha_files() { echo "$NZ_DIR/dashboard"; echo "$NZ_DIR/dashboard.bak"; }
+app_nezha_data() { echo "$NZ_DIR/data"; }   # 监控数据和配置
+app_nezha_cleanup() { rmdir "$NZ_DIR" "${NZ_DIR%/*}" 2>/dev/null; return 0; }
 
 app_nezha_menu() {  # app_nezha_menu 站点
   local d=$1 c cur tmp
@@ -110,7 +112,7 @@ app_nezha_menu() {  # app_nezha_menu 站点
     title "哪吒监控 · $d"
     echo "  后台地址: https://$d/dashboard"
     echo "  程序版本: ${cur:-未知}   服务: $(svc_state "$NZ_UNIT")"
-    choose c "操作:" "检查更新" "重启面板" "查看日志" "返回" || return 0
+    choose c "操作:" "检查更新" "重启面板" "查看日志" "卸载 (删除站点和程序)" "返回" || return 0
     case $c in
       检查更新)
         if app_check_update "哪吒面板" "$NZ_REPO" "$cur" && confirm "升级到 $PICK_VER ?" y; then
@@ -131,6 +133,7 @@ app_nezha_menu() {  # app_nezha_menu 站点
         pause ;;
       重启*) systemctl restart "$NZ_UNIT" && info "已重启"; pause ;;
       查看日志) journalctl -u "$NZ_UNIT" -n 40 --no-pager; pause ;;
+      卸载*) (app_site_uninstall "$d"); pause; [[ -f $(meta_file "$d") ]] || return 0 ;;
       *) return 0 ;;
     esac
   done

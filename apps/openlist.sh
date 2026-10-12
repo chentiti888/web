@@ -4,7 +4,7 @@
 APP_ID=openlist
 APP_NAME="OpenList"
 APP_DESC="网盘挂载/文件列表/WebDAV (AList 社区版), 二进制直装"
-APP_VER=1.0
+APP_VER=1.2
 
 OL_REPO=OpenListTeam/OpenList
 OL_DIR=/opt/openlist
@@ -100,12 +100,14 @@ app_openlist_backup_paths() {
   return 0
 }
 
-app_openlist_purge() {
+app_openlist_purge() {  # 停止并移除服务
   systemctl disable --now "$OL_UNIT" >/dev/null 2>&1
   rm -f "/etc/systemd/system/$OL_UNIT.service"; systemctl daemon-reload >/dev/null 2>&1
-  info "已停止并移除 OpenList 服务"
-  if [[ -d $OL_DIR ]] && confirm "同时删除程序和配置 $OL_DIR (存储设置等, 网盘里的文件不受影响)?" n; then rm -rf -- "${OL_DIR:?}"; fi
+  echo "   已停止并移除服务 $OL_UNIT"
 }
+app_openlist_files() { echo "$OL_DIR/openlist"; echo "$OL_DIR/openlist.bak"; }
+app_openlist_data() { echo "$OL_DIR/data"; }   # 存储配置和账号
+app_openlist_cleanup() { rmdir "$OL_DIR" 2>/dev/null; return 0; }
 
 app_openlist_menu() {  # app_openlist_menu 站点
   local d=$1 c cur tmp pw
@@ -114,7 +116,7 @@ app_openlist_menu() {  # app_openlist_menu 站点
     title "OpenList · $d"
     echo "  访问地址: https://$d/"
     echo "  程序版本: ${cur:-未知}   服务: $(svc_state "$OL_UNIT")"
-    choose c "操作:" "检查更新" "重置管理员密码" "重启" "查看日志" "返回" || return 0
+    choose c "操作:" "检查更新" "重置管理员密码" "重启" "查看日志" "卸载 (删除站点和程序)" "返回" || return 0
     case $c in
       检查更新)
         if app_check_update OpenList "$OL_REPO" "$cur" && confirm "升级到 $PICK_VER ?" y; then
@@ -140,6 +142,7 @@ app_openlist_menu() {  # app_openlist_menu 站点
         systemctl start "$OL_UNIT"; pause ;;
       重启) systemctl restart "$OL_UNIT" && info "已重启"; pause ;;
       查看日志) journalctl -u "$OL_UNIT" -n 40 --no-pager; pause ;;
+      卸载*) (app_site_uninstall "$d"); pause; [[ -f $(meta_file "$d") ]] || return 0 ;;
       *) return 0 ;;
     esac
   done

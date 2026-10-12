@@ -4,7 +4,7 @@
 APP_ID=typecho
 APP_NAME="Typecho"
 APP_DESC="轻量博客, 国内常用, 自动下载最新版+建库"
-APP_VER=1.0
+APP_VER=1.2
 
 TC_REPO=typecho/typecho
 
@@ -85,6 +85,12 @@ app_typecho_install() {
   return 0
 }
 
+app_typecho_dbinfo() {  # 库名 账号 (安装向导生成的 config.inc.php)
+  local f=$2/config.inc.php
+  [[ -f $f ]] || return 0
+  echo "$(sed -n "s/.*'database' *=> *'\([^']*\)'.*/\1/p" "$f" | head -1) $(sed -n "s/.*'user' *=> *'\([^']*\)'.*/\1/p" "$f" | head -1)"
+}
+
 app_typecho_detect() { [[ -f $ROOT/var/Typecho/Common.php && -d $ROOT/admin ]]; }
 
 app_typecho_menu() {  # app_typecho_menu 站点
@@ -96,7 +102,7 @@ app_typecho_menu() {  # app_typecho_menu 站点
     echo "  后台地址: $scheme://$d/admin/"
     echo "  网站目录: $root"
     echo "  程序版本: ${cur:-未知}"
-    choose c "操作:" "检查更新" "返回" || return 0
+    choose c "操作:" "检查更新" "卸载 (删除站点和程序)" "返回" || return 0
     case $c in
       检查更新)
         if app_check_update Typecho "$TC_REPO" "$cur" && confirm "升级到 $PICK_VER ? (文章、主题、插件、上传文件不受影响)" y; then
@@ -112,6 +118,7 @@ app_typecho_menu() {  # app_typecho_menu 站点
           rm -rf "$tmp"
         fi
         pause ;;
+      卸载*) (app_site_uninstall "$d"); pause; [[ -f $(meta_file "$d") ]] || return 0 ;;
       *) return 0 ;;
     esac
   done

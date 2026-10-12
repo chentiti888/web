@@ -4,7 +4,7 @@
 APP_ID=nextcloud
 APP_NAME="Nextcloud"
 APP_DESC="私有网盘/同步/在线文档, 自动安装+建库+缓存+定时任务"
-APP_VER=1.0
+APP_VER=1.2
 
 NC_REPO=nextcloud/server
 NC_DL=https://download.nextcloud.com/server/releases
@@ -181,11 +181,15 @@ app_nextcloud_backup_paths() {
   return 0
 }
 
-app_nextcloud_purge() {  # app_nextcloud_purge 域名 根目录
-  local data; data=$(nc_data_dir "$1")
+app_nextcloud_purge() {  # app_nextcloud_purge 域名 根目录 : 停掉定时任务
   rm -f "/etc/cron.d/nextcloud-$(nc_slug "$1")"
-  grep -m1 "'dbname'" "$2/config/config.php" 2>/dev/null | sed "s/.*=> *'\([^']*\)'.*/   数据库未删除: \1/"
-  if [[ -d $data ]] && confirm "同时删除网盘数据目录 $data (所有用户上传的文件)?" n; then rm -rf -- "$data"; fi
+  echo "   已移除 Nextcloud 定时任务"
+}
+app_nextcloud_data() { nc_data_dir "$1"; }
+app_nextcloud_dbinfo() {  # 库名 账号
+  local f=$2/config/config.php
+  [[ -f $f ]] || return 0
+  echo "$(sed -n "s/.*'dbname' *=> *'\([^']*\)'.*/\1/p" "$f" | head -1) $(sed -n "s/.*'dbuser' *=> *'\([^']*\)'.*/\1/p" "$f" | head -1)"
 }
 
 app_nextcloud_menu() {  # app_nextcloud_menu 站点
@@ -199,7 +203,7 @@ app_nextcloud_menu() {  # app_nextcloud_menu 站点
     echo "  程序版本: ${cur:-未知}   PHP: $v"
     echo "  数据目录: $(nc_data_dir "$d")"
     choose c "操作:" "检查更新" "重置用户密码" "修复配置 (改了域名/开了HTTPS后用)" \
-      "重新扫描文件" "查看状态" "返回" || return 0
+      "重新扫描文件" "查看状态" "卸载 (删除站点和程序)" "返回" || return 0
     case $c in
       检查更新)
         if app_check_update Nextcloud "$NC_REPO" "$cur" && confirm "升级到 $PICK_VER ? (升级期间网盘暂停访问)" y; then
@@ -231,6 +235,7 @@ app_nextcloud_menu() {  # app_nextcloud_menu 站点
         info "已按当前域名和 HTTPS 状态修复"; pause ;;
       重新扫描*) nc_occ "$root" "$v" files:scan --all; pause ;;
       查看状态) nc_occ "$root" "$v" status; pause ;;
+      卸载*) (app_site_uninstall "$d"); pause; [[ -f $(meta_file "$d") ]] || return 0 ;;
       *) return 0 ;;
     esac
   done

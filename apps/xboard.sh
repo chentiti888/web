@@ -5,7 +5,7 @@
 APP_ID=xboard
 APP_NAME="Xboard 面板"
 APP_DESC="机场面板, 自动建站+数据库+Redis+队列+定时任务"
-APP_VER=1.1
+APP_VER=1.2
 
 XB_REPO_HTTPS=${XB_REPO_HTTPS:-https://github.com/chentiti888/xboard.git}
 XB_REPO_SSH=${XB_REPO_SSH:-git@github.com:chentiti888/xboard.git}
@@ -400,9 +400,7 @@ xb_purge() {  # xb_purge 域名 网站根目录  (删除站点时调用)
   systemctl disable --now "xboard-$k" >/dev/null 2>&1 || true
   rm -f "/etc/systemd/system/xboard-$k.service" "/etc/cron.d/xboard-$k"
   systemctl daemon-reload >/dev/null 2>&1 || true
-  info "已移除 Xboard 队列服务和计划任务"
-  grep -m1 '^DB_DATABASE=' "$app/.env" 2>/dev/null | sed 's/^DB_DATABASE=/   数据库未删除: /'
-  if safe_root "$app" && confirm "同时删除 Xboard 程序目录 $app ?" n; then rm -rf -- "$app"; fi
+  echo "   已移除 Xboard 队列服务和计划任务"
 }
 
 xb_is_site() { [[ $ROOT == */public && -f ${ROOT%/public}/artisan ]]; }  # 依赖已 load_meta
@@ -450,12 +448,13 @@ app_xboard_menu() {  # app_xboard_menu 站点
     title "Xboard 面板 · $d"
     echo "  程序版本: $( load_meta "$d"; xb_commit_info "${ROOT%/public}" )"
     choose c "操作:" "后台地址 / 重置管理员密码" "检查更新" "域名分离 (主页/订阅/节点)" \
-      "刷新防 CC 后台白名单" "返回" || return 0
+      "刷新防 CC 后台白名单" "卸载 (删除站点和程序)" "返回" || return 0
     case $c in
       后台*) (xb_info "$d") ;;
       检查更新) (xb_check_update "$d"); pause ;;
       域名*) (xb_domains "$d"); pause ;;
       刷新*) if xb_secure_detect "$d"; then info "已刷新 (后台改了路径后用这个)"; else warn "读取后台路径失败"; fi; pause ;;
+      卸载*) (app_site_uninstall "$d"); pause; [[ -f $(meta_file "$d") ]] || return 0 ;;
       *) return 0 ;;
     esac
   done
@@ -487,6 +486,12 @@ app_xboard_backup_paths() {
 }
 
 app_xboard_purge() { xb_purge "$1" "$2"; rm -f "$(xb_path_file "$1")"; }
+app_xboard_files() { [[ $2 == */public && -f ${2%/public}/artisan ]] && echo "${2%/public}"; return 0; }
+app_xboard_dbinfo() {  # 库名 账号
+  local e=${2%/public}/.env
+  [[ -f $e ]] && echo "$(sed -n 's/^DB_DATABASE=//p' "$e" | head -1) $(sed -n 's/^DB_USERNAME=//p' "$e" | head -1)"
+  return 0
+}
 
 app_xboard_cli() {  # wsm app xboard [域名] | update|info|domains [域名] ...
   case ${1:-} in
