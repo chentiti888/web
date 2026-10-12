@@ -14,13 +14,14 @@
 #                  可随时添加/删除, 部署时自动检测最新版本), 网站环境, 开发运行环境, 系统工具
 #  系统: Debian 10+ / Ubuntu 20.04+ (推荐)   RHEL 系 (Rocky/Alma/CentOS) 尽力支持
 #
-#  用法: bash wsm.sh install      首次安装环境 (之后直接用 wsm 命令)
+#  用法: bash wsm.sh install      安装 wsm 命令 (只装 wsm 本身, 软件都在菜单里按需安装)
 #        wsm                      进入交互菜单
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="2.10.1"
+WSM_VER="2.10.2"
 # CHANGELOG-BEGIN  (更新时会显示比当前版本新的条目, 新的写在最上面)
+# v2.10.2 新服务器 bash wsm.sh install 只装 wsm 本身, 不再默认装 Nginx/PHP/MariaDB; 网站环境在 [程序下载 → Nginx 网站环境] 或 wsm install-env 安装, 建站/部署程序时缺环境会提示安装
 # v2.10.1 每个扩展程序菜单里都有 [卸载]: 一次清理站点、证书、服务、定时任务、程序文件, 数据库和用户数据单独确认; 普通删除站点也会询问是否删除对应数据库
 # v2.10 新增扩展程序: Typecho / Nextcloud / 哪吒监控 / Uptime Kuma / OpenList; 部署时自动检测最新版本, 各程序菜单里可检查更新并升级 (含 Xboard 仓库新提交)
 # v2.9.1 3x-ui 也改为模块 (独立软件类); 程序下载里第三方程序统一放在 [扩展程序], 可随时添加删除
@@ -820,7 +821,7 @@ finish_ssl() {  # finish_ssl 模式(le|custom|self)
 
 ssl_le_http() {
   load_meta "$1"
-  command -v certbot >/dev/null 2>&1 || die "未安装 certbot, 请先安装环境"
+  command -v certbot >/dev/null 2>&1 || die "未安装 certbot, 请先到 [程序下载] 安装 Nginx 网站环境"
   echo "Let's Encrypt (HTTP 验证) 需要: 域名已解析到本机, 且 80 端口可从外网访问。"
   check_dns || { warn "已取消"; return 1; }
   local email="" n
@@ -841,7 +842,7 @@ ssl_le_http() {
 
 ssl_le_dns() {
   load_meta "$1"
-  command -v certbot >/dev/null 2>&1 || die "未安装 certbot, 请先安装环境"
+  command -v certbot >/dev/null 2>&1 || die "未安装 certbot, 请先到 [程序下载] 安装 Nginx 网站环境"
   echo "通配符证书需要 DNS 验证。目前支持 Cloudflare (域名需托管在 Cloudflare)。"
   if ! certbot plugins 2>/dev/null | grep -q dns-cloudflare; then
     info "安装 certbot Cloudflare 插件 ..."
@@ -1264,7 +1265,7 @@ write_default_page() {  # write_default_page 网站目录 类型(php|static) 域
 
 add_site() {  # add_site 类型 [域名] [后端/跳转目标]
   local type=$1 domain=${2:-} extra=${3:-} aliases="" root=${PRESET_ROOT:-} a u
-  command -v nginx >/dev/null 2>&1 || die "还没有安装环境, 请先执行: wsm install"
+  need_web_env || return 1
   title "新建$(type_name "$type")"
   ask domain "① 主域名 (如 example.com)" || return 1
   valid_domain "$domain" || die "域名格式不正确: $domain"
@@ -2360,7 +2361,7 @@ db_passwd() {
 install_pma() {
   local domain="" root tmp secret
   need_mysql || return 1
-  command -v nginx >/dev/null 2>&1 || { err "请先安装环境"; return 1; }
+  need_web_env || return 1
   echo "phpMyAdmin 建议绑定一个不容易被猜到的域名, 并开启 HTTPS 和访问密码。"
   ask domain "phpMyAdmin 使用的域名 (如 db.example.com)" || return 1
   valid_domain "$domain" || { err "域名格式不正确"; return 1; }
@@ -2680,8 +2681,28 @@ self_install() {
   fi
 }
 
-cmd_install() {
+cmd_install() {  # wsm.sh install : 只安装 wsm 本身, 其他软件都到菜单里按需装
+  self_install
+  [[ -x $WSM_BIN ]] || cp -f "$(readlink -f "$0")" "$WSM_BIN" 2>/dev/null
+  chmod 755 "$WSM_BIN" 2>/dev/null
   tz_suggest
+  echo
+  info "wsm 已安装, 输入 ${G}wsm${N} 进入管理菜单"
+  echo "  没有自动安装任何软件, 需要什么到菜单里装:"
+  echo "   - 建网站: [7) 程序下载] → Nginx 网站环境 (会问装哪些 PHP / 是否装数据库)"
+  echo "   - 部署程序 (Xboard / WordPress 等): [7) 程序下载] 里添加, 缺的环境会提示安装"
+  echo "   - 只用 SSH 密钥 / 改端口 / 时区 / Swap 等: 直接用, 不需要装任何东西"
+}
+
+need_web_env() {  # 没有 Nginx 网站环境时, 问一下要不要现在装
+  command -v nginx >/dev/null 2>&1 && return 0
+  warn "还没有安装 Nginx 网站环境"
+  confirm "现在安装吗? (Nginx + PHP + 数据库, 会一项项问你)" y || return 1
+  env_install
+  command -v nginx >/dev/null 2>&1
+}
+
+env_install() {  # Nginx 网站环境: Nginx + certbot + 选装 PHP / MariaDB
   install_base
   local v=""
   read -r -p "安装哪些 PHP 版本? (${PHP_VERSIONS}; 多个用空格分隔, 输入 none 跳过) [8.3]: " v || return 1
@@ -2690,9 +2711,9 @@ cmd_install() {
     for x in $v; do install_php "$x"; done
   fi
   confirm "安装 MariaDB 数据库?" y && install_db
-  self_install
+  self_install >/dev/null 2>&1
   echo
-  info "环境安装完成!  输入 ${G}wsm${N} 进入管理菜单"
+  info "网站环境安装完成"
   warn "云服务器请在安全组放行 80 / 443 端口"
 }
 
@@ -2980,7 +3001,7 @@ app_install() {
   app_valid "${1:-}" || { err "未知软件: ${1:-}"; return 1; }
   pkg_refresh
   case $1 in
-    webbase) if command -v nginx >/dev/null 2>&1; then install_base; else cmd_install; fi ;;
+    webbase) if command -v nginx >/dev/null 2>&1; then install_base; else env_install; fi ;;
     nodejs) install_nodejs ;;
     pm2) install_pm2 ;;
     python) install_python ;;
@@ -5485,7 +5506,11 @@ dashboard() {
   echo "${B}╔══════════════════════════════════════════════════════╗${N}"
   echo "${B}║${N}  Web Server Manager v$WSM_VER   服务器 IP: ${SERVER_IP:-未知}"
   echo "${B}╚══════════════════════════════════════════════════════╝${N}"
-  printf "  Nginx: %s   站点: %s 个   PHP: %s\n" "$(svc_state nginx)" "$n" "${phps:-未安装}"
+  if command -v nginx >/dev/null 2>&1; then
+    printf "  Nginx: %s   站点: %s 个   PHP: %s\n" "$(svc_state nginx)" "$n" "${phps:-未安装}"
+  else
+    echo "  ${Y}还没有安装网站环境: 要建网站请到 7) 程序下载 → Nginx 网站环境${N}"
+  fi
   if unit_exists mariadb; then printf "  MariaDB: %s   " "$(svc_state mariadb)"; fi
   printf "磁盘: %s   负载: %s\n" "$(df -h / | awk 'NR==2{print $5}')" "$(cut -d' ' -f1-3 /proc/loadavg)"
   local logmb
@@ -5734,7 +5759,8 @@ usage() {
 wsm v$WSM_VER - Web Server Manager
 
   wsm                               交互菜单 (推荐)
-  wsm install                       安装 Nginx/PHP/MariaDB/certbot 环境
+  wsm install                       只安装 wsm 命令本身 (不装任何软件)
+  wsm install-env                   安装 Nginx 网站环境 (Nginx/PHP/MariaDB/certbot)
   wsm add-php|add-static [域名]     新建站点
   wsm app list                      扩展程序模块列表 (及各自的站点/安装状态)
   wsm app add [模块|网址|文件]      添加模块 (不写=从仓库选)
@@ -5787,6 +5813,7 @@ case ${1:-menu} in
   icons)        ui_icon_set "${2:-}" ;;
   timezone)     if [[ -n ${2:-} ]]; then tz_set "$2"; else echo "时区: $(tz_get)  时间: $(tz_now)"; fi ;;
   install)      cmd_install ;;
+  install-env)  env_install ;;
   php-install)  install_php "${2:-}" ;;
   db-install)   install_db ;;
   db-create)    db_create "${2:-}" ;;
