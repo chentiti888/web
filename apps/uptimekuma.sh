@@ -4,7 +4,7 @@
 APP_ID=uptimekuma
 APP_NAME="Uptime Kuma"
 APP_DESC="网站/接口/端口在线监控, 掉线告警 (支持 Telegram)"
-APP_VER=1.3
+APP_VER=1.2
 
 UK_REPO=louislam/uptime-kuma
 UK_DIR=/opt/uptime-kuma
@@ -37,7 +37,7 @@ uk_build() {  # 安装依赖 + 下载前端 (在程序目录里)
 }
 
 app_uptimekuma_install() {
-  command -v nginx >/dev/null 2>&1 || need_web_env || return 1
+  command -v nginx >/dev/null 2>&1 || die "还没有安装环境, 请先执行: wsm install"
   local domain=${1:-} scheme
   title "部署 Uptime Kuma"
   [[ -f /etc/systemd/system/$UK_UNIT.service ]] && { err "本机已经装过 Uptime Kuma"; return 1; }

@@ -4,7 +4,7 @@
 APP_ID=nextcloud
 APP_NAME="Nextcloud"
 APP_DESC="私有网盘/同步/在线文档, 自动安装+建库+缓存+定时任务"
-APP_VER=1.3
+APP_VER=1.2
 
 NC_REPO=nextcloud/server
 NC_DL=https://download.nextcloud.com/server/releases
@@ -80,7 +80,7 @@ nc_php_tune() {  # Nextcloud 推荐的 PHP 参数 (内存只调大, 不调小)
 }
 
 app_nextcloud_install() {
-  command -v nginx >/dev/null 2>&1 || need_web_env || return 1
+  command -v nginx >/dev/null 2>&1 || die "还没有安装环境, 请先执行: wsm install"
   local domain=${1:-} root data tmp admin pw mem dbv scheme out k x
   title "一键部署 Nextcloud"
   mem=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null)

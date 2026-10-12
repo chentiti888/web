@@ -4,7 +4,7 @@
 APP_ID=nezha
 APP_NAME="哪吒监控"
 APP_DESC="多台 VPS 状态监控/告警面板, 二进制直装"
-APP_VER=1.3
+APP_VER=1.2
 
 NZ_REPO=nezhahq/nezha
 NZ_DIR=/opt/nezha/dashboard
@@ -51,7 +51,7 @@ EOF
 }
 
 app_nezha_install() {
-  command -v nginx >/dev/null 2>&1 || need_web_env || return 1
+  command -v nginx >/dev/null 2>&1 || die "还没有安装环境, 请先执行: wsm install"
   local domain=${1:-} tmp scheme
   title "部署哪吒监控面板"
   [[ -f /etc/systemd/system/$NZ_UNIT.service ]] && { err "本机已经装过哪吒面板 (一台装一个就够了)"; return 1; }
