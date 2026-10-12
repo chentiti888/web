@@ -1,0 +1,2 @@
+xboard|Xboard 面板 - 机场面板, 自动建站+数据库+Redis+队列+定时任务
+wordpress|WordPress - 博客 / 企业站, 自动下载+建库+写好配置
