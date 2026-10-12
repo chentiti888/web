@@ -1,2 +1,8 @@
 xboard|Xboard 面板 - 机场面板, 自动建站+数据库+Redis+队列+定时任务
-wordpress|WordPress - 博客 / 企业站, 自动下载+建库+写好配置
+wordpress|WordPress - 博客 / 企业站, 自动下载最新版+建库+写好配置
+typecho|Typecho - 轻量博客, 国内常用
+nextcloud|Nextcloud - 私有网盘/同步/在线文档 (建议 2G 内存以上)
+nezha|哪吒监控 - 多台 VPS 状态监控/告警面板
+uptimekuma|Uptime Kuma - 网站/接口/端口在线监控, 掉线告警
+openlist|OpenList - 网盘挂载/文件列表/WebDAV (AList 社区版)
+xui|3x-ui 面板 - Xray 多协议节点面板 (x-ui 增强版)

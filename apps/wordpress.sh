@@ -1,10 +1,16 @@
-# wsm 网站应用模块: WordPress
 # shellcheck shell=bash disable=SC2034
-# 本文件由 wsm 载入使用 (程序下载 → 网站应用 → 添加模块), 不能单独运行。
+# wsm 程序模块: WordPress
+# 本文件由 wsm 载入使用 (程序下载 → 扩展程序 → 添加模块), 不能单独运行。
 APP_ID=wordpress
 APP_NAME="WordPress"
 APP_DESC="博客 / 企业站, 自动下载+建库+写好配置"
-APP_VER=1.0
+APP_VER=1.1
+
+wp_latest() {  # 官方接口查最新版本号
+  curl -fsSL --max-time 15 https://api.wordpress.org/core/version-check/1.7/ 2>/dev/null \
+    | grep -o '"current":"[^"]*"' | head -1 | cut -d'"' -f4
+}
+wp_version() { sed -n "s/^\$wp_version = '\(.*\)';/\1/p" "$1/wp-includes/version.php" 2>/dev/null | head -1; }
 
 wp_php_exts() {  # wp_php_exts PHP版本  (尽力补齐 WordPress 常用扩展)
   local v=$1 pv e
@@ -36,6 +42,9 @@ wp_install() {  # wp_install [域名]
   if [[ -d $root && -n $(ls -A "$root" 2>/dev/null) ]]; then
     die "目录 $root 里已有文件, 请换一个域名或先清空该目录"
   fi
+  info "检查 WordPress 最新版本 ..."
+  v=$(wp_latest)
+  if [[ -n $v ]]; then echo "  最新版本: ${G}$v${N} (下面会下载最新版)"; else warn "没能检测到版本号, 照常下载最新版"; fi
   choose lang "WordPress 语言:" "简体中文" "English" || return 1
   if [[ $lang == 简体* ]]; then url=https://cn.wordpress.org/latest-zh_CN.tar.gz
   else url=https://wordpress.org/latest.tar.gz; fi
@@ -96,17 +105,46 @@ app_wordpress_install() { wp_install "${1:-}"; }
 
 app_wordpress_detect() { [[ -f $ROOT/wp-config.php && -d $ROOT/wp-includes ]]; }
 
+wp_upgrade() {  # wp_upgrade 站点 : 用官方最新包覆盖程序文件 (wp-content 和 wp-config.php 不动)
+  local d=$1 root url tmp lang
+  root=$( load_meta "$d"; echo "$ROOT" )
+  lang=$(sed -n "s/^\$wp_local_package = '\(.*\)';/\1/p" "$root/wp-includes/version.php" 2>/dev/null)
+  if [[ $lang == zh_CN ]]; then url=https://cn.wordpress.org/latest-zh_CN.tar.gz
+  else url=https://wordpress.org/latest.tar.gz; fi
+  tmp=$(mktemp -d)
+  info "下载最新版 ..."
+  if curl -fL --max-time 300 -o "$tmp/wp.tgz" "$url" && tar -xzf "$tmp/wp.tgz" -C "$tmp" && [[ -f $tmp/wordpress/wp-settings.php ]]; then
+    rm -rf "$tmp/wordpress/wp-content" "$tmp/wordpress/wp-config-sample.php" "$tmp/wordpress/readme.html" "$tmp/wordpress/license.txt"
+    cp -a "$tmp/wordpress/." "$root/"
+    chown -R "$WEB_USER:$WEB_USER" "$root/wp-admin" "$root/wp-includes" "$root"/*.php
+    info "程序文件已更新到 $(wp_version "$root"), 打开后台时如果提示升级数据库, 点一下确认即可"
+  else
+    err "下载或解压失败, 网站没有改动"
+  fi
+  rm -rf "$tmp"
+}
+
 app_wordpress_menu() {  # app_wordpress_menu 站点
-  local d=$1 c scheme=http
+  local d=$1 c root cur new scheme
   while true; do
-    ( load_meta "$d"; [[ $SSL == 1 ]] && scheme=https
-      title "WordPress · $d"
-      echo "  后台地址: $scheme://$d/wp-admin/"
-      echo "  网站目录: $ROOT"
-      [[ -f $ROOT/wp-includes/version.php ]] && \
-        echo "  程序版本: $(sed -n "s/^\$wp_version = '\(.*\)';/\1/p" "$ROOT/wp-includes/version.php")" )
-    choose c "操作:" "补齐 PHP 扩展 (插件报缺扩展时用)" "返回" || return 0
+    root=$( load_meta "$d"; echo "$ROOT" )
+    scheme=$( load_meta "$d"; [[ $SSL == 1 ]] && echo https || echo http )
+    cur=$(wp_version "$root")
+    title "WordPress · $d"
+    echo "  后台地址: $scheme://$d/wp-admin/"
+    echo "  网站目录: $root"
+    echo "  程序版本: ${cur:-未知}"
+    choose c "操作:" "检查更新" "补齐 PHP 扩展 (插件报缺扩展时用)" "返回" || return 0
     case $c in
+      检查更新)
+        new=$(wp_latest)
+        echo "  当前版本: ${cur:-未知}"
+        echo "  最新版本: ${new:-检测失败}"
+        if [[ -n $new ]] && ver_newer "$cur" "$new"; then
+          echo "  也可以在后台 [仪表盘 → 更新] 里一键升级"
+          confirm "现在用命令行升级到 $new ? (文章、主题、插件、上传文件不受影响, 建议先做一次备份)" y && wp_upgrade "$d"
+        elif [[ -n $new ]]; then info "已经是最新版"; fi
+        pause ;;
       补齐*) ( load_meta "$d"; wp_php_exts "$PHPVER" ); info "已处理"; pause ;;
       *) return 0 ;;
     esac

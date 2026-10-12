@@ -1,11 +1,11 @@
-# wsm 网站应用模块: Xboard 面板
+# wsm 程序模块: Xboard 面板
 # shellcheck shell=bash disable=SC2034
 # 无容器部署: PHP-FPM + MariaDB + Redis + systemd 队列 + cron
-# 本文件由 wsm 载入使用 (程序下载 → 网站应用 → 添加模块), 不能单独运行。
+# 本文件由 wsm 载入使用 (程序下载 → 扩展程序 → 添加模块), 不能单独运行。
 APP_ID=xboard
 APP_NAME="Xboard 面板"
 APP_DESC="机场面板, 自动建站+数据库+Redis+队列+定时任务"
-APP_VER=1.0
+APP_VER=1.1
 
 XB_REPO_HTTPS=${XB_REPO_HTTPS:-https://github.com/chentiti888/xboard.git}
 XB_REPO_SSH=${XB_REPO_SSH:-git@github.com:chentiti888/xboard.git}
@@ -20,6 +20,32 @@ xb_env_set() {  # xb_env_set 文件 键 值
   local v=${3//\\/\\\\}; v=${v//&/\\&}; v=${v//|/\\|}
   if grep -q "^$2=" "$1"; then sed -i "s|^$2=.*|$2=$v|" "$1"
   else printf '%s=%s\n' "$2" "$3" >> "$1"; fi
+}
+
+xb_git() { GIT_TERMINAL_PROMPT=0 git -c safe.directory="$1" -C "$1" "${@:2}"; }
+
+xb_remote_head() {  # 仓库最新提交 (先 HTTPS, 再 SSH)
+  local h
+  h=$(GIT_TERMINAL_PROMPT=0 timeout 20 git ls-remote "${XB_REPO:-$XB_REPO_HTTPS}" HEAD 2>/dev/null | cut -c1-7)
+  [[ -z $h && -z ${XB_REPO:-} ]] && h=$(GIT_TERMINAL_PROMPT=0 timeout 20 git ls-remote "$XB_REPO_SSH" HEAD 2>/dev/null | cut -c1-7)
+  echo "$h"
+}
+
+xb_commit_info() { xb_git "$1" log -1 --format='%h  %cd  %s' --date=format:'%Y-%m-%d %H:%M' 2>/dev/null; }
+
+xb_check_update() {  # xb_check_update 站点 : 对比本地和仓库, 有新提交就提示更新
+  use_site "${1:-}" || return 1
+  local app=${ROOT%/public} n
+  [[ -d $app/.git ]] || { err "$app 不是 git 部署的, 无法检查"; return 1; }
+  info "检查仓库更新 ..."
+  xb_git "$app" fetch -q origin main || { err "连接仓库失败 (检查网络或仓库权限)"; return 1; }
+  echo "  当前版本: $(xb_commit_info "$app")"
+  n=$(xb_git "$app" rev-list --count HEAD..origin/main 2>/dev/null)
+  if [[ ${n:-0} == 0 ]]; then info "已经是最新版"; return 0; fi
+  echo "  仓库有 ${G}$n${N} 个新提交:"
+  xb_git "$app" log --format='    %h  %cd  %s' --date=format:'%m-%d %H:%M' HEAD..origin/main | head -10
+  ((n > 10)) && echo "    ..."
+  confirm "现在更新? (数据库和 .env 不受影响)" y && XB_NOCONFIRM=1 xb_update "$DOMAIN"
 }
 
 xb_safe_dir() {
@@ -127,6 +153,9 @@ xb_install() {  # xb_install [域名]
   v=$XB_PHP; php=$(php_bin "$v")
 
   mkdir -p "$app"; XB_APP=$app
+  info "检查仓库最新版本 ..."
+  k=$(xb_remote_head)
+  [[ -n $k ]] && echo "  仓库最新提交: ${G}$k${N} (下面部署的就是这个版本)"
   info "下载 Xboard 源码 ..."
   if [[ -n ${XB_REPO:-} ]]; then
     GIT_TERMINAL_PROMPT=0 git clone -q --depth 1 "$XB_REPO" "$app"
@@ -136,6 +165,7 @@ xb_install() {  # xb_install [域名]
   fi || xb_abort "下载失败 (仓库是私有的话, 服务器需要配置 GitHub SSH 密钥)"
   [[ -f $app/artisan ]] || xb_abort "源码不完整"
   xb_safe_dir "$app"
+  echo "  已下载: $(xb_commit_info "$app")"
   xb_php_ready "$v"
   info "安装依赖 (需要几分钟, 请耐心等待) ..."
   xb_composer "$app" "$php" || xb_abort "安装依赖失败"
@@ -216,7 +246,7 @@ xb_update() {  # xb_update [域名]
   [[ $ROOT == */public && -f $app/artisan ]] || { err "$DOMAIN 不是 Xboard 站点"; return 1; }
   php=$(php_bin "$PHPVER"); k=$(xb_slug "$DOMAIN")
   warn "更新会用仓库里的最新代码覆盖程序文件, 数据库和 .env 不受影响"
-  confirm "继续更新 $DOMAIN ?" y || return 0
+  [[ -n ${XB_NOCONFIRM:-} ]] || confirm "继续更新 $DOMAIN ?" y || return 0
   xb_safe_dir "$app"
   (cd "$app" && GIT_TERMINAL_PROMPT=0 git fetch -q origin main && git reset -q --hard origin/main) \
     || { err "拉取代码失败 (检查网络或仓库权限)"; return 1; }
@@ -225,7 +255,7 @@ xb_update() {  # xb_update [域名]
   chown -R "$WEB_USER:$WEB_USER" "$app"
   (cd "$app" && runuser -u "$WEB_USER" -- "$php" artisan xboard:update) || warn "xboard:update 出错, 请看上面的信息"
   systemctl restart "xboard-$k" >/dev/null 2>&1 || true
-  info "更新完成"
+  info "更新完成: $(xb_commit_info "$app")"
 }
 
 xb_domains() {  # xb_domains [站点] [订阅域名] [节点域名]
@@ -418,11 +448,12 @@ app_xboard_menu() {  # app_xboard_menu 站点
   local d=$1 c
   while true; do
     title "Xboard 面板 · $d"
-    choose c "操作:" "后台地址 / 重置管理员密码" "更新 Xboard" "域名分离 (主页/订阅/节点)" \
+    echo "  程序版本: $( load_meta "$d"; xb_commit_info "${ROOT%/public}" )"
+    choose c "操作:" "后台地址 / 重置管理员密码" "检查更新" "域名分离 (主页/订阅/节点)" \
       "刷新防 CC 后台白名单" "返回" || return 0
     case $c in
       后台*) (xb_info "$d") ;;
-      更新*) (xb_update "$d"); pause ;;
+      检查更新) (xb_check_update "$d"); pause ;;
       域名*) (xb_domains "$d"); pause ;;
       刷新*) if xb_secure_detect "$d"; then info "已刷新 (后台改了路径后用这个)"; else warn "读取后台路径失败"; fi; pause ;;
       *) return 0 ;;
@@ -460,6 +491,7 @@ app_xboard_purge() { xb_purge "$1" "$2"; rm -f "$(xb_path_file "$1")"; }
 app_xboard_cli() {  # wsm app xboard [域名] | update|info|domains [域名] ...
   case ${1:-} in
     update)  xb_update "${2:-}" ;;
+    check)   xb_check_update "${2:-}" ;;
     info)    xb_info "${2:-}" ;;
     domains) xb_domains "${2:-}" "${3:-}" "${4:-}" ;;
     "")      app_module_menu xboard ;;
