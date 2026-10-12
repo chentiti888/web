@@ -10,7 +10,8 @@
 #  证书: Let's Encrypt(HTTP) / 通配符(Cloudflare DNS) / 自有证书 / 自签名, 自动续期
 #  PHP : 7.4-8.4 多版本共存, 扩展, 参数, 禁用函数, FPM 进程数
 #  其他: MariaDB + phpMyAdmin, Redis, Composer, 备份/还原, 计划任务, 服务管理,
-#        程序下载: 网站应用模块 (可随时添加/删除), 面板, 网站环境, 开发运行环境, 系统工具
+#        程序下载: 扩展程序模块 (Xboard / WordPress / Typecho / Nextcloud / 哪吒 / Uptime Kuma / OpenList / 3x-ui,
+#                  可随时添加/删除, 部署时自动检测最新版本), 网站环境, 开发运行环境, 系统工具
 #  系统: Debian 10+ / Ubuntu 20.04+ (推荐)   RHEL 系 (Rocky/Alma/CentOS) 尽力支持
 #
 #  用法: bash wsm.sh install      首次安装环境 (之后直接用 wsm 命令)
@@ -18,8 +19,10 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="2.9"
+WSM_VER="2.10"
 # CHANGELOG-BEGIN  (更新时会显示比当前版本新的条目, 新的写在最上面)
+# v2.10 新增扩展程序: Typecho / Nextcloud / 哪吒监控 / Uptime Kuma / OpenList; 部署时自动检测最新版本, 各程序菜单里可检查更新并升级 (含 Xboard 仓库新提交)
+# v2.9.1 3x-ui 也改为模块 (独立软件类); 程序下载里第三方程序统一放在 [扩展程序], 可随时添加删除
 # v2.9 网站应用改为模块: Xboard / WordPress 从脚本本体拆出来, 在 [程序下载] 里随时添加/删除; 已部署的站点自动归入对应模块
 # v2.8.7 服务管理: 显示开机自启状态, 每个操作都有结果提示, 去掉重复的 redis, 加入 Xboard 队列和告警里的服务
 # v2.8.6 wsm 日志自动轮转; 还原后的提示更准确; 静态检查清理
@@ -627,6 +630,7 @@ rewrite_location() {
     thinkphp) echo '    location / { if (!-e $request_filename) { rewrite ^(.*)$ /index.php?s=$1 last; break; } }' ;;
     spa) echo '    location / { try_files $uri $uri/ /index.html; }' ;;
     custom) echo "    include $META_DIR/$DOMAIN.rewrite;" ;;
+    app) ;;   # 程序模块自己的规则 (站点的 .app.nginx), 在 server_body 里输出
     *) echo '    location / { try_files $uri $uri/ =404; }' ;;
   esac
 }
@@ -664,6 +668,12 @@ EOF
     while read -r p u; do
       [[ -n $p && -n $u ]] && proxy_block "^~ $p" "$u"
     done < "$META_DIR/$DOMAIN.paths"
+  fi
+
+  if [[ -f $META_DIR/$DOMAIN.app.nginx ]]; then  # 程序模块提供的专用规则
+    local sock=""
+    [[ $TYPE == php && -n $PHPVER ]] && sock="unix:$(php_sock "$PHPVER")"
+    sed "s#__PHP_SOCK__#$sock#g" "$META_DIR/$DOMAIN.app.nginx"
   fi
 
   case $TYPE in
@@ -1340,7 +1350,7 @@ del_site() {
     certbot delete --cert-name "$d" --non-interactive >/dev/null 2>&1 || true
   fi
   rm -rf "$CERT_DIR/$d"
-  rm -f "$AUTH_DIR/$d.htpasswd" "$META_DIR/$d.paths" "$META_DIR/$d.rewrite" "$(meta_file "$d")"
+  rm -f "$AUTH_DIR/$d.htpasswd" "$META_DIR/$d.paths" "$META_DIR/$d.rewrite" "$META_DIR/$d.app.nginx" "$(meta_file "$d")"
   [[ -n $app ]] && app_has "$app" guard_skip && guard_refresh_global
   nginx_reload >/dev/null 2>&1
   if [[ -n $ROOT && -d $ROOT ]] && confirm "同时删除网站目录 $ROOT ?" n; then rm -rf -- "$ROOT"; fi
@@ -1472,6 +1482,10 @@ site_target_change() {
 site_rewrite() {
   load_meta "$1"
   need_type php static || return 1
+  if [[ $REWRITE == app ]]; then
+    warn "这个站点的规则由程序模块 (${APP:-?}) 管理, 改了程序可能打不开, 这里不提供修改"
+    return 1
+  fi
   echo "当前伪静态: $REWRITE"
   local r
   choose r "选择伪静态规则:" \
@@ -2692,50 +2706,15 @@ swap_menu() {
   done
 }
 
-# ---------------- 3x-ui 面板 (官方脚本: github.com/MHSanaei/3x-ui)
-xui_install() {
-  echo "将运行 3x-ui 官方安装脚本, 安装过程中按提示设置面板端口和账号密码。"
-  warn "节点不要用 80/443 端口 (被 Nginx 占用); 开了源站保护也不影响其他端口"
-  confirm "开始安装?" y || return 0
-  bash <(curl -fsSL https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh) \
-    || { err "安装失败, 请检查网络"; return 1; }
-}
-
-xui_menu() {
-  local c
-  while true; do
-    title "3x-ui 面板"
-    echo "  Xray 多协议节点面板 (x-ui 增强版)"
-    if ! app_installed 3xui; then
-      echo "  状态: ${Y}未安装${N}"
-      choose c "操作:" "安装" "返回" || return 0
-      [[ $c == 安装 ]] && { (xui_install); pause; continue; }
-      return 0
-    fi
-    echo "  状态: ${G}已安装${N}   服务: $(svc_state x-ui)"
-    choose c "操作:" "打开 x-ui 管理菜单" "查看面板地址和账号" "重启" "更新" "卸载" "返回" || return 0
-    case $c in
-      打开*) x-ui ;;
-      查看*) x-ui settings 2>/dev/null || /usr/local/x-ui/x-ui setting -show true; pause ;;
-      重启) systemctl restart x-ui && info "已重启"; pause ;;
-      更新) x-ui update; pause ;;
-      卸载) (app_uninstall 3xui); pause ;;
-      *) return 0 ;;
-    esac
-  done
-}
-
 # ================================================================ 程序下载 (原软件商店)
-APP_IDS=(3xui
-         webbase mariadb redis composer phpmyadmin postgresql memcached
+APP_IDS=(webbase mariadb redis composer phpmyadmin postgresql memcached
          nodejs pm2 python java git supervisor docker
          rclone ffmpeg imagemagick monitor)
 
-app_cat_icon() { case $1 in 面板程序) ico c_panel ;; 网站环境) ico c_web ;; 开发运行) ico c_dev ;; *) ico c_tool ;; esac; }
+app_cat_icon() { case $1 in 网站环境) ico c_web ;; 开发运行) ico c_dev ;; *) ico c_tool ;; esac; }
 
 app_cat() {
   case $1 in
-    3xui) echo "面板程序" ;;
     webbase|mariadb|redis|composer|phpmyadmin|postgresql|memcached) echo "网站环境" ;;
     nodejs|pm2|python|java|git|supervisor|docker) echo "开发运行" ;;
     *) echo "系统工具" ;;
@@ -2743,7 +2722,7 @@ app_cat() {
 }
 app_name() {
   case $1 in
-    3xui) echo "3x-ui 面板" ;; webbase) echo "Nginx 网站环境" ;;
+    webbase) echo "Nginx 网站环境" ;;
     nodejs) echo "Node.js" ;; pm2) echo "PM2" ;; python) echo "Python3" ;; java) echo "Java (JRE)" ;;
     git) echo "Git" ;; composer) echo "Composer" ;; supervisor) echo "Supervisor" ;;
     mariadb) echo "MariaDB" ;; postgresql) echo "PostgreSQL" ;; redis) echo "Redis" ;;
@@ -2754,7 +2733,6 @@ app_name() {
 }
 app_desc() {
   case $1 in
-    3xui) echo "Xray 多协议节点面板 (x-ui 增强版)" ;;
     webbase) echo "Nginx + 证书工具 + PHP, 建站必装" ;;
     nodejs) echo "JS 运行环境 + npm" ;; pm2) echo "Node 项目进程守护" ;;
     python) echo "Python3 + pip + venv" ;; java) echo "OpenJDK 运行环境" ;;
@@ -2770,7 +2748,6 @@ app_desc() {
 }
 app_installed() {
   case $1 in
-    3xui) command -v x-ui >/dev/null 2>&1 || [[ -x /usr/local/x-ui/x-ui ]] ;;
     webbase) command -v nginx >/dev/null 2>&1 ;;
     nodejs) command -v node >/dev/null 2>&1 ;;
     pm2) command -v pm2 >/dev/null 2>&1 ;;
@@ -2794,7 +2771,6 @@ app_installed() {
 }
 app_version() {
   case $1 in
-    3xui) /usr/local/x-ui/x-ui -v 2>/dev/null | head -1 ;;
     webbase) nginx -v 2>&1 | sed 's#.*/##' ;;
     nodejs) echo "$(node -v 2>/dev/null) / npm $(npm -v 2>/dev/null)" ;;
     pm2) pm2 -v 2>/dev/null | tail -1 ;;
@@ -2817,7 +2793,7 @@ app_version() {
 }
 app_service() {  # 输出该软件对应的 systemd 服务名(没有则为空)
   case $1 in
-    3xui) echo x-ui ;; webbase) echo nginx ;;
+    webbase) echo nginx ;;
     mariadb) echo mariadb ;; postgresql) echo postgresql ;; memcached) echo memcached ;;
     docker) echo docker ;;
     redis) if unit_exists redis-server; then echo redis-server; else echo redis; fi ;;
@@ -2947,7 +2923,6 @@ app_install() {
   app_valid "${1:-}" || { err "未知软件: ${1:-}"; return 1; }
   pkg_refresh
   case $1 in
-    3xui) xui_install ;;
     webbase) if command -v nginx >/dev/null 2>&1; then install_base; else cmd_install; fi ;;
     nodejs) install_nodejs ;;
     pm2) install_pm2 ;;
@@ -2975,7 +2950,6 @@ app_uninstall() {
   app_valid "${1:-}" || { err "未知软件: ${1:-}"; return 1; }
   local svc; svc=$(app_service "$1")
   case $1 in
-    3xui) confirm_typed "确认卸载 3x-ui (面板和节点配置都会删除)" || return 0; x-ui uninstall ;;
     webbase) warn "卸载 Nginx 会让所有网站停止访问, 这里不提供卸载"; return 0 ;;
     nodejs) pkg_remove nodejs; pkg_remove npm 2>/dev/null; rm -f /etc/apt/sources.list.d/nodesource.list ;;
     pm2) npm rm -g pm2; systemctl disable pm2-root >/dev/null 2>&1; rm -f /etc/systemd/system/pm2-root.service ;;
@@ -3010,7 +2984,6 @@ app_uninstall() {
 app_manage() {
   local id=$1 c svc
   local -a opts
-  case $id in 3xui) xui_menu; return 0 ;; esac
   while true; do
     title "$(app_name "$id")"
     echo "  简介: $(app_desc "$id")"
@@ -3056,13 +3029,11 @@ menu_store() {
     apps_load
     mods=("${APPS_LOADED[@]}"); m=${#mods[@]}
     title "程序下载"
-    echo; echo "  ${B}$(ico web) 网站应用 (模块)${N}"
+    echo; echo "  ${B}$(ico c_panel) 扩展程序 (模块, 可添加删除)${N}"
     i=0
     for id in "${mods[@]}"; do
       i=$((i + 1))
-      n=$(app_sites "$id" | wc -l)
-      if ((n)); then st="${G}${n} 个站点${N}"; else st="${D}未部署${N}"; fi
-      printf "  %2d) " "$i"; pad_w "${APP_NAMES[$id]}" 16; echo "$st"
+      printf "  %2d) " "$i"; pad_w "${APP_NAMES[$id]}" 16; app_status "$id"
     done
     ((m)) || echo "      ${D}(还没有模块, 输入 a 从仓库添加)${N}"
     echo "   a) 添加模块     d) 删除模块"
@@ -3093,23 +3064,26 @@ menu_store() {
   done
 }
 
-# ================================================================ 网站应用模块
-# 底座不认识任何具体程序; 每个程序 (Xboard / WordPress / ...) 是 /etc/wsm/apps/<id>.sh 一个独立模块,
-# 随时添加、删除。模块格式见仓库 apps/README.md, 简述:
+# ================================================================ 扩展程序模块
+# 底座只管服务器环境 (Nginx/PHP/数据库/证书/防护/备份); 具体程序 (Xboard / WordPress / 3x-ui ...)
+# 都是 /etc/wsm/apps/<id>.sh 一个独立模块, 随时添加、删除。格式见仓库 apps/README.md, 简述:
 #   APP_ID=<id>  APP_NAME="名称"  APP_DESC="一句话简介"  APP_VER=1.0
-#   app_<id>_install [域名]          必须: 部署一个新站点, 成功后调用 app_mark_site 域名 <id>
-#   app_<id>_menu  站点              可选: 模块自己的管理菜单 (更新 / 后台 / 重置密码 ...)
-#   app_<id>_detect                  可选: (已 load_meta) 判断现有站点是不是本程序, 用于自动认领
+#   APP_TYPE=site (默认, 网站程序: 部署成站点, 可部署多个) | soft (独立软件: 自带服务, 装一份)
+#   app_<id>_install [域名]          必须: 安装 / 部署; site 类成功后调用 app_mark_site 域名 <id>
+#   app_<id>_menu  [站点]            可选: 模块自己的管理菜单
+#   app_<id>_detect                  可选: 识别已有的 (site 类已 load_meta 判断站点; soft 类判断是否已装)
+#   app_<id>_installed               soft 类: 是否已安装      app_<id>_version  soft 类: 版本
+#   app_<id>_uninstall               soft 类: 卸载
+#   app_<id>_units [站点]            可选: 后台服务 (监控 / 服务管理 / 搬家)
 #   app_<id>_guard_skip              可选: 输出防 CC 不限速的 nginx map 行 (如节点接口 / 订阅链接)
 #   app_<id>_guard_on 域名           可选: 站点开启防 CC 时调用
-#   app_<id>_units 域名              可选: 输出该站点的后台服务 (监控 / 服务管理 / 搬家)
 #   app_<id>_backup_paths            可选: 输出全量备份要额外带上的文件
 #   app_<id>_purge 域名 根目录       可选: 删除站点时清理 (服务 / 计划任务 ...)
 #   app_<id>_cli 参数...             可选: 命令行 wsm app <id> 参数...
 APPS_DIR=$WSM_DIR/apps
 APPS_DATA=$WSM_DIR/appdata
-APPS_MIGRATED=$APPS_DIR/.migrated
-declare -A APP_NAMES=() APP_DESCS=() APP_VERS=()
+APPS_MIGRATED=$APPS_DIR/.migrated-2
+declare -A APP_NAMES=() APP_DESCS=() APP_VERS=() APP_TYPES=()
 APPS_LOADED=()
 
 app_id_ok() { [[ $1 =~ ^[a-z][a-z0-9_]{1,30}$ ]]; }
@@ -3127,18 +3101,19 @@ app_file_check() {  # app_file_check 文件 [期望的id] -> APP_CHECK_ID ; 检�
 }
 
 apps_load() {  # 载入全部已添加的模块 (语法错误的跳过)
-  local f id APP_ID APP_NAME APP_DESC APP_VER
+  local f id APP_ID APP_NAME APP_DESC APP_VER APP_TYPE
   APPS_LOADED=()
   [[ -d $APPS_DIR ]] || return 0
   for f in "$APPS_DIR"/*.sh; do
     [[ -f $f ]] || continue
     id=${f##*/}; id=${id%.sh}
     app_id_ok "$id" && bash -n "$f" 2>/dev/null || continue
-    APP_ID=""; APP_NAME=""; APP_DESC=""; APP_VER=""
+    APP_ID=""; APP_NAME=""; APP_DESC=""; APP_VER=""; APP_TYPE=""
     # shellcheck disable=SC1090
     source "$f" || continue
     [[ $APP_ID == "$id" ]] && declare -F "app_${id}_install" >/dev/null || continue
     APP_NAMES[$id]=${APP_NAME:-$id}; APP_DESCS[$id]=${APP_DESC:-}; APP_VERS[$id]=${APP_VER:-}
+    [[ $APP_TYPE == soft ]] && APP_TYPES[$id]=soft || APP_TYPES[$id]=site
     APPS_LOADED+=("$id")
   done
   return 0
@@ -3148,6 +3123,8 @@ app_loaded() { local x; for x in "${APPS_LOADED[@]}"; do [[ $x == "$1" ]] && ret
 app_has() { app_loaded "$1" && declare -F "app_${1}_$2" >/dev/null; }
 app_call() { local id=$1 fn=$2; shift 2; app_has "$id" "$fn" || return 0; "app_${id}_${fn}" "$@"; }
 apps_hook() { local id fn=$1; shift; for id in "${APPS_LOADED[@]}"; do app_call "$id" "$fn" "$@"; done; return 0; }
+app_soft() { [[ ${APP_TYPES[$1]:-site} == soft ]]; }
+app_soft_installed() { app_has "$1" installed && "app_${1}_installed"; }
 
 app_of_site() { ( load_meta "$1" 2>/dev/null; echo "${APP:-}" ); }
 app_site_call() {  # app_site_call 域名 钩子 参数... : 调用该站点所属模块的钩子
@@ -3170,20 +3147,34 @@ app_sites() {  # app_sites 模块id : 列出属于该模块的站点
   return 0
 }
 
-apps_units() {  # 所有模块站点的后台服务 (去重)
-  local d id
-  while read -r d; do
-    [[ -n $d ]] || continue
-    id=$(app_of_site "$d")
-    [[ -n $id ]] && app_call "$id" units "$d"
-  done < <(list_site_names) | awk 'NF && !seen[$0]++'
+app_status() {  # 菜单里显示的状态
+  local n
+  if app_soft "$1"; then
+    if app_soft_installed "$1"; then echo "${G}已装${N}"; else echo "${D}未装${N}"; fi
+  else
+    n=$(app_sites "$1" | wc -l)
+    if ((n)); then echo "${G}${n} 个站点${N}"; else echo "${D}未部署${N}"; fi
+  fi
 }
 
-apps_claim() {  # 让已载入的模块认领还没归属的老站点
+apps_units() {  # 所有模块的后台服务 (去重)
+  local d id
+  {
+    for id in "${APPS_LOADED[@]}"; do app_soft "$id" && app_call "$id" units; done
+    while read -r d; do
+      [[ -n $d ]] || continue
+      id=$(app_of_site "$d")
+      [[ -n $id ]] && ! app_soft "$id" && app_call "$id" units "$d"
+    done < <(list_site_names)
+  } | awk 'NF && !seen[$0]++'
+}
+
+apps_claim() {  # 让已载入的网站模块认领还没归属的老站点
   local d id n=0
   while read -r d; do
     [[ -n $d && -z $(app_of_site "$d") ]] || continue
     for id in "${APPS_LOADED[@]}"; do
+      app_soft "$id" && continue
       app_has "$id" detect || continue
       if ( load_meta "$d"; "app_${id}_detect" ) >/dev/null 2>&1; then
         app_mark_site "$d" "$id"; n=$((n + 1)); break
@@ -3262,17 +3253,28 @@ app_update_module() {  # app_update_module id : 从仓库重新下载模块
 }
 
 app_remove() {  # app_remove id
-  local id=$1 d c
+  local id=$1 d c=""
   local -a sites=()
   [[ -f $APPS_DIR/$id.sh ]] || { err "没有这个模块: $id"; return 1; }
-  mapfile -t sites < <(app_sites "$id")
   echo "  模块: ${APP_NAMES[$id]:-$id}"
-  if ((${#sites[@]})); then
-    echo "  有 ${#sites[@]} 个站点是用它部署的: ${sites[*]}"
-    choose c "删除模块时, 这些站点:" "保留站点 (网站照常运行, 只是不再由模块管理)" \
-      "一起删除站点" || return 0
-    if [[ $c == 一起* ]]; then
-      for d in "${sites[@]}"; do (del_site "$d"); done
+  if app_soft "$id"; then
+    if app_soft_installed "$id"; then
+      echo "  这个软件目前已安装在本机"
+      choose c "删除模块时, 软件:" "保留软件 (照常运行, 只是不再由 wsm 管理)" "先卸载软件" || return 0
+      if [[ $c == 先卸载* ]]; then
+        if app_has "$id" uninstall; then ("app_${id}_uninstall") || { warn "没有卸载, 模块也保留"; return 0; }
+        else warn "这个模块没有提供卸载功能, 请手动卸载"; fi
+      fi
+    fi
+  else
+    mapfile -t sites < <(app_sites "$id")
+    if ((${#sites[@]})); then
+      echo "  有 ${#sites[@]} 个站点是用它部署的: ${sites[*]}"
+      choose c "删除模块时, 这些站点:" "保留站点 (网站照常运行, 只是不再由模块管理)" \
+        "一起删除站点" || return 0
+      if [[ $c == 一起* ]]; then
+        for d in "${sites[@]}"; do (del_site "$d"); done
+      fi
     fi
   fi
   confirm "确认删除模块 ${APP_NAMES[$id]:-$id} ?" n || return 0
@@ -3280,49 +3282,49 @@ app_remove() {  # app_remove id
   apps_load
   guard_refresh_global >/dev/null 2>&1
   info "已删除模块 ${APP_NAMES[$id]:-$id}"
-  ((${#sites[@]})) && [[ $c == 保留* ]] && echo "  以后重新添加这个模块, 这些站点会自动归回它管理"
+  [[ $c == 保留* ]] && echo "  以后重新添加这个模块, 会自动重新接管"
   return 0
 }
 
-apps_migrate_once() {  # 老版本升级上来时: 自动找回已部署程序对应的模块 (只做一次)
+apps_migrate_once() {  # 老版本升级上来时: 自动找回已在用的程序对应的模块 (只做一次)
   [[ -f $APPS_MIGRATED ]] && return 0
-  [[ -d $META_DIR ]] || return 0
-  local n idx id d tmp found fail=0
+  local idx id tmp found fail=0
   apps_claim >/dev/null
-  n=0
-  while read -r d; do [[ -n $d && -z $(app_of_site "$d") ]] && n=$((n + 1)); done < <(list_site_names)
-  if ((n)); then
-    idx=$(curl -fsSL --max-time 20 "$(app_repo_base)/index.txt?_=$(date +%s)" 2>/dev/null) || return 0
-    while IFS='|' read -r id _; do
-      app_id_ok "$id" && ! app_loaded "$id" || continue
-      app_fetch "$id" 2>/dev/null || { fail=1; continue; }
-      tmp=$APP_FETCHED
-      app_file_check "$tmp" "$id" 2>/dev/null || { rm -f "$tmp"; continue; }
-      found=$(
-        # shellcheck disable=SC1090
-        source "$tmp" 2>/dev/null
-        declare -F "app_${id}_detect" >/dev/null || exit 0
-        while read -r d; do
-          [[ -n $d ]] || continue
-          ( load_meta "$d"; [[ -z ${APP:-} ]] && "app_${id}_detect" ) >/dev/null 2>&1 && { echo 1; break; }
-        done < <(list_site_names)
-      )
-      if [[ $found == 1 ]]; then app_install_file "$tmp" >/dev/null 2>&1; else rm -f "$tmp"; fi
-    done <<< "$idx"
-  fi
+  idx=$(curl -fsSL --max-time 10 "$(app_repo_base)/index.txt?_=$(date +%s)" 2>/dev/null) || return 0
+  while IFS='|' read -r id _; do
+    app_id_ok "$id" && ! app_loaded "$id" || continue
+    app_fetch "$id" 2>/dev/null || { fail=1; continue; }
+    tmp=$APP_FETCHED
+    app_file_check "$tmp" "$id" 2>/dev/null || { rm -f "$tmp"; continue; }
+    found=$(
+      APP_TYPE=""
+      # shellcheck disable=SC1090
+      source "$tmp" 2>/dev/null
+      declare -F "app_${id}_detect" >/dev/null || exit 0
+      if [[ $APP_TYPE == soft ]]; then "app_${id}_detect" >/dev/null 2>&1 && echo 1; exit 0; fi
+      while read -r d; do
+        [[ -n $d ]] || continue
+        ( load_meta "$d"; [[ -z ${APP:-} ]] && "app_${id}_detect" ) >/dev/null 2>&1 && { echo 1; break; }
+      done < <(list_site_names)
+    )
+    if [[ $found == 1 ]]; then app_install_file "$tmp" >/dev/null 2>&1; else rm -f "$tmp"; fi
+  done <<< "$idx"
   ((fail)) && return 0   # 有模块没下载到, 下次再试
   mkdir -p "$APPS_DIR"; date '+%F %T' > "$APPS_MIGRATED"
   guard_refresh_global >/dev/null 2>&1
   return 0
 }
 
-app_deploy_menu() {  # 网站管理 → 部署网站应用
+app_deploy_menu() {  # 网站管理 → 部署网站应用 (只列网站类模块)
   local c id
-  local -a opts=()
-  ((${#APPS_LOADED[@]})) || { warn "还没有添加任何网站应用模块, 到 [程序下载] 里添加"; return 0; }
-  for id in "${APPS_LOADED[@]}"; do opts+=("${APP_NAMES[$id]}  ${D}${APP_DESCS[$id]}${N}"); done
-  choose c "部署哪个程序:" "${opts[@]}" || return 0
+  local -a opts=() ids=()
   for id in "${APPS_LOADED[@]}"; do
+    app_soft "$id" && continue
+    ids+=("$id"); opts+=("${APP_NAMES[$id]}  ${D}${APP_DESCS[$id]}${N}")
+  done
+  ((${#ids[@]})) || { warn "还没有添加网站类模块 (如 WordPress / Xboard), 到 [程序下载] 里添加"; return 0; }
+  choose c "部署哪个程序:" "${opts[@]}" || return 0
+  for id in "${ids[@]}"; do
     [[ $c == "${APP_NAMES[$id]}  "* ]] && { "app_${id}_install"; return; }
   done
 }
@@ -3331,18 +3333,33 @@ app_module_menu() {  # 单个模块的菜单
   local id=$1 c d
   local -a sites=() opts=()
   while true; do
-    mapfile -t sites < <(app_sites "$id")
     title "${APP_NAMES[$id]}"
     echo "  简介: ${APP_DESCS[$id]:-无}"
     echo "  模块: $id${APP_VERS[$id]:+ v${APP_VERS[$id]}}"
-    echo "  站点: ${sites[*]:-无}"
-    opts=("部署新站点")
-    app_has "$id" menu && ((${#sites[@]})) && opts+=("管理已部署的站点")
+    if app_soft "$id"; then
+      if app_soft_installed "$id"; then
+        echo "  状态: ${G}已安装${N}$(app_has "$id" version && echo "   版本: $("app_${id}_version")")"
+        opts=()
+        app_has "$id" menu && opts+=("管理")
+        opts+=("重新安装")
+        app_has "$id" uninstall && opts+=("卸载软件")
+      else
+        echo "  状态: ${Y}未安装${N}"
+        opts=("安装")
+      fi
+    else
+      mapfile -t sites < <(app_sites "$id")
+      echo "  站点: ${sites[*]:-无}"
+      opts=("部署新站点")
+      app_has "$id" menu && ((${#sites[@]})) && opts+=("管理已部署的站点")
+    fi
     opts+=("更新模块" "删除模块" "返回")
     choose c "操作:" "${opts[@]}" || return 0
     case $c in
-      部署*) ("app_${id}_install"); pause ;;
-      管理*)
+      部署*|安装|重新安装) ("app_${id}_install"); pause ;;
+      管理) ("app_${id}_menu") ;;
+      卸载软件) ("app_${id}_uninstall") && info "已卸载 (模块还在, 想彻底不要可以再删除模块)"; pause ;;
+      管理已部署*)
         if ((${#sites[@]} == 1)); then d=${sites[0]}
         else choose d "哪个站点:" "${sites[@]}" || continue; fi
         ("app_${id}_menu" "$d") ;;
@@ -3359,7 +3376,12 @@ app_cli() {  # wsm app ...
     list)
       ((${#APPS_LOADED[@]})) || { echo "还没有添加模块"; return 0; }
       for id in "${APPS_LOADED[@]}"; do
-        printf '%-12s ' "$id"; pad_w "${APP_NAMES[$id]}" 16; app_sites "$id" | paste -sd' ' -
+        printf '%-12s ' "$id"; pad_w "${APP_NAMES[$id]}" 16
+        if app_soft "$id"; then
+          if app_soft_installed "$id"; then echo "已安装"; else echo "未安装"; fi
+        else
+          app_sites "$id" | paste -sd' ' -
+        fi
       done ;;
     add) app_add "${2:-}" ;;
     remove) [[ -n ${2:-} ]] || { err "用法: wsm app remove <模块>"; return 1; }; app_remove "$2" ;;
@@ -3369,9 +3391,179 @@ app_cli() {  # wsm app ...
       app_loaded "$id" || { err "没有这个模块: $id (wsm app list 查看)"; return 1; }
       case ${1:-} in
         install) "app_${id}_install" "${2:-}" ;;
+        uninstall) app_has "$id" uninstall || { err "这个模块不支持卸载"; return 1; }; "app_${id}_uninstall" ;;
         *) if app_has "$id" cli; then "app_${id}_cli" "$@"; else app_module_menu "$id"; fi ;;
       esac ;;
   esac
+}
+
+# ---------------------------------------------------------------- 给模块用的公共函数
+# 版本检测: 先查 GitHub Releases 接口 (带发布日期), 查不到 (限流/网络) 再用 git 读标签
+ver_gh_latest() {  # ver_gh_latest owner/repo -> 输出 "版本|日期" (日期可能为空)
+  local r=$1 j tag="" date=""
+  j=$(curl -fsSL --max-time 15 -H 'Accept: application/vnd.github+json' \
+      "https://api.github.com/repos/$r/releases/latest" 2>/dev/null)
+  tag=$(printf '%s\n' "$j" | sed -n 's/^ *"tag_name": *"\([^"]*\)".*/\1/p' | head -1)
+  date=$(printf '%s\n' "$j" | sed -n 's/^ *"published_at": *"\([0-9-]*\)T.*/\1/p' | head -1)
+  if [[ -z $tag ]] && command -v git >/dev/null 2>&1; then
+    tag=$(GIT_TERMINAL_PROMPT=0 timeout 30 git ls-remote --tags --refs "https://github.com/$r.git" 2>/dev/null \
+          | awk -F/ '{print $3}' | grep -viE 'rc|alpha|beta|pre|dev|nightly|test' | sort -V | tail -1)
+  fi
+  [[ -n $tag ]] || return 1
+  echo "$tag|$date"
+}
+
+ver_newer() {  # ver_newer 当前 最新 : 最新 比 当前 新则返回 0
+  local a=${1#v} b=${2#v}
+  [[ -n $b && $a != "$b" && $(printf '%s\n%s\n' "$a" "$b" | sort -V | tail -1) == "$b" ]]
+}
+
+ver_pick() {  # ver_pick 程序名 owner/repo -> PICK_VER (空 = 用 latest 链接)
+  local x tag="" date="" v
+  PICK_VER=""
+  info "检查 $1 最新版本 ..."
+  if x=$(ver_gh_latest "$2"); then
+    tag=${x%%|*}; date=${x#*|}
+    echo "  最新版本: ${G}$tag${N}${date:+  (发布于 $date)}"
+  else
+    warn "没能检测到最新版本 (网络或 GitHub 限流), 将直接下载最新版"
+  fi
+  read -r -p "回车安装${tag:+ $tag}最新版, 或输入要安装的版本号: " v || return 1
+  PICK_VER=${v:-$tag}
+  [[ -z $v || $v =~ ^v?[0-9][0-9A-Za-z._-]*$ ]] || { err "版本号格式不正确"; return 1; }
+  return 0
+}
+
+gh_asset_url() {  # gh_asset_url owner/repo 版本(可空) 文件名
+  if [[ -n $2 ]]; then echo "https://github.com/$1/releases/download/$2/$3"
+  else echo "https://github.com/$1/releases/latest/download/$3"; fi
+}
+
+arch_go() {  # Go 程序常用的架构名
+  case $(uname -m) in
+    x86_64|amd64) echo amd64 ;; aarch64|arm64) echo arm64 ;; armv7*) echo arm-7 ;; s390x) echo s390x ;;
+    *) uname -m ;;
+  esac
+}
+
+app_new_domain() {  # app_new_domain 变量名 提示 : 输入新站点的域名并检查可用
+  local _nd=${!1:-} _nu
+  ask _nd "$2" || return 1
+  valid_domain "$_nd" || { err "域名格式不正确: $_nd"; return 1; }
+  [[ -f $(meta_file "$_nd") ]] && { err "站点已存在: $_nd"; return 1; }
+  _nu=$(domain_used "$_nd") && { err "域名 $_nd 已被站点 $_nu 使用"; return 1; }
+  printf -v "$1" "%s" "$_nd"
+}
+
+app_need_db() {  # app_need_db 程序名 : 没有数据库就先装
+  command -v mysql >/dev/null 2>&1 && return 0
+  confirm "$1 需要数据库, 现在安装 MariaDB 吗?" y || return 1
+  install_db
+}
+
+app_db_new() {  # app_db_new 前缀 域名 -> ADB_NAME ADB_USER ADB_PASS
+  local k; k=$(printf '%s' "$2" | tr -c 'A-Za-z0-9' '_' | cut -c1-12)
+  ADB_NAME="${1}_${k}_$(openssl rand -hex 2)"; ADB_USER=$ADB_NAME
+  ADB_PASS=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 20)
+  mysql -e "CREATE DATABASE \`$ADB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; \
+CREATE USER '$ADB_USER'@'localhost' IDENTIFIED BY '$ADB_PASS'; \
+GRANT ALL PRIVILEGES ON \`$ADB_NAME\`.* TO '$ADB_USER'@'localhost'; FLUSH PRIVILEGES;"
+}
+
+app_db_drop() {  # app_db_drop 库名 : 部署失败时清理
+  [[ $1 =~ ^[A-Za-z0-9_]+$ ]] || return 0
+  mysql -e "DROP DATABASE IF EXISTS \`$1\`; DROP USER IF EXISTS '$1'@'localhost';" 2>/dev/null
+}
+
+php_exts_ensure() {  # php_exts_ensure PHP版本 扩展...  (尽力安装, 装不上的跳过)
+  local v=$1 pv e; shift
+  pv=$(php_pkgver "$v")
+  for e in "$@"; do
+    if [[ $PM == apt ]]; then pkg_install "php$v-$e" >/dev/null 2>&1 || true
+    else
+      case $e in mysql) e=mysqlnd ;; esac
+      pkg_install "php${pv}-php-$e" >/dev/null 2>&1 || pkg_install "php${pv}-php-pecl-$e" >/dev/null 2>&1 || true
+    fi
+  done
+  systemctl restart "$(php_svc "$v")" >/dev/null 2>&1 || true
+}
+
+# shellcheck disable=SC2034  # PICK_PHP 给模块用
+php_pick_min() {  # php_pick_min 最低版本 程序名 -> PICK_PHP (没有合适的就装 8.3)
+  local x; local -a list=()
+  PICK_PHP=""
+  for x in $(php_installed | sort -V); do
+    awk -v v="$x" -v m="$1" 'BEGIN { exit !(v + 0 >= m + 0) }' && list+=("$x")
+  done
+  if ((${#list[@]} == 0)); then
+    warn "$2 需要 PHP $1 以上, 先安装 PHP 8.3"
+    install_php 8.3 || return 1
+    PICK_PHP=8.3
+  elif ((${#list[@]} == 1)); then PICK_PHP=${list[0]}
+  else choose PICK_PHP "选择 PHP 版本 ($2 需要 $1+):" "${list[@]}" || return 1
+  fi
+}
+
+app_site_conf() {  # app_site_conf 域名 : 从标准输入写入站点的程序专用 Nginx 规则
+  # 规则会放进站点 server 块里; __PHP_SOCK__ 会替换成站点当前 PHP 版本的 sock (切换 PHP 后自动跟着变)
+  cat > "$META_DIR/$1.app.nginx"
+}
+
+app_systemd() {  # app_systemd 服务名 说明 工作目录 启动命令 [用户] [Environment...]
+  local name=$1 desc=$2 wd=$3 exec=$4 user=${5:-root} e; shift 5 2>/dev/null || shift $#
+  {
+    echo "[Unit]"
+    echo "Description=$desc"
+    echo "After=network.target"
+    echo
+    echo "[Service]"
+    echo "Type=simple"
+    echo "User=$user"
+    echo "WorkingDirectory=$wd"
+    for e in "$@"; do echo "Environment=$e"; done
+    echo "ExecStart=$exec"
+    echo "Restart=on-failure"
+    echo "RestartSec=5"
+    echo
+    echo "[Install]"
+    echo "WantedBy=multi-user.target"
+  } > "/etc/systemd/system/$name.service"
+  systemctl daemon-reload
+  systemctl enable --now "$name" >/dev/null 2>&1
+}
+
+app_proxy_site() {  # app_proxy_site 域名 本机端口 : 建反向代理站点 (会问绑定域名和 HTTPS)
+  add_site proxy "$1" "http://127.0.0.1:$2"
+}
+
+app_ver_set() { mkdir -p "$APPS_DATA/$1"; echo "$2" > "$APPS_DATA/$1/version"; }  # 记录已装版本
+app_ver_get() { head -1 "$APPS_DATA/$1/version" 2>/dev/null; }
+
+app_port_free() {  # app_port_free 端口 : 端口没被占用返回 0
+  ! ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$1\$"
+}
+
+app_check_update() {  # app_check_update 程序名 owner/repo 当前版本 : 有新版返回 0, 新版本放在 PICK_VER
+  local x tag date
+  PICK_VER=""
+  info "检查 $1 最新版本 ..."
+  x=$(ver_gh_latest "$2") || { warn "没能检测到最新版本 (网络或 GitHub 限流), 稍后再试"; return 1; }
+  tag=${x%%|*}; date=${x#*|}
+  echo "  当前版本: ${3:-未知}"
+  echo "  最新版本: $tag${date:+  (发布于 $date)}"
+  if [[ -n $3 ]] && ! ver_newer "$3" "$tag"; then info "已经是最新版"; return 1; fi
+  # shellcheck disable=SC2034  # 给模块用
+  PICK_VER=$tag
+  return 0
+}
+
+app_wait_port() {  # app_wait_port 端口 [秒] : 等程序启动监听
+  local i
+  for ((i = 0; i < ${2:-30}; i++)); do
+    ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$1\$" && return 0
+    sleep 1
+  done
+  return 1
 }
 
 # ================================================================ 访问统计
@@ -5262,7 +5454,7 @@ menu_sites() {
     cat <<'EOF'
    1) 站点列表
    2) 新建 PHP 站点
-   3) 部署网站应用 (Xboard / WordPress 等模块)
+   3) 部署网站应用 (WordPress / Xboard 等)
    4) 新建静态站点
    5) 新建反向代理
    6) 新建域名重定向
@@ -5457,7 +5649,7 @@ main_menu() {
     mi 4 "$(ico db)" "数据库" "创建/备份/phpMyAdmin"
     mi 5 "$(ico bak)" "备份与搬家" "全量/异地/定时"
     mi 6 "$(ico sys)" "系统与服务" "服务/日志/Swap/告警"
-    mi 7 "$(ico app)" "程序下载" "面板/环境/工具"
+    mi 7 "$(ico app)" "程序下载" "扩展程序/环境/工具"
     mi 8 "$(ico sec)" "安全防护" "源站/SSH/防篡改"
     mi 9 "$(ico upd)" "更新脚本" "从 Git 仓库更新"
     printf '  0) %s\e[8G%s\n' "$(ico exit)" "${R}退出${N}"
@@ -5485,10 +5677,11 @@ wsm v$WSM_VER - Web Server Manager
   wsm                               交互菜单 (推荐)
   wsm install                       安装 Nginx/PHP/MariaDB/certbot 环境
   wsm add-php|add-static [域名]     新建站点
-  wsm app list                      网站应用模块列表 (及各自的站点)
+  wsm app list                      扩展程序模块列表 (及各自的站点/安装状态)
   wsm app add [模块|网址|文件]      添加模块 (不写=从仓库选)
   wsm app remove|update <模块>      删除 / 更新模块
-  wsm app <模块> install [域名]     用模块部署新站点 (如 wsm app wordpress install)
+  wsm app <模块> install [域名]     安装软件 / 部署新站点 (如 wsm app wordpress install)
+  wsm app <模块> uninstall          卸载独立软件 (如 wsm app xui uninstall)
   wsm app <模块> [参数...]          模块自己的命令 (如 wsm app xboard info 域名)
   wsm guard [域名] [on|off]         防 CC / 防恶意 bot
   wsm cf-firewall [on|off|refresh]  源站保护: 80/443 只允许 Cloudflare
