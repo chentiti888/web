@@ -4,7 +4,7 @@
 APP_ID=openlist
 APP_NAME="OpenList"
 APP_DESC="网盘挂载/文件列表/WebDAV (AList 社区版), 二进制直装"
-APP_VER=1.2
+APP_VER=1.3
 
 OL_REPO=OpenListTeam/OpenList
 OL_DIR=/opt/openlist
@@ -56,7 +56,7 @@ ol_local_only() {  # 只监听本机, 统一从域名访问
 ol_version() { ol version 2>/dev/null | sed -n 's/^Version: *//p' | head -1; }
 
 app_openlist_install() {
-  command -v nginx >/dev/null 2>&1 || die "还没有安装环境, 请先执行: wsm install"
+  command -v nginx >/dev/null 2>&1 || need_web_env || return 1
   local domain=${1:-} tmp pw scheme
   title "部署 OpenList"
   [[ -f /etc/systemd/system/$OL_UNIT.service ]] && { err "本机已经装过 OpenList"; return 1; }

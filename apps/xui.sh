@@ -5,7 +5,7 @@ APP_ID=xui
 APP_TYPE=soft
 APP_NAME="3x-ui 面板"
 APP_DESC="Xray 多协议节点面板 (x-ui 增强版)"
-APP_VER=1.2
+APP_VER=1.3
 
 XUI_REPO=MHSanaei/3x-ui
 

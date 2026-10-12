@@ -4,7 +4,7 @@
 APP_ID=typecho
 APP_NAME="Typecho"
 APP_DESC="轻量博客, 国内常用, 自动下载最新版+建库"
-APP_VER=1.2
+APP_VER=1.3
 
 TC_REPO=typecho/typecho
 
@@ -45,7 +45,7 @@ EOF
 }
 
 app_typecho_install() {
-  command -v nginx >/dev/null 2>&1 || die "还没有安装环境, 请先执行: wsm install"
+  command -v nginx >/dev/null 2>&1 || need_web_env || return 1
   local domain=${1:-} root tmp scheme
   title "一键部署 Typecho"
   app_need_db Typecho || return 1

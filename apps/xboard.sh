@@ -5,7 +5,7 @@
 APP_ID=xboard
 APP_NAME="Xboard 面板"
 APP_DESC="机场面板, 自动建站+数据库+Redis+队列+定时任务"
-APP_VER=1.2
+APP_VER=1.3
 
 XB_REPO_HTTPS=${XB_REPO_HTTPS:-https://github.com/chentiti888/xboard.git}
 XB_REPO_SSH=${XB_REPO_SSH:-git@github.com:chentiti888/xboard.git}
@@ -124,7 +124,7 @@ EOF
 }
 
 xb_install() {  # xb_install [域名]
-  command -v nginx >/dev/null 2>&1 || die "还没有安装环境, 请先执行: wsm install"
+  command -v nginx >/dev/null 2>&1 || need_web_env || return 1
   local domain=${1:-} app root v php email pw dbn dbp k out h secure scheme
   title "一键部署 Xboard"
   command -v git >/dev/null 2>&1 || pkg_install git || die "git 安装失败"

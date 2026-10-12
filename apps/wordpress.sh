@@ -4,7 +4,7 @@
 APP_ID=wordpress
 APP_NAME="WordPress"
 APP_DESC="博客 / 企业站, 自动下载+建库+写好配置"
-APP_VER=1.2
+APP_VER=1.3
 
 wp_latest() {  # 官方接口查最新版本号
   curl -fsSL --max-time 15 https://api.wordpress.org/core/version-check/1.7/ 2>/dev/null \
@@ -26,7 +26,7 @@ wp_php_exts() {  # wp_php_exts PHP版本  (尽力补齐 WordPress 常用扩展)
 }
 
 wp_install() {  # wp_install [域名]
-  command -v nginx >/dev/null 2>&1 || die "还没有安装环境, 请先执行: wsm install"
+  command -v nginx >/dev/null 2>&1 || need_web_env || return 1
   local domain=${1:-} root lang url tmp dbn dbu dbp pre k v scheme
   title "一键部署 WordPress"
   if ! command -v mysql >/dev/null 2>&1; then
