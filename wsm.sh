@@ -5,12 +5,12 @@
 #  网站: PHP / 静态 / 反向代理 / 域名重定向, 多域名绑定, 伪静态, 子路径反代,
 #        访问密码, 防盗链, IP 黑白名单, Gzip, 静态缓存, 停用/启用, 日志分析,
 #        防篡改(文件锁定 + 可写目录禁PHP + 完整性基线检测/自动还原)
-#        WordPress 一键部署, 访问统计(PV/IP/流量/TOP/蜘蛛), 在线更新(Git 仓库)
+#        网站应用模块(Xboard、WordPress 等, 随时添加删除), 访问统计(PV/IP/流量/TOP/蜘蛛), 在线更新(Git 仓库)
 #        全量备份/一键搬家/异地备份, Telegram 告警, SSH 密钥登录, 源站保护
 #  证书: Let's Encrypt(HTTP) / 通配符(Cloudflare DNS) / 自有证书 / 自签名, 自动续期
 #  PHP : 7.4-8.4 多版本共存, 扩展, 参数, 禁用函数, FPM 进程数
 #  其他: MariaDB + phpMyAdmin, Redis, Composer, 备份/还原, 计划任务, 服务管理,
-#        程序下载: 面板 (Xboard / 3x-ui), 网站环境, 开发运行环境, 系统工具
+#        程序下载: 网站应用模块 (可随时添加/删除), 面板, 网站环境, 开发运行环境, 系统工具
 #  系统: Debian 10+ / Ubuntu 20.04+ (推荐)   RHEL 系 (Rocky/Alma/CentOS) 尽力支持
 #
 #  用法: bash wsm.sh install      首次安装环境 (之后直接用 wsm 命令)
@@ -18,8 +18,9 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="2.8.7"
+WSM_VER="2.9"
 # CHANGELOG-BEGIN  (更新时会显示比当前版本新的条目, 新的写在最上面)
+# v2.9 网站应用改为模块: Xboard / WordPress 从脚本本体拆出来, 在 [程序下载] 里随时添加/删除; 已部署的站点自动归入对应模块
 # v2.8.7 服务管理: 显示开机自启状态, 每个操作都有结果提示, 去掉重复的 redis, 加入 Xboard 队列和告警里的服务
 # v2.8.6 wsm 日志自动轮转; 还原后的提示更准确; 静态检查清理
 # v2.8.5 异地备份新增 Cloudflare R2 / Backblaze B2 (用密钥, 不会过期, 不用浏览器授权)
@@ -458,12 +459,12 @@ EOF
 # ================================================================ 站点元数据
 META_KEYS=(TYPE DOMAIN ALIASES ROOT PHPVER UPSTREAM SSL FORCE_HTTPS CERT_MODE REWRITE
            AUTH HOTLINK HOTLINK_DOMAINS IP_MODE IP_LIST GZIP CACHE REDIRECT_TO REDIRECT_CODE DISABLED
-           TAMPER TAMPER_EXCLUDE NOEXEC GUARD GUARD_LEVEL)
+           TAMPER TAMPER_EXCLUDE NOEXEC GUARD GUARD_LEVEL APP)
 
 meta_defaults() {
   TYPE=; DOMAIN=; ALIASES=; ROOT=; PHPVER=; UPSTREAM=; SSL=0; FORCE_HTTPS=0; CERT_MODE=le
   REWRITE=none; AUTH=0; HOTLINK=0; HOTLINK_DOMAINS=; IP_MODE=none; IP_LIST=; GZIP=1; CACHE=0
-  REDIRECT_TO=; REDIRECT_CODE=301; DISABLED=0; TAMPER=0; TAMPER_EXCLUDE=; NOEXEC=0; GUARD=0; GUARD_LEVEL=2
+  REDIRECT_TO=; REDIRECT_CODE=301; DISABLED=0; TAMPER=0; TAMPER_EXCLUDE=; NOEXEC=0; GUARD=0; GUARD_LEVEL=2; APP=
 }
 
 meta_file() { echo "$META_DIR/$1.conf"; }
@@ -1329,7 +1330,8 @@ del_site() {
   use_site "${1:-}" || return 1
   local d=$DOMAIN
   confirm "确认删除站点 $d ? 此操作不可恢复" n || return 0
-  xb_purge "$d" "$ROOT"
+  local app=${APP:-}
+  [[ -n $app ]] && app_call "$app" purge "$d" "$ROOT"
   rm -f "$NGX_CONF/$d.conf"
   [[ $TAMPER == 1 && -d $ROOT ]] && chattr -R -i "$ROOT" 2>/dev/null
   rm -f "$WSM_DIR/baseline/$d.sha256" "$WSM_DIR/baseline/$d.tar.gz"
@@ -1339,7 +1341,7 @@ del_site() {
   fi
   rm -rf "$CERT_DIR/$d"
   rm -f "$AUTH_DIR/$d.htpasswd" "$META_DIR/$d.paths" "$META_DIR/$d.rewrite" "$(meta_file "$d")"
-  [[ -f $META_DIR/$d.xbpath ]] && { rm -f "$META_DIR/$d.xbpath"; guard_refresh_global; }
+  [[ -n $app ]] && app_has "$app" guard_skip && guard_refresh_global
   nginx_reload >/dev/null 2>&1
   if [[ -n $ROOT && -d $ROOT ]] && confirm "同时删除网站目录 $ROOT ?" n; then rm -rf -- "$ROOT"; fi
   info "已删除 $d"
@@ -1660,7 +1662,7 @@ ssl_menu() {
 # ================================================================ 防 CC / 防恶意 bot
 # 原理: 1) 全局文件 01-wsm-guard.conf 定义规则 (只定义, 不生效)
 #       2) 站点开启后, 在站点配置里引用这些规则才生效 (每个站点单独开关)
-#       3) Xboard 的节点通信接口、订阅链接、静态文件不限速也不拦截, 避免误伤
+#       3) 静态文件和网站应用模块声明的接口 (如面板节点接口、订阅链接) 不限速也不拦截, 避免误伤
 GUARD_CONF=$NGX_CONF/01-wsm-guard.conf
 
 guard_level_name() { case $1 in 1) echo "宽松" ;; 3) echo "严格" ;; *) echo "标准" ;; esac; }
@@ -1685,32 +1687,17 @@ guard_cf_ranges() {  # 输出 Cloudflare 回源 IP 段 (先在线获取, 失败�
   printf '%s\n%s\n' "$v4" "$v6" | tr ' ' '\n' | grep -v '^$'
 }
 
-guard_xb_skip_lines() {  # 各 Xboard 站点的后台路径和后台接口 (不限速)
-  local f p
-  for f in "$META_DIR"/*.xbpath; do
-    [[ -s $f ]] || continue
-    p=$(head -1 "$f")
-    [[ $p =~ ^[A-Za-z0-9_-]{4,64}$ ]] || continue
-    printf '    "~^/api/v2/%s/"   1;\n' "$p"
-    printf '    "~^/%s/?(\\?|$)"   1;\n' "$p"
-  done
-  return 0
-}
-
 guard_write_global() {  # 写全局规则文件到 $GUARD_CONF.tmp (真实 IP 在 00-wsm-realip.conf 里)
   {
     echo "# managed by wsm - 防 CC / 防恶意 bot 的公共规则 (站点开启防护后才生效)"
     cat <<'EOF'
 
-# 不限速、不拦截的请求: Xboard 节点接口 / 订阅链接 / 后台 / 静态文件
+# 不限速、不拦截的请求: 静态文件 + 各网站应用模块声明的接口
 map $request_uri $wsm_skip {
     default 0;
-    ~^/api/v[12]/server/                1;
-    ~^/api/v1/client/subscribe          1;
-    "~^/[A-Za-z0-9_-]+/[0-9A-Fa-f]{32}/?(\?|$)"   1;
     ~*\.(css|js|mjs|png|jpe?g|gif|svg|ico|webp|avif|woff2?|ttf|eot|map)(\?|$)   1;
 EOF
-    guard_xb_skip_lines
+    apps_hook guard_skip
     echo "}"
     cat <<'EOF'
 map $wsm_skip $wsm_key {
@@ -1762,7 +1749,7 @@ guard_ensure_global() {  # 全局文件不存在就生成并检测, 失败回滚
   return 1
 }
 
-guard_refresh_global() {  # 重新生成全局规则 (Xboard 后台路径变化后), 失败恢复旧文件
+guard_refresh_global() {  # 重新生成全局规则 (模块增删、后台路径变化后), 失败恢复旧文件
   [[ -f $GUARD_CONF ]] || return 0
   local bak; bak=$(mktemp); cp -f "$GUARD_CONF" "$bak"
   guard_write_global
@@ -1772,29 +1759,11 @@ guard_refresh_global() {  # 重新生成全局规则 (Xboard 后台路径变化�
   err "防护规则更新失败, 已恢复原规则"; return 1
 }
 
-xb_is_site() { [[ $ROOT == */public && -f ${ROOT%/public}/artisan ]]; }  # 依赖已 load_meta
-
-xb_secure_save() {  # xb_secure_save 域名 后台路径: 记录后台路径, 变化时刷新防护白名单
-  local f=$META_DIR/$1.xbpath
-  [[ $2 =~ ^[A-Za-z0-9_-]{4,64}$ ]] || return 0
-  [[ -f $f && $(head -1 "$f") == "$2" ]] && return 0
-  echo "$2" > "$f"
-  guard_refresh_global
-}
-
-xb_secure_detect() {  # xb_secure_detect 域名: 读取 Xboard 后台路径并记录
-  ( load_meta "$1"; xb_is_site || exit 0
-    out=$(xb_php_run "${ROOT%/public}" "$(php_bin "$PHPVER")" info 2>/dev/null) || exit 1
-    sp=$(printf '%s\n' "$out" | sed -n 's/^SECURE=//p')
-    [[ -n $sp ]] && xb_secure_save "$1" "$sp" )
-}
-
-
 guard_server_lines() {  # 输出站点配置里的防护指令 (依赖 load_meta)
   [[ ${GUARD:-0} == 1 ]] || return 0
   local lv=${GUARD_LEVEL:-2}
   [[ $lv == 1 || $lv == 3 ]] || lv=2
-  echo "    # wsm 防护: 恶意 bot / 敏感文件扫描 / 限速 (Xboard 节点和订阅接口已排除)"
+  echo "    # wsm 防护: 恶意 bot / 敏感文件扫描 / 限速 (模块声明的接口已排除)"
   echo '    if ($wsm_bad_ua) { return 444; }'
   echo '    if ($wsm_bad_path) { return 444; }'
   [[ $REWRITE == wordpress ]] || echo '    if ($wsm_wp_path) { return 444; }'
@@ -1820,7 +1789,7 @@ guard_set() {  # guard_set 域名 on|off
   load_meta "$1"
   if [[ $2 == on ]]; then
     guard_ensure_global || return 1
-    xb_is_site && { xb_secure_detect "$1" || warn "没读到 Xboard 后台路径, 后台可能会被限速"; }
+    [[ -n ${APP:-} ]] && app_call "$APP" guard_on "$1"
     GUARD=1
   else
     GUARD=0
@@ -1845,9 +1814,9 @@ guard_menu() {  # guard_menu 域名
     echo "   - 拦截扫描器/攻击工具和高频采集爬虫, 正常搜索引擎不受影响"
     echo "   - 拦截扫描 .env / .git / 备份文件 等敏感文件的请求"
     echo "   - 限制同一个 IP 的请求速度, 防 CC 和刷接口 (超出返回 429)"
-    echo "   - Xboard 的节点接口、订阅链接、后台、静态文件不受影响"
+    echo "   - 静态文件, 以及网站应用模块声明的接口 (如面板节点接口/订阅链接) 不受影响"
     choose c "操作:" "$([[ ${GUARD:-0} == 1 ]] && echo 关闭防护 || echo 开启防护)" "调整强度" \
-      "查看拦截记录" "刷新 Xboard 后台白名单" "返回" || return 0
+      "查看拦截记录" "返回" || return 0
     case $c in
       开启防护) guard_set "$d" on ;;
       关闭防护) guard_set "$d" off ;;
@@ -1858,9 +1827,6 @@ guard_menu() {  # guard_menu 域名
         apply_site && info "强度已改为: $(guard_level_name "$GUARD_LEVEL")"
         ;;
       查看拦截记录) guard_log "$d"; pause ;;
-      刷新*)
-        if xb_is_site; then xb_secure_detect "$d" && info "已刷新 (后台改了路径后用这个)"
-        else warn "这不是 Xboard 站点"; fi ;;
       *) return 0 ;;
     esac
   done
@@ -2569,7 +2535,7 @@ svc_list() {  # 需要管理的服务 (去掉别名重复, 如 redis 和 redis-s
     echo nginx
     for x in mariadb redis-server redis; do unit_exists "$x" && echo "$x"; done
     for x in $(php_installed | sort -V); do php_svc "$x"; echo; done
-    for x in /etc/systemd/system/xboard-*.service; do [[ -f $x ]] && { u=${x##*/}; echo "${u%.service}"; }; done
+    apps_units
     tg_load 2>/dev/null; for x in ${TG_UNITS:-}; do echo "$x"; done
   } | while read -r u; do
     [[ -n $u ]] || continue
@@ -2760,7 +2726,7 @@ xui_menu() {
 }
 
 # ================================================================ 程序下载 (原软件商店)
-APP_IDS=(xboard 3xui
+APP_IDS=(3xui
          webbase mariadb redis composer phpmyadmin postgresql memcached
          nodejs pm2 python java git supervisor docker
          rclone ffmpeg imagemagick monitor)
@@ -2769,7 +2735,7 @@ app_cat_icon() { case $1 in 面板程序) ico c_panel ;; 网站环境) ico c_web
 
 app_cat() {
   case $1 in
-    xboard|3xui) echo "面板程序" ;;
+    3xui) echo "面板程序" ;;
     webbase|mariadb|redis|composer|phpmyadmin|postgresql|memcached) echo "网站环境" ;;
     nodejs|pm2|python|java|git|supervisor|docker) echo "开发运行" ;;
     *) echo "系统工具" ;;
@@ -2777,7 +2743,7 @@ app_cat() {
 }
 app_name() {
   case $1 in
-    xboard) echo "Xboard 面板" ;; 3xui) echo "3x-ui 面板" ;; webbase) echo "Nginx 网站环境" ;;
+    3xui) echo "3x-ui 面板" ;; webbase) echo "Nginx 网站环境" ;;
     nodejs) echo "Node.js" ;; pm2) echo "PM2" ;; python) echo "Python3" ;; java) echo "Java (JRE)" ;;
     git) echo "Git" ;; composer) echo "Composer" ;; supervisor) echo "Supervisor" ;;
     mariadb) echo "MariaDB" ;; postgresql) echo "PostgreSQL" ;; redis) echo "Redis" ;;
@@ -2788,7 +2754,6 @@ app_name() {
 }
 app_desc() {
   case $1 in
-    xboard) echo "机场面板, 自动建站+数据库+队列" ;;
     3xui) echo "Xray 多协议节点面板 (x-ui 增强版)" ;;
     webbase) echo "Nginx + 证书工具 + PHP, 建站必装" ;;
     nodejs) echo "JS 运行环境 + npm" ;; pm2) echo "Node 项目进程守护" ;;
@@ -2805,7 +2770,6 @@ app_desc() {
 }
 app_installed() {
   case $1 in
-    xboard) [[ -n $(xb_sites) ]] ;;
     3xui) command -v x-ui >/dev/null 2>&1 || [[ -x /usr/local/x-ui/x-ui ]] ;;
     webbase) command -v nginx >/dev/null 2>&1 ;;
     nodejs) command -v node >/dev/null 2>&1 ;;
@@ -2830,7 +2794,6 @@ app_installed() {
 }
 app_version() {
   case $1 in
-    xboard) echo "$(xb_sites | wc -l) 个站点" ;;
     3xui) /usr/local/x-ui/x-ui -v 2>/dev/null | head -1 ;;
     webbase) nginx -v 2>&1 | sed 's#.*/##' ;;
     nodejs) echo "$(node -v 2>/dev/null) / npm $(npm -v 2>/dev/null)" ;;
@@ -2984,7 +2947,6 @@ app_install() {
   app_valid "${1:-}" || { err "未知软件: ${1:-}"; return 1; }
   pkg_refresh
   case $1 in
-    xboard) xb_install ;;
     3xui) xui_install ;;
     webbase) if command -v nginx >/dev/null 2>&1; then install_base; else cmd_install; fi ;;
     nodejs) install_nodejs ;;
@@ -3013,7 +2975,6 @@ app_uninstall() {
   app_valid "${1:-}" || { err "未知软件: ${1:-}"; return 1; }
   local svc; svc=$(app_service "$1")
   case $1 in
-    xboard) warn "Xboard 是网站, 请到 [网站管理] → [删除站点] 删除对应的站点"; return 0 ;;
     3xui) confirm_typed "确认卸载 3x-ui (面板和节点配置都会删除)" || return 0; x-ui uninstall ;;
     webbase) warn "卸载 Nginx 会让所有网站停止访问, 这里不提供卸载"; return 0 ;;
     nodejs) pkg_remove nodejs; pkg_remove npm 2>/dev/null; rm -f /etc/apt/sources.list.d/nodesource.list ;;
@@ -3049,7 +3010,7 @@ app_uninstall() {
 app_manage() {
   local id=$1 c svc
   local -a opts
-  case $id in xboard) xb_app_menu; return 0 ;; 3xui) xui_menu; return 0 ;; esac
+  case $id in 3xui) xui_menu; return 0 ;; esac
   while true; do
     title "$(app_name "$id")"
     echo "  简介: $(app_desc "$id")"
@@ -3088,504 +3049,329 @@ app_list() {
 }
 
 menu_store() {
-  local c i id cat last st
+  local c i id cat last st n m
+  local -a mods=()
   ui_load
   while true; do
+    apps_load
+    mods=("${APPS_LOADED[@]}"); m=${#mods[@]}
     title "程序下载"
-    i=0; last=""
+    echo; echo "  ${B}$(ico web) 网站应用 (模块)${N}"
+    i=0
+    for id in "${mods[@]}"; do
+      i=$((i + 1))
+      n=$(app_sites "$id" | wc -l)
+      if ((n)); then st="${G}${n} 个站点${N}"; else st="${D}未部署${N}"; fi
+      printf "  %2d) " "$i"; pad_w "${APP_NAMES[$id]}" 16; echo "$st"
+    done
+    ((m)) || echo "      ${D}(还没有模块, 输入 a 从仓库添加)${N}"
+    echo "   a) 添加模块     d) 删除模块"
+    last=""
     for id in "${APP_IDS[@]}"; do
       i=$((i + 1))
       cat=$(app_cat "$id")
       if [[ $cat != "$last" ]]; then echo; echo "  ${B}$(app_cat_icon "$cat") ${cat}${N}"; last=$cat; fi
       if app_installed "$id"; then st="${G}已装${N}"; else st="${D}未装${N}"; fi
-      [[ $id == xboard ]] && app_installed xboard && st="${G}$(xb_sites | wc -l) 个站点${N}"
       printf "  %2d) " "$i"; pad_w "$(app_name "$id")" 16; echo "$st"
     done
     echo
     read -r -p "输入序号 (回车返回): " c || return 0
     [[ -z $c || $c == 0 || $c == q ]] && return 0
-    if [[ $c =~ ^[0-9]+$ ]] && ((c >= 1 && c <= ${#APP_IDS[@]})); then app_manage "${APP_IDS[c - 1]}"
+    case $c in
+      a|A) (app_add); pause; continue ;;
+      d|D)
+        ((m)) || { warn "还没有模块"; continue; }
+        local -a opts=()
+        for id in "${mods[@]}"; do opts+=("${APP_NAMES[$id]} ($id)"); done
+        choose n "删除哪个模块:" "${opts[@]}" || continue
+        n=${n##*(}; n=${n%)}
+        app_remove "$n"; pause; continue ;;
+    esac
+    if [[ $c =~ ^[0-9]+$ ]] && ((c >= 1 && c <= m)); then app_module_menu "${mods[c - 1]}"
+    elif [[ $c =~ ^[0-9]+$ ]] && ((c > m && c <= m + ${#APP_IDS[@]})); then app_manage "${APP_IDS[c - m - 1]}"
     else warn "无效选择"; fi
   done
 }
 
-# ================================================================ WordPress 一键部署
-wp_php_exts() {  # wp_php_exts PHP版本  (尽力补齐 WordPress 常用扩展)
-  local v=$1 pv e
-  pv=$(php_pkgver "$v")
-  for e in mysql curl gd mbstring xml zip intl; do
-    if [[ $PM == apt ]]; then pkg_install "php$v-$e" >/dev/null 2>&1 || true
-    else
-      case $e in mysql) e=mysqlnd ;; esac
-      pkg_install "php${pv}-php-$e" >/dev/null 2>&1 || pkg_install "php${pv}-php-pecl-$e" >/dev/null 2>&1 || true
-    fi
-  done
-  systemctl restart "$(php_svc "$v")" >/dev/null 2>&1 || true
+# ================================================================ 网站应用模块
+# 底座不认识任何具体程序; 每个程序 (Xboard / WordPress / ...) 是 /etc/wsm/apps/<id>.sh 一个独立模块,
+# 随时添加、删除。模块格式见仓库 apps/README.md, 简述:
+#   APP_ID=<id>  APP_NAME="名称"  APP_DESC="一句话简介"  APP_VER=1.0
+#   app_<id>_install [域名]          必须: 部署一个新站点, 成功后调用 app_mark_site 域名 <id>
+#   app_<id>_menu  站点              可选: 模块自己的管理菜单 (更新 / 后台 / 重置密码 ...)
+#   app_<id>_detect                  可选: (已 load_meta) 判断现有站点是不是本程序, 用于自动认领
+#   app_<id>_guard_skip              可选: 输出防 CC 不限速的 nginx map 行 (如节点接口 / 订阅链接)
+#   app_<id>_guard_on 域名           可选: 站点开启防 CC 时调用
+#   app_<id>_units 域名              可选: 输出该站点的后台服务 (监控 / 服务管理 / 搬家)
+#   app_<id>_backup_paths            可选: 输出全量备份要额外带上的文件
+#   app_<id>_purge 域名 根目录       可选: 删除站点时清理 (服务 / 计划任务 ...)
+#   app_<id>_cli 参数...             可选: 命令行 wsm app <id> 参数...
+APPS_DIR=$WSM_DIR/apps
+APPS_DATA=$WSM_DIR/appdata
+APPS_MIGRATED=$APPS_DIR/.migrated
+declare -A APP_NAMES=() APP_DESCS=() APP_VERS=()
+APPS_LOADED=()
+
+app_id_ok() { [[ $1 =~ ^[a-z][a-z0-9_]{1,30}$ ]]; }
+
+app_file_check() {  # app_file_check 文件 [期望的id] -> APP_CHECK_ID ; 检查模块文件是否合格
+  local f=$1 want=${2:-} id
+  APP_CHECK_ID=""
+  [[ -s $f ]] || { err "模块文件是空的"; return 1; }
+  bash -n "$f" 2>/dev/null || { err "模块文件语法错误"; return 1; }
+  id=$(sed -n 's/^APP_ID=["'\'']\{0,1\}\([a-z][a-z0-9_]*\)["'\'']\{0,1\}[[:space:]]*$/\1/p' "$f" | head -1)
+  app_id_ok "$id" || { err "模块里没有正确的 APP_ID"; return 1; }
+  [[ -z $want || $want == "$id" ]] || { err "模块 ID 是 $id, 不是 $want"; return 1; }
+  grep -q "^app_${id}_install()" "$f" || { err "模块缺少 app_${id}_install"; return 1; }
+  APP_CHECK_ID=$id
 }
 
-wp_install() {  # wp_install [域名]
-  command -v nginx >/dev/null 2>&1 || die "还没有安装环境, 请先执行: wsm install"
-  local domain=${1:-} root lang url tmp dbn dbu dbp pre k v scheme
-  title "一键部署 WordPress"
-  if ! command -v mysql >/dev/null 2>&1; then
-    confirm "WordPress 需要数据库, 现在安装 MariaDB 吗?" y || return 1
-    install_db || return 1
-  fi
-  ask domain "① 网站域名 (如 blog.example.com)" || return 1
-  valid_domain "$domain" || die "域名格式不正确: $domain"
-  [[ -f $(meta_file "$domain") ]] && die "站点已存在: $domain"
-  v=$(domain_used "$domain") && die "域名 $domain 已被站点 $v 使用"
-  root=$WWW_ROOT/$domain
-  safe_root "$root" || die "网站目录不合法: $root"
-  if [[ -d $root && -n $(ls -A "$root" 2>/dev/null) ]]; then
-    die "目录 $root 里已有文件, 请换一个域名或先清空该目录"
-  fi
-  choose lang "WordPress 语言:" "简体中文" "English" || return 1
-  if [[ $lang == 简体* ]]; then url=https://cn.wordpress.org/latest-zh_CN.tar.gz
-  else url=https://wordpress.org/latest.tar.gz; fi
-
-  tmp=$(mktemp -d)
-  info "下载 WordPress ..."
-  curl -fL --max-time 300 -o "$tmp/wp.tgz" "$url" || { rm -rf "$tmp"; die "下载失败, 请检查服务器网络"; }
-  mkdir -p "$root"
-  tar -xzf "$tmp/wp.tgz" -C "$root" --strip-components=1 || { rm -rf "$tmp" "$root"; die "解压失败"; }
-  rm -rf "$tmp"
-  [[ -f $root/wp-config-sample.php ]] || { rm -rf "$root"; die "安装包不完整"; }
-
-  k=$(printf '%s' "$domain" | tr -c 'A-Za-z0-9' '_' | cut -c1-12)
-  dbn="wp_${k}_$(openssl rand -hex 2)"; dbu=$dbn
-  dbp=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 20)
-  mysql -e "CREATE DATABASE \`$dbn\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; \
-CREATE USER '$dbu'@'localhost' IDENTIFIED BY '$dbp'; \
-GRANT ALL PRIVILEGES ON \`$dbn\`.* TO '$dbu'@'localhost'; FLUSH PRIVILEGES;" \
-    || { rm -rf "$root"; die "创建数据库失败"; }
-
-  cp "$root/wp-config-sample.php" "$root/wp-config.php"
-  sed -i -e "s/database_name_here/$dbn/" -e "s/username_here/$dbu/" -e "s/password_here/$dbp/" "$root/wp-config.php"
-  for k in AUTH_KEY SECURE_AUTH_KEY LOGGED_IN_KEY NONCE_KEY AUTH_SALT SECURE_AUTH_SALT LOGGED_IN_SALT NONCE_SALT; do
-    v=$(openssl rand -base64 72 | tr -dc 'A-Za-z0-9' | head -c 64)
-    sed -i "s/^define( *'$k'.*/define( '$k', '$v' );/" "$root/wp-config.php"
+apps_load() {  # 载入全部已添加的模块 (语法错误的跳过)
+  local f id APP_ID APP_NAME APP_DESC APP_VER
+  APPS_LOADED=()
+  [[ -d $APPS_DIR ]] || return 0
+  for f in "$APPS_DIR"/*.sh; do
+    [[ -f $f ]] || continue
+    id=${f##*/}; id=${id%.sh}
+    app_id_ok "$id" && bash -n "$f" 2>/dev/null || continue
+    APP_ID=""; APP_NAME=""; APP_DESC=""; APP_VER=""
+    # shellcheck disable=SC1090
+    source "$f" || continue
+    [[ $APP_ID == "$id" ]] && declare -F "app_${id}_install" >/dev/null || continue
+    APP_NAMES[$id]=${APP_NAME:-$id}; APP_DESCS[$id]=${APP_DESC:-}; APP_VERS[$id]=${APP_VER:-}
+    APPS_LOADED+=("$id")
   done
-  pre="wp$(openssl rand -hex 2)_"
-  sed -i "s/^\$table_prefix = .*/\$table_prefix = '$pre';/" "$root/wp-config.php"
-  sed -i -e "/stop editing/i define( 'FS_METHOD', 'direct' );" \
-         -e "/stop editing/i define( 'DISALLOW_FILE_EDIT', true );" "$root/wp-config.php"
-  rm -f "$root/readme.html" "$root/license.txt" "$root/wp-config-sample.php"
-
-  echo
-  info "WordPress 文件与数据库已准备好 (请记下数据库信息)"
-  echo "  数据库: $dbn"
-  echo "  用户:   $dbu"
-  echo "  密码:   $dbp"
-  echo "  (已自动写入 wp-config.php, 安装向导里不需要再填)"
-  echo
-  PRESET_ROOT=$root add_site php "$domain" || { err "站点创建失败, 文件在 $root, 数据库 $dbn 已创建"; return 1; }
-  load_meta "$domain"
-  REWRITE=wordpress
-  apply_site >/dev/null
-  wp_php_exts "$PHPVER"
-  chmod 640 "$root/wp-config.php" 2>/dev/null   # 里面有数据库密码, 不让其他用户读取
-  scheme=http; [[ $SSL == 1 ]] && scheme=https
-  echo
-  info "全部完成, 最后一步: 用浏览器打开 $scheme://$domain/ 完成安装向导"
-  echo "  向导里设置: 站点标题、管理员账号和密码、邮箱"
-  [[ $SSL == 1 ]] || warn "还没启用 HTTPS: 建议先在 [SSL 证书] 里开启 HTTPS, 再打开向导, 这样 WordPress 会记成 https 地址"
-  echo "  提示: 域名需要先解析到本机 IP; 想防篡改请在 [网站防篡改] 里选 WordPress 预设"
   return 0
 }
 
-# ================================================================ Xboard
-# 无容器部署: PHP-FPM + MariaDB + Redis + systemd 队列 + cron
-XB_REPO_HTTPS=${XB_REPO_HTTPS:-https://github.com/chentiti888/xboard.git}
-XB_REPO_SSH=${XB_REPO_SSH:-git@github.com:chentiti888/xboard.git}
+app_loaded() { local x; for x in "${APPS_LOADED[@]}"; do [[ $x == "$1" ]] && return 0; done; return 1; }
+app_has() { app_loaded "$1" && declare -F "app_${1}_$2" >/dev/null; }
+app_call() { local id=$1 fn=$2; shift 2; app_has "$id" "$fn" || return 0; "app_${id}_${fn}" "$@"; }
+apps_hook() { local id fn=$1; shift; for id in "${APPS_LOADED[@]}"; do app_call "$id" "$fn" "$@"; done; return 0; }
 
-xb_slug() { printf '%s' "$1" | tr -c 'A-Za-z0-9' '_' | cut -c1-30; }
-
-xb_env_set() {  # xb_env_set 文件 键 值
-  local v=${3//\\/\\\\}; v=${v//&/\\&}; v=${v//|/\\|}
-  if grep -q "^$2=" "$1"; then sed -i "s|^$2=.*|$2=$v|" "$1"
-  else printf '%s=%s\n' "$2" "$3" >> "$1"; fi
-}
-
-xb_safe_dir() {
-  git config --global --get-all safe.directory 2>/dev/null | grep -Fxq "$1" \
-    || git config --global --add safe.directory "$1"
-}
-
-xb_composer() {  # xb_composer 程序目录 PHP命令
-  (cd "$1" && COMPOSER_ALLOW_SUPERUSER=1 COMPOSER_NO_INTERACTION=1 \
-    "$2" "$(command -v composer)" install --no-dev -o -q)
-}
-
-xb_abort() {
-  [[ -n ${XB_APP:-} ]] && rm -rf -- "$XB_APP"
-  [[ -n ${XB_DB:-} ]] && mysql -e "DROP DATABASE IF EXISTS \`$XB_DB\`; DROP USER IF EXISTS '$XB_DB'@'localhost';" 2>/dev/null
-  die "$1 (已清理)"
-}
-
-xb_pick_php() {  # -> XB_PHP (Xboard 需要 PHP 8.2+)
-  local x; local -a list=()
-  for x in $(php_installed | sort -V); do
-    awk -v v="$x" 'BEGIN { exit !(v + 0 >= 8.2) }' && list+=("$x")
-  done
-  if (( ${#list[@]} == 0 )); then
-    warn "Xboard 需要 PHP 8.2 以上, 先安装 PHP 8.2"
-    install_php 8.2 || return 1
-    XB_PHP=8.2
-  elif (( ${#list[@]} == 1 )); then XB_PHP=${list[0]}
-  else choose XB_PHP "选择 PHP 版本 (Xboard 需要 8.2+):" "${list[@]}" || return 1
-  fi
-}
-
-xb_php_ready() {  # xb_php_ready PHP版本: 补齐扩展, 放开 Xboard 需要的函数
-  local v=$1 pv e f cur new
-  pv=$(php_pkgver "$v")
-  for e in mysql curl gd mbstring xml zip intl bcmath redis; do
-    if [[ $PM == apt ]]; then pkg_install "php$v-$e" >/dev/null 2>&1 || true
-    else
-      case $e in mysql) e=mysqlnd ;; redis) e='pecl-redis*' ;; esac
-      pkg_install "php${pv}-php-$e" >/dev/null 2>&1 || pkg_install "php${pv}-php-pecl-$e" >/dev/null 2>&1 || true
-    fi
-  done
-  f=$(php_ini_file "$v")
-  if [[ -f $f ]] && grep -q '^disable_functions' "$f"; then
-    cur=$(grep -m1 '^disable_functions' "$f" | sed -E 's/^disable_functions *= *//; s/"//g')
-    new=$(printf '%s' "$cur" | tr ',' '\n' | grep -vxE 'putenv|proc_open|pcntl_alarm|pcntl_signal' | paste -sd, -)
-    sed -i '/^disable_functions/d' "$f"
-    if [[ -n $new ]]; then ini_set_kv "$f" disable_functions "$new"; fi
-  fi
-  systemctl restart "$(php_svc "$v")" >/dev/null 2>&1 || true
+app_of_site() { ( load_meta "$1" 2>/dev/null; echo "${APP:-}" ); }
+app_site_call() {  # app_site_call 域名 钩子 参数... : 调用该站点所属模块的钩子
+  local d=$1 fn=$2 id; shift 2
+  id=$(app_of_site "$d")
+  [[ -n $id ]] && app_call "$id" "$fn" "$@"
   return 0
 }
 
-xb_services() {  # xb_services 域名 程序目录 PHP版本
-  local k php; k=$(xb_slug "$1"); php=$(command -v "$(php_bin "$3")" || php_bin "$3")
-  cat > "/etc/systemd/system/xboard-$k.service" <<EOF
-[Unit]
-Description=Xboard queue ($1)
-After=network.target
-
-[Service]
-User=$WEB_USER
-Group=$WEB_USER
-WorkingDirectory=$2
-ExecStart=$php artisan horizon
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  printf '* * * * * %s cd %s && %s artisan schedule:run >> /dev/null 2>&1\n' "$WEB_USER" "$2" "$php" > "/etc/cron.d/xboard-$k"
-  chmod 644 "/etc/cron.d/xboard-$k"
-  systemctl daemon-reload
-  systemctl enable --now "xboard-$k" >/dev/null 2>&1 || warn "队列服务启动失败, 请查看: systemctl status xboard-$k"
+app_mark_site() {  # app_mark_site 域名 模块id : 记录站点属于哪个程序
+  ( load_meta "$1" || exit 1; APP=$2; save_meta )
 }
 
-xb_install() {  # xb_install [域名]
-  command -v nginx >/dev/null 2>&1 || die "还没有安装环境, 请先执行: wsm install"
-  local domain=${1:-} app root v php email pw dbn dbp k out h secure scheme
-  title "一键部署 Xboard"
-  command -v git >/dev/null 2>&1 || pkg_install git || die "git 安装失败"
-  if ! command -v mysql >/dev/null 2>&1; then
-    confirm "Xboard 需要数据库, 现在安装 MariaDB 吗?" y || return 1
-    install_db || return 1
-  fi
-  if ! unit_exists redis-server && ! unit_exists redis; then
-    confirm "Xboard 需要 Redis, 现在安装吗?" y || return 1
-    install_redis || return 1
-  fi
-  install_composer || return 1
-  ask domain "① 网站域名 (如 panel.example.com)" || return 1
-  valid_domain "$domain" || die "域名格式不正确: $domain"
-  [[ -f $(meta_file "$domain") ]] && die "站点已存在: $domain"
-  v=$(domain_used "$domain") && die "域名 $domain 已被站点 $v 使用"
-  app=$WWW_ROOT/$domain; root=$app/public
-  safe_root "$app" || die "网站目录不合法: $app"
-  if [[ -d $app && -n $(ls -A "$app" 2>/dev/null) ]]; then
-    die "目录 $app 里已有文件, 请换一个域名或先清空该目录"
-  fi
-  read -r -p "② 管理员邮箱 [admin@$domain]: " email || return 1
-  email=${email:-admin@$domain}
-  [[ $email =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]] || die "邮箱格式不正确"
-  xb_pick_php || return 1
-  v=$XB_PHP; php=$(php_bin "$v")
-
-  mkdir -p "$app"; XB_APP=$app
-  info "下载 Xboard 源码 ..."
-  if [[ -n ${XB_REPO:-} ]]; then
-    GIT_TERMINAL_PROMPT=0 git clone -q --depth 1 "$XB_REPO" "$app"
-  else
-    GIT_TERMINAL_PROMPT=0 git clone -q --depth 1 "$XB_REPO_HTTPS" "$app" 2>/dev/null \
-      || GIT_TERMINAL_PROMPT=0 git clone -q --depth 1 "$XB_REPO_SSH" "$app"
-  fi || xb_abort "下载失败 (仓库是私有的话, 服务器需要配置 GitHub SSH 密钥)"
-  [[ -f $app/artisan ]] || xb_abort "源码不完整"
-  xb_safe_dir "$app"
-  xb_php_ready "$v"
-  info "安装依赖 (需要几分钟, 请耐心等待) ..."
-  xb_composer "$app" "$php" || xb_abort "安装依赖失败"
-
-  k=$(printf '%s' "$domain" | tr -c 'A-Za-z0-9' '_' | cut -c1-12)
-  dbn="xb_${k}_$(openssl rand -hex 2)"
-  dbp=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 20)
-  mysql -e "CREATE DATABASE \`$dbn\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; \
-CREATE USER '$dbn'@'localhost' IDENTIFIED BY '$dbp'; \
-GRANT ALL PRIVILEGES ON \`$dbn\`.* TO '$dbn'@'localhost'; FLUSH PRIVILEGES;" \
-    || xb_abort "创建数据库失败"
-  XB_DB=$dbn
-
-  cp "$app/.env.example" "$app/.env"
-  xb_env_set "$app/.env" APP_KEY "base64:$(openssl rand -base64 32)"
-  xb_env_set "$app/.env" DB_CONNECTION mysql
-  xb_env_set "$app/.env" DB_HOST 127.0.0.1
-  xb_env_set "$app/.env" DB_PORT 3306
-  xb_env_set "$app/.env" DB_DATABASE "$dbn"
-  xb_env_set "$app/.env" DB_USERNAME "$dbn"
-  xb_env_set "$app/.env" DB_PASSWORD "$dbp"
-  chown -R "$WEB_USER:$WEB_USER" "$app"
-  chmod 640 "$app/.env"
-
-  info "导入数据库 ..."
-  out=$(cd "$app" && runuser -u "$WEB_USER" -- env CACHE_DRIVER=array QUEUE_CONNECTION=sync SESSION_DRIVER=array \
-        "$php" artisan migrate --force 2>&1) || { printf '%s\n' "$out" | tail -8; xb_abort "导入数据库失败"; }
-  h=$(mktemp --suffix=.php); chmod 644 "$h"
-  cat > "$h" <<'PHP'
-<?php
-$base = $argv[1];
-require $base . '/vendor/autoload.php';
-$app = require $base . '/bootstrap/app.php';
-$app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
-$pw = \App\Utils\Helper::guid(false);
-if (!\App\Console\Commands\XboardInstall::registerAdmin($argv[2], $pw)) { fwrite(STDERR, "admin fail\n"); exit(1); }
-\App\Services\Plugin\PluginManager::installDefaultPlugins();
-echo "ADMINPW=$pw\n";
-echo "SECURE=" . hash('crc32b', config('app.key')) . "\n";
-PHP
-  out=$(cd "$app" && runuser -u "$WEB_USER" -- env CACHE_DRIVER=array QUEUE_CONNECTION=sync SESSION_DRIVER=array \
-        "$php" "$h" "$app" "$email" 2>&1); rm -f "$h"
-  pw=$(printf '%s\n' "$out" | sed -n 's/^ADMINPW=//p')
-  secure=$(printf '%s\n' "$out" | sed -n 's/^SECURE=//p')
-  [[ -n $pw && -n $secure ]] || { printf '%s\n' "$out" | tail -8; xb_abort "创建管理员失败"; }
-  xb_env_set "$app/.env" INSTALLED true
-  XB_APP=""; XB_DB=""
-
-  PRESET_ROOT=$root PRESET_PHP=$v add_site php "$domain" \
-    || { err "站点创建失败, 程序在 $app, 数据库 $dbn 已创建, 管理员密码: $pw"; return 1; }
-  load_meta "$domain"
-  PHPVER=$v; REWRITE=laravel
-  apply_site >/dev/null
-  scheme=http; [[ $SSL == 1 ]] && scheme=https
-  xb_env_set "$app/.env" APP_URL "$scheme://$domain"
-  xb_services "$domain" "$app" "$v"
-  xb_secure_save "$domain" "$secure"
-  if confirm "开启防 CC / 防恶意 bot 吗? (节点接口和订阅链接不受影响)" y; then
-    guard_set "$domain" on || warn "防护没开成功, 以后可在 [站点设置] 里开启"
-  fi
-  echo
-  info "Xboard 部署完成 (请截图或记下下面的信息)"
-  echo "  后台地址: $scheme://$domain/$secure"
-  echo "  管理员:   $email"
-  echo "  密码:     $pw"
-  echo "  数据库:   $dbn  密码 $dbp (已写入 .env)"
-  echo "  程序目录: $app"
-  [[ $SSL == 1 ]] || warn "还没启用 HTTPS, 建议到 [SSL 证书] 里开启"
-  echo "  以后更新: wsm xboard-update $domain"
-  echo "  忘了后台地址/密码: wsm xboard-info $domain"
-  echo "  想把主页/订阅/节点分成不同域名: wsm xboard-domains  (或 程序下载 → Xboard 面板)"
-  return 0
-}
-
-xb_update() {  # xb_update [域名]
-  use_site "${1:-}" || return 1
-  local app=${ROOT%/public} php k
-  [[ $ROOT == */public && -f $app/artisan ]] || { err "$DOMAIN 不是 Xboard 站点"; return 1; }
-  php=$(php_bin "$PHPVER"); k=$(xb_slug "$DOMAIN")
-  warn "更新会用仓库里的最新代码覆盖程序文件, 数据库和 .env 不受影响"
-  confirm "继续更新 $DOMAIN ?" y || return 0
-  xb_safe_dir "$app"
-  (cd "$app" && GIT_TERMINAL_PROMPT=0 git fetch -q origin main && git reset -q --hard origin/main) \
-    || { err "拉取代码失败 (检查网络或仓库权限)"; return 1; }
-  info "安装依赖 ..."
-  xb_composer "$app" "$php" || { err "安装依赖失败"; return 1; }
-  chown -R "$WEB_USER:$WEB_USER" "$app"
-  (cd "$app" && runuser -u "$WEB_USER" -- "$php" artisan xboard:update) || warn "xboard:update 出错, 请看上面的信息"
-  systemctl restart "xboard-$k" >/dev/null 2>&1 || true
-  info "更新完成"
-}
-
-xb_domains() {  # xb_domains [站点] [订阅域名] [节点域名]
-  use_site "${1:-}" || return 1
-  local app=${ROOT%/public} php sub=${2:-} node=${3:-} n u h out scheme=http changed=0 s_url="" n_url=""
-  [[ $ROOT == */public && -f $app/artisan ]] || { err "$DOMAIN 不是 Xboard 站点"; return 1; }
-  php=$(php_bin "$PHPVER")
-  title "Xboard 域名分离 (主页 / 订阅 / 节点)"
-  echo "  主页域名: $DOMAIN"
-  echo "  其他绑定: ${ALIASES:-(无)}"
-  echo
-  echo "  建议: 三个域名都解析到本机; 主页开橙云, 订阅和节点两个设为灰云(仅DNS)。"
-  echo "  留空 = 不改这一项。"
-  if [[ -z $sub && -z $node ]]; then
-    read -r -p "① 订阅域名 (如 sub.example.com): " sub || return 1
-    read -r -p "② 节点安装/通信域名 (如 node.example.com): " node || return 1
-  fi
-  [[ -n $sub || -n $node ]] || { warn "没有输入任何域名"; return 0; }
-  for n in $sub $node; do
-    valid_domain "$n" || { err "域名格式不正确: $n"; return 1; }
-    if u=$(domain_used "$n" "$DOMAIN"); then err "$n 已被站点 $u 使用"; return 1; fi
-  done
-  for n in $sub $node; do
-    [[ $n == "$DOMAIN" || " $ALIASES " == *" $n "* ]] && continue
-    ALIASES="${ALIASES:+$ALIASES }$n"; changed=1
-  done
-  if (( changed )); then
-    apply_site || return 1
-    info "已把新域名绑定到站点 $DOMAIN"
-  fi
-  if [[ $SSL == 1 && $CERT_MODE == le ]]; then
-    if (( changed )); then
-      info "重新申请覆盖全部域名的证书 ..."
-      ssl_le_http "$DOMAIN" || { err "证书申请失败, 面板里的订阅/节点域名没有修改。请检查 DNS 解析后再运行一次"; return 1; }
-      load_meta "$DOMAIN"
-    fi
-    scheme=https
-  elif [[ $SSL == 1 ]]; then
-    scheme=https; warn "当前不是 Let's Encrypt 证书, 请确认证书包含: $sub $node"
-  else
-    warn "站点还没启用 HTTPS, 订阅/节点地址暂时用 http, 建议先到 [SSL 证书] 开启后再运行本命令"
-  fi
-  [[ -n $sub ]] && s_url="$scheme://$sub"
-  [[ -n $node ]] && n_url="$scheme://$node"
-  h=$(mktemp --suffix=.php); chmod 644 "$h"
-  cat > "$h" <<'PHP'
-<?php
-$base = $argv[1];
-require $base . '/vendor/autoload.php';
-$app = require $base . '/bootstrap/app.php';
-$app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
-$set = [];
-if (($argv[2] ?? '') !== '') $set['subscribe_url'] = $argv[2];
-if (($argv[3] ?? '') !== '') $set['node_panel_url'] = $argv[3];
-admin_setting($set);
-echo "OK\n";
-PHP
-  out=$(cd "$app" && runuser -u "$WEB_USER" -- "$php" "$h" "$app" "$s_url" "$n_url" 2>&1); rm -f "$h"
-  [[ $out == *OK* ]] || { printf '%s\n' "$out" | tail -8; err "写入面板设置失败"; return 1; }
-  echo
-  info "完成"
-  [[ -n $s_url ]] && echo "  订阅地址前缀: $s_url   (已写入后台「订阅URL」)"
-  [[ -n $n_url ]] && echo "  节点通信域名: $n_url   (节点管理里新生成的安装命令会用它)"
-  echo
-  echo "  还需要你在 Cloudflare 做:"
-  echo "   - ${sub:-订阅域名}、${node:-节点域名} 的 DNS 记录指向本机 IP, 并设为灰云(仅DNS)"
-  echo "   - 主页域名 $DOMAIN 保持橙云"
-  echo "  注意: 已安装的节点不会自动改, 要改节点上 /etc/xboard-node/config.yml 里的面板地址, 或重新安装。"
-}
-
-xb_php_run() {  # xb_php_run 程序目录 PHP命令 模式 [参数...]  (以网站用户运行 Xboard 辅助脚本)
-  local app=$1 php=$2 h out; shift 2
-  h=$(mktemp --suffix=.php); chmod 644 "$h"
-  cat > "$h" <<'PHP'
-<?php
-$base = $argv[1]; $mode = $argv[2] ?? 'info';
-require $base . '/vendor/autoload.php';
-$app = require $base . '/bootstrap/app.php';
-$app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
-if ($mode === 'info') {
-    echo "SECURE=" . admin_setting('secure_path', admin_setting('frontend_admin_path', hash('crc32b', config('app.key')))) . "\n";
-    foreach (\App\Models\User::where('is_admin', 1)->orderBy('id')->pluck('email') as $e) echo "ADMIN=$e\n";
-} elseif ($mode === 'reset') {
-    $u = \App\Models\User::where('email', $argv[3] ?? '')->first();
-    if (!$u) { fwrite(STDERR, "邮箱不存在\n"); exit(1); }
-    $pw = ($argv[4] ?? '') !== '' ? $argv[4] : \App\Utils\Helper::guid(false);
-    $u->password = password_hash($pw, PASSWORD_DEFAULT);
-    $u->password_algo = null;
-    $u->password_salt = null;
-    if (!$u->save()) { fwrite(STDERR, "保存失败\n"); exit(1); }
-    echo "NEWPW=$pw\n";
-}
-PHP
-  out=$(cd "$app" && runuser -u "$WEB_USER" -- "$php" "$h" "$app" "$@" 2>&1); local rc=$?
-  rm -f "$h"
-  printf '%s\n' "$out"
-  return $rc
-}
-
-xb_info() {  # xb_info [域名]: 查看后台地址/管理员, 重置管理员密码
-  use_site "${1:-}" || return 1
-  local app=${ROOT%/public} php out secure scheme=http c e pw np
-  local -a admins=()
-  [[ $ROOT == */public && -f $app/artisan ]] || { err "$DOMAIN 不是 Xboard 站点"; return 1; }
-  php=$(php_bin "$PHPVER")
-  [[ $SSL == 1 ]] && scheme=https
-  while true; do
-    out=$(xb_php_run "$app" "$php" info) || { printf '%s\n' "$out" | tail -5; err "读取失败 (数据库或 Redis 没启动?)"; return 1; }
-    secure=$(printf '%s\n' "$out" | sed -n 's/^SECURE=//p')
-    [[ -n $secure ]] && xb_secure_save "$DOMAIN" "$secure"
-    mapfile -t admins < <(printf '%s\n' "$out" | sed -n 's/^ADMIN=//p')
-    title "Xboard 后台信息 · $DOMAIN"
-    echo "  后台地址: $scheme://$DOMAIN/$secure"
-    if ((${#admins[@]})); then
-      for e in "${admins[@]}"; do echo "  管理员:   $e"; done
-    else
-      warn "没有找到管理员账号"
-    fi
-    echo "  密码:     数据库里只存加密值, 查不到原密码, 忘了就重置"
-    echo "  程序目录: $app"
-    choose c "操作:" "重置管理员密码" "返回" || return 0
-    [[ $c == 重置* ]] || return 0
-    ((${#admins[@]})) || { warn "没有管理员账号可重置"; continue; }
-    if ((${#admins[@]} == 1)); then e=${admins[0]}
-    else choose e "重置哪个管理员?" "${admins[@]}" || continue; fi
-    read -r -p "新密码 (至少 8 位, 直接回车自动生成): " pw || continue
-    if [[ -n $pw && ${#pw} -lt 8 ]]; then warn "密码至少 8 位"; continue; fi
-    confirm "确定重置 $e 的密码?" y || continue
-    out=$(xb_php_run "$app" "$php" reset "$e" "$pw") || { printf '%s\n' "$out" | tail -5; err "重置失败"; continue; }
-    np=$(printf '%s\n' "$out" | sed -n 's/^NEWPW=//p')
-    info "已重置, 请记下 (只显示这一次):"
-    echo "  后台地址: $scheme://$DOMAIN/$secure"
-    echo "  管理员:   $e"
-    echo "  新密码:   $np"
-    pause
-  done
-}
-
-xb_sites() {  # 列出 Xboard 站点
+app_sites() {  # app_sites 模块id : 列出属于该模块的站点
   local d
   while read -r d; do
     [[ -n $d ]] || continue
-    ( load_meta "$d" 2>/dev/null; xb_is_site ) && echo "$d"
+    [[ $(app_of_site "$d") == "$1" ]] && echo "$d"
   done < <(list_site_names)
   return 0
 }
 
-xb_app_menu() {
-  local c d
+apps_units() {  # 所有模块站点的后台服务 (去重)
+  local d id
+  while read -r d; do
+    [[ -n $d ]] || continue
+    id=$(app_of_site "$d")
+    [[ -n $id ]] && app_call "$id" units "$d"
+  done < <(list_site_names) | awk 'NF && !seen[$0]++'
+}
+
+apps_claim() {  # 让已载入的模块认领还没归属的老站点
+  local d id n=0
+  while read -r d; do
+    [[ -n $d && -z $(app_of_site "$d") ]] || continue
+    for id in "${APPS_LOADED[@]}"; do
+      app_has "$id" detect || continue
+      if ( load_meta "$d"; "app_${id}_detect" ) >/dev/null 2>&1; then
+        app_mark_site "$d" "$id"; n=$((n + 1)); break
+      fi
+    done
+  done < <(list_site_names)
+  echo "$n"
+}
+
+app_repo_base() {  # 模块仓库地址 (和脚本更新地址同一个仓库的 apps/ 目录)
+  update_load
+  echo "${WSM_APPS_URL:-${UPDATE_URL%/*}/apps}"
+}
+
+app_fetch() {  # app_fetch 来源(id/网址/本地文件) -> APP_FETCHED (临时文件)
+  local src=$1 tmp
+  APP_FETCHED=""
+  tmp=$(mktemp)
+  if [[ -f $src ]]; then cp -f "$src" "$tmp"
+  elif [[ $src =~ ^https?:// ]]; then
+    curl -fsSL --max-time 60 "$src" -o "$tmp" || { rm -f "$tmp"; err "下载失败: $src"; return 1; }
+  elif app_id_ok "$src"; then
+    curl -fsSL --max-time 60 "$(app_repo_base)/$src.sh?_=$(date +%s)" -o "$tmp" \
+      || { rm -f "$tmp"; err "仓库里没有找到模块 $src"; return 1; }
+  else rm -f "$tmp"; err "无法识别: $src"; return 1; fi
+  APP_FETCHED=$tmp
+}
+
+app_install_file() {  # app_install_file 临时文件 : 检查并放进模块目录
+  app_file_check "$1" || { rm -f "$1"; return 1; }
+  mkdir -p "$APPS_DIR" "$APPS_DATA"
+  install -m 644 "$1" "$APPS_DIR/$APP_CHECK_ID.sh"; rm -f "$1"
+  apps_load
+  app_loaded "$APP_CHECK_ID" || { err "模块载入失败"; return 1; }
+  apps_claim >/dev/null
+  guard_refresh_global >/dev/null 2>&1
+  info "已添加模块: ${APP_NAMES[$APP_CHECK_ID]} ($APP_CHECK_ID${APP_VERS[$APP_CHECK_ID]:+ v${APP_VERS[$APP_CHECK_ID]}})"
+}
+
+app_add() {  # app_add [来源]
+  local src=${1:-} idx line id c
+  local -a ids=() names=()
+  if [[ -z $src ]]; then
+    idx=$(curl -fsSL --max-time 30 "$(app_repo_base)/index.txt?_=$(date +%s)" 2>/dev/null)
+    while IFS='|' read -r id line; do
+      app_id_ok "$id" || continue
+      app_loaded "$id" && continue
+      ids+=("$id"); names+=("$line")
+    done <<< "$idx"
+    if ((${#ids[@]})); then
+      local -a opts=()
+      for c in "${!ids[@]}"; do opts+=("${names[c]}"); done
+      opts+=("从网址或本地文件添加")
+      choose c "仓库里可添加的模块:" "${opts[@]}" || return 0
+      if [[ $c == 从网址* ]]; then src=""
+      else for line in "${!ids[@]}"; do [[ ${names[line]} == "$c" ]] && src=${ids[line]}; done; fi
+    else
+      [[ -n $idx ]] && info "仓库里的模块都已经添加了"
+      [[ -n $idx ]] || warn "读取模块仓库失败: $(app_repo_base)"
+    fi
+    if [[ -z $src ]]; then
+      read -r -p "模块文件网址或本地路径: " src || return 0
+      [[ -n $src ]] || return 0
+    fi
+  fi
+  app_fetch "$src" || return 1
+  app_install_file "$APP_FETCHED"
+}
+
+app_update_module() {  # app_update_module id : 从仓库重新下载模块
+  local id=$1
+  app_fetch "$id" || return 1
+  if cmp -s "$APP_FETCHED" "$APPS_DIR/$id.sh"; then rm -f "$APP_FETCHED"; info "模块已是最新"; return 0; fi
+  app_file_check "$APP_FETCHED" "$id" || { rm -f "$APP_FETCHED"; return 1; }
+  app_install_file "$APP_FETCHED"
+}
+
+app_remove() {  # app_remove id
+  local id=$1 d c
+  local -a sites=()
+  [[ -f $APPS_DIR/$id.sh ]] || { err "没有这个模块: $id"; return 1; }
+  mapfile -t sites < <(app_sites "$id")
+  echo "  模块: ${APP_NAMES[$id]:-$id}"
+  if ((${#sites[@]})); then
+    echo "  有 ${#sites[@]} 个站点是用它部署的: ${sites[*]}"
+    choose c "删除模块时, 这些站点:" "保留站点 (网站照常运行, 只是不再由模块管理)" \
+      "一起删除站点" || return 0
+    if [[ $c == 一起* ]]; then
+      for d in "${sites[@]}"; do (del_site "$d"); done
+    fi
+  fi
+  confirm "确认删除模块 ${APP_NAMES[$id]:-$id} ?" n || return 0
+  rm -f "$APPS_DIR/$id.sh"
+  apps_load
+  guard_refresh_global >/dev/null 2>&1
+  info "已删除模块 ${APP_NAMES[$id]:-$id}"
+  ((${#sites[@]})) && [[ $c == 保留* ]] && echo "  以后重新添加这个模块, 这些站点会自动归回它管理"
+  return 0
+}
+
+apps_migrate_once() {  # 老版本升级上来时: 自动找回已部署程序对应的模块 (只做一次)
+  [[ -f $APPS_MIGRATED ]] && return 0
+  [[ -d $META_DIR ]] || return 0
+  local n idx id d tmp found fail=0
+  apps_claim >/dev/null
+  n=0
+  while read -r d; do [[ -n $d && -z $(app_of_site "$d") ]] && n=$((n + 1)); done < <(list_site_names)
+  if ((n)); then
+    idx=$(curl -fsSL --max-time 20 "$(app_repo_base)/index.txt?_=$(date +%s)" 2>/dev/null) || return 0
+    while IFS='|' read -r id _; do
+      app_id_ok "$id" && ! app_loaded "$id" || continue
+      app_fetch "$id" 2>/dev/null || { fail=1; continue; }
+      tmp=$APP_FETCHED
+      app_file_check "$tmp" "$id" 2>/dev/null || { rm -f "$tmp"; continue; }
+      found=$(
+        # shellcheck disable=SC1090
+        source "$tmp" 2>/dev/null
+        declare -F "app_${id}_detect" >/dev/null || exit 0
+        while read -r d; do
+          [[ -n $d ]] || continue
+          ( load_meta "$d"; [[ -z ${APP:-} ]] && "app_${id}_detect" ) >/dev/null 2>&1 && { echo 1; break; }
+        done < <(list_site_names)
+      )
+      if [[ $found == 1 ]]; then app_install_file "$tmp" >/dev/null 2>&1; else rm -f "$tmp"; fi
+    done <<< "$idx"
+  fi
+  ((fail)) && return 0   # 有模块没下载到, 下次再试
+  mkdir -p "$APPS_DIR"; date '+%F %T' > "$APPS_MIGRATED"
+  guard_refresh_global >/dev/null 2>&1
+  return 0
+}
+
+app_deploy_menu() {  # 网站管理 → 部署网站应用
+  local c id
+  local -a opts=()
+  ((${#APPS_LOADED[@]})) || { warn "还没有添加任何网站应用模块, 到 [程序下载] 里添加"; return 0; }
+  for id in "${APPS_LOADED[@]}"; do opts+=("${APP_NAMES[$id]}  ${D}${APP_DESCS[$id]}${N}"); done
+  choose c "部署哪个程序:" "${opts[@]}" || return 0
+  for id in "${APPS_LOADED[@]}"; do
+    [[ $c == "${APP_NAMES[$id]}  "* ]] && { "app_${id}_install"; return; }
+  done
+}
+
+app_module_menu() {  # 单个模块的菜单
+  local id=$1 c d
+  local -a sites=() opts=()
   while true; do
-    title "Xboard 面板"
-    echo "  机场面板: 自动建站 + 数据库 + Redis + 队列服务 + 定时任务"
-    d=$(xb_sites | tr '\n' ' ')
-    echo "  已部署: ${d:-无}"
-    choose c "操作:" "新建 Xboard 站点" "更新 Xboard" "域名分离 (主页/订阅/节点)" \
-      "后台地址 / 重置管理员密码" "返回" || return 0
+    mapfile -t sites < <(app_sites "$id")
+    title "${APP_NAMES[$id]}"
+    echo "  简介: ${APP_DESCS[$id]:-无}"
+    echo "  模块: $id${APP_VERS[$id]:+ v${APP_VERS[$id]}}"
+    echo "  站点: ${sites[*]:-无}"
+    opts=("部署新站点")
+    app_has "$id" menu && ((${#sites[@]})) && opts+=("管理已部署的站点")
+    opts+=("更新模块" "删除模块" "返回")
+    choose c "操作:" "${opts[@]}" || return 0
     case $c in
-      新建*) (xb_install); pause ;;
-      更新*) (xb_update ""); pause ;;
-      域名*) (xb_domains ""); pause ;;
-      后台*) (xb_info "") ;;
+      部署*) ("app_${id}_install"); pause ;;
+      管理*)
+        if ((${#sites[@]} == 1)); then d=${sites[0]}
+        else choose d "哪个站点:" "${sites[@]}" || continue; fi
+        ("app_${id}_menu" "$d") ;;
+      更新模块) (app_update_module "$id"); apps_load; pause ;;
+      删除模块) app_remove "$id"; pause; app_loaded "$id" || return 0 ;;
       *) return 0 ;;
     esac
   done
 }
 
-xb_purge() {  # xb_purge 域名 网站根目录  (删除站点时调用)
-  local app=${2%/public} k; k=$(xb_slug "$1")
-  [[ $2 == */public && -f $app/artisan ]] || return 0
-  systemctl disable --now "xboard-$k" >/dev/null 2>&1 || true
-  rm -f "/etc/systemd/system/xboard-$k.service" "/etc/cron.d/xboard-$k"
-  systemctl daemon-reload >/dev/null 2>&1 || true
-  info "已移除 Xboard 队列服务和计划任务"
-  grep -m1 '^DB_DATABASE=' "$app/.env" 2>/dev/null | sed 's/^DB_DATABASE=/   数据库未删除: /'
-  if safe_root "$app" && confirm "同时删除 Xboard 程序目录 $app ?" n; then rm -rf -- "$app"; fi
+app_cli() {  # wsm app ...
+  local a=${1:-list} id
+  case $a in
+    list)
+      ((${#APPS_LOADED[@]})) || { echo "还没有添加模块"; return 0; }
+      for id in "${APPS_LOADED[@]}"; do
+        printf '%-12s ' "$id"; pad_w "${APP_NAMES[$id]}" 16; app_sites "$id" | paste -sd' ' -
+      done ;;
+    add) app_add "${2:-}" ;;
+    remove) [[ -n ${2:-} ]] || { err "用法: wsm app remove <模块>"; return 1; }; app_remove "$2" ;;
+    update) [[ -n ${2:-} ]] || { err "用法: wsm app update <模块>"; return 1; }; app_update_module "$2" ;;
+    *)
+      id=$a; shift
+      app_loaded "$id" || { err "没有这个模块: $id (wsm app list 查看)"; return 1; }
+      case ${1:-} in
+        install) "app_${id}_install" "${2:-}" ;;
+        *) if app_has "$id" cli; then "app_${id}_cli" "$@"; else app_module_menu "$id"; fi ;;
+      esac ;;
+  esac
 }
 
 # ================================================================ 访问统计
@@ -3896,6 +3682,7 @@ update_run() {  # update_run [-y]
     return 1
   fi
   UPDATED=1
+  bash "$WSM_BIN" app list >/dev/null 2>&1 || true   # 让新版本做一次升级迁移 (如自动找回网站应用模块)
   info "已更新到 v${vnew:-?} (旧版本已备份, 可在 [更新脚本] 里回滚)"
 }
 
@@ -3998,9 +3785,7 @@ mon_units() {  # 需要监控的服务 (只看开机自启的)
   for v in $(php_installed); do
     u=$(php_svc "$v"); systemctl is-enabled --quiet "$u" 2>/dev/null && echo "$u"
   done
-  for f in /etc/systemd/system/xboard-*.service; do
-    [[ -f $f ]] || continue
-    u=${f##*/}; u=${u%.service}
+  for u in $(apps_units); do
     systemctl is-enabled --quiet "$u" 2>/dev/null && echo "$u"
   done
   for u in $TG_UNITS; do unit_exists "$u" && echo "$u"; done
@@ -4085,18 +3870,19 @@ tg_setup() {
 }
 
 tg_units_menu() {
-  local c u cand
+  local c u cand au
   tg_load
-  echo "  默认监控: Nginx / MariaDB / Redis / PHP-FPM / Xboard 队列"
+  echo "  默认监控: Nginx / MariaDB / Redis / PHP-FPM / 网站应用的后台服务"
   echo "  额外监控: ${TG_UNITS:-无}"
   choose c "操作:" "自动发现 (机器人等自定义服务)" "手动添加服务名" "清空额外监控" "返回" || return 0
   case $c in
     自动*)
-      cand=""
+      cand=""; au=" $(apps_units | tr '\n' ' ') "
       for u in /etc/systemd/system/*.service; do
         [[ -f $u && ! -L $u ]] || continue
         u=${u##*/}; u=${u%.service}
-        case $u in xboard-*|wsm-*) continue ;; esac
+        case $u in wsm-*) continue ;; esac
+        [[ $au == *" $u "* ]] && continue
         command -v dpkg >/dev/null 2>&1 && dpkg -S "/etc/systemd/system/$u.service" >/dev/null 2>&1 && continue
         [[ " $TG_UNITS " == *" $u "* ]] || cand+="$u "
       done
@@ -4152,7 +3938,7 @@ tg_menu() {
 }
 
 # ================================================================ 全量备份 / 搬家 / 异地备份
-# 一个备份文件 = 全部网站 + 全部数据库(含账号) + 证书 + Nginx/wsm 配置 + Xboard 服务 + 你指定的额外目录
+# 一个备份文件 = 全部网站 + 全部数据库(含账号) + 证书 + Nginx/wsm 配置(含网站应用模块) + 模块的后台服务 + 你指定的额外目录
 # 可加密; 可定时; 可自动上传到谷歌网盘 / 其他服务器 (rclone); 新服务器上一条命令还原 (搬家)
 FB_DIR=$BACKUP_DIR/full
 FB_CONF=$WSM_DIR/fullbak.conf
@@ -4192,11 +3978,13 @@ fb_extra_list() {  # 额外备份路径 (存在的才输出)
 }
 
 fb_extra_detect() {  # 自动发现: 自定义 systemd 服务 + 它们的程序目录/配置, /root 下的 json/env
-  local f wd ef
+  local f wd ef au
+  au=" $(apps_units | tr '\n' ' ') "
   {
     for f in /etc/systemd/system/*.service; do
       [[ -f $f && ! -L $f ]] || continue
-      case ${f##*/} in xboard-*|wsm-*) continue ;; esac
+      case ${f##*/} in wsm-*) continue ;; esac
+      wd=${f##*/}; [[ $au == *" ${wd%.service} "* ]] && continue
       command -v dpkg >/dev/null 2>&1 && dpkg -S "$f" >/dev/null 2>&1 && continue
       echo "$f"
       wd=$(sed -n 's/^WorkingDirectory=-\{0,1\}//p' "$f" | head -1)
@@ -4224,7 +4012,7 @@ fb_create() {  # fb_create [auto] : 生成全量备份 -> FB_LAST
   ts=$(date +%Y%m%d_%H%M%S); host=$(fb_host)
   mkdir -p "$FB_DIR"; chmod 700 "$FB_DIR"
   for p in "$WSM_DIR" "$WWW_ROOT" /etc/letsencrypt "$NGX_CONF" /root/.config/rclone \
-           /etc/systemd/system/xboard-*.service /etc/cron.d/xboard-* /etc/cron.d/wsm-* \
+           /etc/cron.d/wsm-* $(apps_hook backup_paths) \
            /etc/php/*/fpm/conf.d/99-wsm.ini /etc/opt/remi/php*/php.d/99-wsm.ini; do
     [[ -e $p ]] && files+=("${p#/}")
   done
@@ -4667,7 +4455,7 @@ fb_extra_menu() {
   while true; do
     mapfile -t cur < <(grep -v '^[[:space:]]*$' "$FB_EXTRA" 2>/dev/null)
     title "额外备份的目录/文件"
-    echo "  (网站、数据库、证书、wsm 和 Xboard 配置会自动备份, 这里加其他的,"
+    echo "  (网站、数据库、证书、wsm 配置和网站应用的服务会自动备份, 这里加其他的,"
     echo "   比如机器人程序目录 /root/mybot、它的 .service 文件)"
     if ((${#cur[@]})); then for p in "${cur[@]}"; do echo "  - $p$([[ -e $p ]] || echo "  ${R}(不存在)${N}")"; done
     else echo "  (无)"; fi
@@ -4814,7 +4602,7 @@ fb_restore() {  # fb_restore [备份文件]
   if [[ -n $FB_DBS ]] && ! command -v mysql >/dev/null 2>&1; then install_db; fi
   if [[ $FB_REDIS == 1 ]] && ! unit_exists redis-server && ! unit_exists redis; then install_redis; fi
 
-  for u in /etc/systemd/system/xboard-*.service; do [[ -f $u ]] && systemctl stop "${u##*/}" >/dev/null 2>&1; done
+  for u in $(apps_units); do systemctl stop "$u" >/dev/null 2>&1; done
   info "还原网站和配置文件 ..."
   tar -xzpf "$stage/b/files.tar.gz" -C / || { rm -rf "$stage"; err "解压文件失败"; return 1; }
 
@@ -4838,7 +4626,8 @@ fb_restore() {  # fb_restore [备份文件]
   fi
 
   systemctl daemon-reload
-  for u in /etc/systemd/system/xboard-*.service; do [[ -f $u ]] && systemctl enable --now "${u##*/}" >/dev/null 2>&1; done
+  apps_load; apps_migrate_once   # 模块随 /etc/wsm 一起还原; 老版本的备份没有模块, 自动从仓库找回
+  for u in $(apps_units); do unit_exists "$u" && systemctl enable --now "$u" >/dev/null 2>&1; done
   for u in $FB_EXTRAS; do
     [[ $u == /etc/systemd/system/*.service && -f $u ]] && systemctl enable --now "${u##*/}" >/dev/null 2>&1
   done
@@ -5023,7 +4812,7 @@ cfw_enable() {
   echo "开启后: 只有 Cloudflare 能连本机 80/443 端口,"
   echo "  直接用 IP 访问、或没开橙云的域名, 都会打不开。"
   echo "  SSH 和其他端口不受影响。"
-  echo "  Xboard 节点要用开了橙云的域名对接面板。"
+  echo "  面板类程序的节点/客户端要用开了橙云的域名对接。"
   echo
   cfw_check_sites
   cfw_check_ports
@@ -5473,7 +5262,7 @@ menu_sites() {
     cat <<'EOF'
    1) 站点列表
    2) 新建 PHP 站点
-   3) 新建 WordPress
+   3) 部署网站应用 (Xboard / WordPress 等模块)
    4) 新建静态站点
    5) 新建反向代理
    6) 新建域名重定向
@@ -5486,7 +5275,7 @@ EOF
     case $c in
       1) list_sites; pause ;;
       2) (add_site php); pause ;;
-      3) (wp_install); pause ;;
+      3) (app_deploy_menu); pause ;;
       4) (add_site static); pause ;;
       5) (add_site proxy); pause ;;
       6) (add_site redirect); pause ;;
@@ -5696,17 +5485,17 @@ wsm v$WSM_VER - Web Server Manager
   wsm                               交互菜单 (推荐)
   wsm install                       安装 Nginx/PHP/MariaDB/certbot 环境
   wsm add-php|add-static [域名]     新建站点
-  wsm add-wp [域名]                 一键部署 WordPress
-  wsm add-xboard [域名]             一键部署 Xboard
-  wsm xboard-update [域名]          更新 Xboard
-  wsm xboard-info [域名]            Xboard 后台地址/管理员, 重置管理员密码
+  wsm app list                      网站应用模块列表 (及各自的站点)
+  wsm app add [模块|网址|文件]      添加模块 (不写=从仓库选)
+  wsm app remove|update <模块>      删除 / 更新模块
+  wsm app <模块> install [域名]     用模块部署新站点 (如 wsm app wordpress install)
+  wsm app <模块> [参数...]          模块自己的命令 (如 wsm app xboard info 域名)
   wsm guard [域名] [on|off]         防 CC / 防恶意 bot
   wsm cf-firewall [on|off|refresh]  源站保护: 80/443 只允许 Cloudflare
   wsm ssh                           SSH 安全 (密钥登录/关闭密码/改端口)
   wsm tg                            Telegram 告警设置
   wsm icons nerd|plain              菜单图标: Nerd 字体图标 / 普通符号
   wsm timezone [Asia/Shanghai]      查看 / 设置服务器时区
-  wsm xboard-domains [站点]         设置主页/订阅/节点三个域名
   wsm add-proxy [域名] [后端URL]    新建反向代理
   wsm update [-y]                   从 Git 仓库更新脚本 (-y 不确认)
   wsm rollback                      回滚到上一个版本
@@ -5739,9 +5528,10 @@ EOF
 need_root
 detect_os
 mkdir -p "$META_DIR" "$CERT_DIR" "$AUTH_DIR"
+apps_load
 
 case ${1:-menu} in
-  menu)         main_menu ;;
+  menu)         apps_migrate_once; main_menu ;;
   icons)        ui_icon_set "${2:-}" ;;
   timezone)     if [[ -n ${2:-} ]]; then tz_set "$2"; else echo "时区: $(tz_get)  时间: $(tz_now)"; fi ;;
   install)      cmd_install ;;
@@ -5750,11 +5540,10 @@ case ${1:-menu} in
   db-create)    db_create "${2:-}" ;;
   add-php)      add_site php "${2:-}" ;;
   add-static)   add_site static "${2:-}" ;;
-  add-wp)       wp_install "${2:-}" ;;
-  add-xboard)   xb_install "${2:-}" ;;
-  xboard-update) xb_update "${2:-}" ;;
-  xboard-info)   xb_info "${2:-}" ;;
-  xboard-domains) xb_domains "${2:-}" "${3:-}" "${4:-}" ;;
+  app)          shift; apps_migrate_once; app_cli "$@" ;;
+  add-wp)       app_cli wordpress install "${2:-}" ;;           # 旧命令, 兼容保留
+  add-xboard)   app_cli xboard install "${2:-}" ;;
+  xboard-update|xboard-info|xboard-domains) app_cli xboard "${1#xboard-}" "${2:-}" "${3:-}" "${4:-}" ;;
   update)       update_run "${2:-}" ;;
   rollback)     update_rollback ;;
   stats)        stats_cli "${2:-}" "${3:-1}" ;;
