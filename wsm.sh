@@ -18,8 +18,9 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="2.8.6"
+WSM_VER="2.8.7"
 # CHANGELOG-BEGIN  (更新时会显示比当前版本新的条目, 新的写在最上面)
+# v2.8.7 服务管理: 显示开机自启状态, 每个操作都有结果提示, 去掉重复的 redis, 加入 Xboard 队列和告警里的服务
 # v2.8.6 wsm 日志自动轮转; 还原后的提示更准确; 静态检查清理
 # v2.8.5 异地备份新增 Cloudflare R2 / Backblaze B2 (用密钥, 不会过期, 不用浏览器授权)
 # v2.8.4 谷歌网盘支持用自己的 client_id (rclone 共用授权将停用); 已添加的网盘可一键更换授权
@@ -2561,27 +2562,77 @@ toggle_block_ip() {
   else err "配置冲突, 已回滚:"; cat /tmp/wsm_nginx_err >&2; rm -f "$f"; fi
 }
 
+svc_list() {  # 需要管理的服务 (去掉别名重复, 如 redis 和 redis-server 是同一个)
+  local x u id
+  local -A seen=()
+  {
+    echo nginx
+    for x in mariadb redis-server redis; do unit_exists "$x" && echo "$x"; done
+    for x in $(php_installed | sort -V); do php_svc "$x"; echo; done
+    for x in /etc/systemd/system/xboard-*.service; do [[ -f $x ]] && { u=${x##*/}; echo "${u%.service}"; }; done
+    tg_load 2>/dev/null; for x in ${TG_UNITS:-}; do echo "$x"; done
+  } | while read -r u; do
+    [[ -n $u ]] || continue
+    unit_exists "$u" || [[ $u == nginx ]] || continue
+    id=$(systemctl show -p Id --value "$u" 2>/dev/null); id=${id%.service}
+    [[ -n ${seen[${id:-$u}]:-} ]] && continue
+    seen[${id:-$u}]=1; echo "$u"
+  done
+}
+
+svc_boot() { systemctl is-enabled --quiet "$1" 2>/dev/null && echo "${G}开${N}" || echo "${Y}关${N}"; }
+
+svc_table() {  # svc_table 服务...
+  local x
+  printf '   '; pad_w "服务" 26; pad_w "状态" 10; echo "开机自启"
+  for x in "$@"; do
+    printf '   '; pad_w "$x" 26; printf '%s    %s\n' "$(svc_state "$x")" "$(svc_boot "$x")"
+  done
+}
+
 manage_service() {
-  local x name act
-  local -a svcs=("nginx")
-  unit_exists mariadb && svcs+=("mariadb")
-  unit_exists redis-server && svcs+=("redis-server")
-  unit_exists redis && svcs+=("redis")
-  for x in $(php_installed | sort -V); do svcs+=("$(php_svc "$x")"); done
-  echo "服务状态:"
-  for x in "${svcs[@]}"; do printf "   %-22s %s\n" "$x" "$(svc_state "$x")"; done
-  choose name "选择服务:" "${svcs[@]}" || return 1
-  choose act "操作:" "重启" "重载配置" "启动" "停止" "设为开机自启" "取消开机自启" "查看状态详情" || return 1
-  case $act in
-    重启) systemctl restart "$name" ;;
-    重载*) systemctl reload "$name" ;;
-    启动) systemctl start "$name" ;;
-    停止) confirm "确认停止 $name ?" n && systemctl stop "$name" ;;
-    设为*) systemctl enable "$name" ;;
-    取消*) systemctl disable "$name" ;;
-    *) systemctl status "$name" --no-pager -l | head -20 ;;
-  esac
-  echo "$name: $(svc_state "$name")"
+  local name act ok
+  local -a svcs=()
+  mapfile -t svcs < <(svc_list)
+  while true; do
+    title "服务管理"
+    svc_table "${svcs[@]}"
+    tg_ready 2>/dev/null && [[ -f $TG_CRON ]] && echo "   ${D}(Telegram 告警开着: 开机自启的服务停了会被自动拉起)${N}"
+    choose name "选择服务:" "${svcs[@]}" || return 0
+    while true; do
+      echo
+      echo "  $name   状态: $(svc_state "$name")   开机自启: $(svc_boot "$name")"
+      choose act "操作:" "重启" "重载配置" "启动" "停止" "设为开机自启" "取消开机自启" "查看状态详情" || break
+      ok=1
+      case $act in
+        重启) systemctl restart "$name" >/dev/null 2>&1 || ok=0 ;;
+        重载*) systemctl reload "$name" >/dev/null 2>&1 || ok=0 ;;
+        启动) systemctl start "$name" >/dev/null 2>&1 || ok=0 ;;
+        停止)
+          if [[ $name == nginx ]]; then warn "停止 nginx 后所有网站都打不开"; fi
+          confirm "确认停止 $name ?" n || continue
+          systemctl stop "$name" >/dev/null 2>&1 || ok=0 ;;
+        设为*) systemctl enable "$name" >/dev/null 2>&1 || ok=0 ;;
+        取消*) systemctl disable "$name" >/dev/null 2>&1 || ok=0 ;;
+        *) systemctl status "$name" --no-pager -l 2>&1 | head -20; continue ;;
+      esac
+      sleep 1
+      if ((ok)); then
+        case $act in
+          重启) systemctl is-active --quiet "$name" && info "已重启 $name" || err "$name 重启后没有运行起来" ;;
+          重载*) info "已重载 $name 的配置" ;;
+          启动) systemctl is-active --quiet "$name" && info "已启动 $name" || err "$name 没有启动起来" ;;
+          停止) info "已停止 $name" ;;
+          设为*) info "已设为开机自启: $name" ;;
+          取消*) info "已取消开机自启: $name"
+                tg_ready 2>/dev/null && [[ -f $TG_CRON ]] && echo "  告警不会再自动拉起它" ;;
+        esac
+      else
+        err "操作失败, 最近日志:"
+        journalctl -u "$name" -n 5 --no-pager -o cat 2>/dev/null | sed 's/^/  /'
+      fi
+    done
+  done
 }
 
 self_install() {
@@ -5587,7 +5638,7 @@ EOF
     echo "   0) ${G}返回${N}"
     read -r -p "请选择: " c || return 0
     case $c in
-      1) (manage_service); pause ;;
+      1) (manage_service) ;;
       2) nginx -t && systemctl reload nginx && info "配置正确, 已重载"; pause ;;
       3) tail -n 50 /var/log/nginx/error.log 2>/dev/null || warn "暂无日志"; pause ;;
       4) df -h /; echo; free -h; du -sh "$WWW_ROOT" "$BACKUP_DIR" 2>/dev/null; pause ;;
