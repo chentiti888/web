@@ -19,8 +19,9 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="2.10"
+WSM_VER="2.10.1"
 # CHANGELOG-BEGIN  (更新时会显示比当前版本新的条目, 新的写在最上面)
+# v2.10.1 每个扩展程序菜单里都有 [卸载]: 一次清理站点、证书、服务、定时任务、程序文件, 数据库和用户数据单独确认; 普通删除站点也会询问是否删除对应数据库
 # v2.10 新增扩展程序: Typecho / Nextcloud / 哪吒监控 / Uptime Kuma / OpenList; 部署时自动检测最新版本, 各程序菜单里可检查更新并升级 (含 Xboard 仓库新提交)
 # v2.9.1 3x-ui 也改为模块 (独立软件类); 程序下载里第三方程序统一放在 [扩展程序], 可随时添加删除
 # v2.9 网站应用改为模块: Xboard / WordPress 从脚本本体拆出来, 在 [程序下载] 里随时添加/删除; 已部署的站点自动归入对应模块
@@ -1336,11 +1337,50 @@ fix_perms_dir() {
   command -v chcon >/dev/null 2>&1 && chcon -R -t httpd_sys_rw_content_t "$1" >/dev/null 2>&1 || true
 }
 
-del_site() {
+rm_path_safe() {  # rm_path_safe 路径 : 只删至少两级的普通目录/文件, 系统目录和顶层目录一律不删
+  local p=${1%/}
+  [[ -n $p && -e $p ]] || return 0
+  safe_root "$p" || { warn "跳过不安全的路径: $p"; return 1; }
+  case $p in /opt|/www|"$WWW_ROOT"|/home|/srv|/var|/var/www|/tmp) warn "跳过: $p"; return 1 ;; esac
+  rm -rf -- "$p"
+}
+
+del_site() {  # del_site [域名]   (DEL_MODE=uninstall 时: 程序文件直接删, 只问数据库和用户数据)
   use_site "${1:-}" || return 1
-  local d=$DOMAIN
-  confirm "确认删除站点 $d ? 此操作不可恢复" n || return 0
-  local app=${APP:-}
+  local d=$DOMAIN app=${APP:-} mode=${DEL_MODE:-} x db="" dbu="" del_files=0 del_data=0 del_db=0
+  local -a files=() data=()
+  if [[ -n $app ]] && app_has "$app" files; then mapfile -t files < <(app_call "$app" files "$d" "$ROOT")
+  elif [[ -n $ROOT && -d $ROOT ]]; then files=("$ROOT"); fi
+  [[ -n $app ]] && mapfile -t data < <(app_call "$app" data "$d" "$ROOT")
+  if [[ -n $app ]] && app_has "$app" dbinfo; then read -r db dbu < <(app_call "$app" dbinfo "$d" "$ROOT"); fi
+  [[ $db =~ ^[A-Za-z0-9_]+$ ]] || db=""
+  [[ $dbu =~ ^[A-Za-z0-9_]+$ ]] || dbu=""
+
+  echo "  将删除站点: $d${app:+  (${APP_NAMES[$app]:-$app})}"
+  echo "   - Nginx 配置、证书、访问密码等站点设置"
+  [[ -n $app ]] && app_has "$app" purge && echo "   - 程序的后台服务 / 定时任务"
+  if ((${#files[@]} > 3)); then
+    echo "   - 程序文件: ${#files[@]} 项, 在 ${files[0]%/*}/$([[ $mode == uninstall ]] || echo "  (会再问一次)")"
+  else
+    for x in "${files[@]}"; do [[ -n $x && -e $x ]] && echo "   - 程序文件: $x$([[ $mode == uninstall ]] || echo "  (会再问一次)")"; done
+  fi
+  for x in "${data[@]}"; do [[ -n $x && -e $x ]] && echo "   - 用户数据: $x  (会再问一次)"; done
+  [[ -n $db ]] && echo "   - 数据库: $db  (会再问一次)"
+  [[ -n $app ]] && warn "删除后无法恢复, 重要数据请先备份 ([备份与搬家] → 立即全量备份)"
+  confirm "确认$([[ $mode == uninstall ]] && echo 卸载 || echo 删除)站点 $d ?" n || return 0
+
+  if [[ $mode == uninstall ]]; then del_files=1
+  elif ((${#files[@]})) && [[ -e ${files[0]} ]]; then
+    if ((${#files[@]} > 3)); then x="${files[0]%/*}/ 下的程序文件"; else x=${files[*]}; fi
+    confirm "同时删除程序文件 ($x) ?" n && del_files=1
+  fi
+  for x in "${data[@]}"; do
+    [[ -n $x && -e $x ]] && { confirm "同时删除用户数据 $x (删了就找不回来)?" n && del_data=1; break; }
+  done
+  if [[ -n $db ]] && mysql -N -e "SHOW DATABASES LIKE '$db'" 2>/dev/null | grep -qx "$db"; then
+    confirm "同时删除数据库 $db 和它的账号 (网站内容都在里面)?" n && del_db=1
+  else db=""; fi
+
   [[ -n $app ]] && app_call "$app" purge "$d" "$ROOT"
   rm -f "$NGX_CONF/$d.conf"
   [[ $TAMPER == 1 && -d $ROOT ]] && chattr -R -i "$ROOT" 2>/dev/null
@@ -1353,8 +1393,25 @@ del_site() {
   rm -f "$AUTH_DIR/$d.htpasswd" "$META_DIR/$d.paths" "$META_DIR/$d.rewrite" "$META_DIR/$d.app.nginx" "$(meta_file "$d")"
   [[ -n $app ]] && app_has "$app" guard_skip && guard_refresh_global
   nginx_reload >/dev/null 2>&1
-  if [[ -n $ROOT && -d $ROOT ]] && confirm "同时删除网站目录 $ROOT ?" n; then rm -rf -- "$ROOT"; fi
-  info "已删除 $d"
+
+  if ((del_files)); then
+    [[ $TAMPER == 1 ]] && for x in "${files[@]}"; do [[ -d $x ]] && chattr -R -i "$x" 2>/dev/null; done
+    for x in "${files[@]}"; do rm_path_safe "$x"; done
+    echo "   已删除程序文件"
+  fi
+  if ((del_data)); then for x in "${data[@]}"; do rm_path_safe "$x"; done; echo "   已删除用户数据"
+  else for x in "${data[@]}"; do [[ -n $x && -e $x ]] && echo "   保留了用户数据: $x"; done; fi
+  if ((del_db)); then
+    app_db_drop "$db" "$dbu"; echo "   已删除数据库 $db"
+  elif [[ -n $db ]]; then echo "   保留了数据库: $db"; fi
+  [[ -n $app ]] && app_call "$app" cleanup "$d"
+  info "已$([[ $mode == uninstall ]] && echo 卸载 || echo 删除) $d"
+}
+
+app_site_uninstall() {  # app_site_uninstall 域名 : 程序菜单里的 [卸载]
+  local d=$1
+  title "卸载 ${APP_NAMES[$(app_of_site "$d")]:-程序} · $d"
+  DEL_MODE=uninstall del_site "$d"
 }
 
 list_sites() {
@@ -3470,9 +3527,11 @@ CREATE USER '$ADB_USER'@'localhost' IDENTIFIED BY '$ADB_PASS'; \
 GRANT ALL PRIVILEGES ON \`$ADB_NAME\`.* TO '$ADB_USER'@'localhost'; FLUSH PRIVILEGES;"
 }
 
-app_db_drop() {  # app_db_drop 库名 : 部署失败时清理
+app_db_drop() {  # app_db_drop 库名 [账号] : 删除数据库和它的账号 (账号默认和库同名)
   [[ $1 =~ ^[A-Za-z0-9_]+$ ]] || return 0
-  mysql -e "DROP DATABASE IF EXISTS \`$1\`; DROP USER IF EXISTS '$1'@'localhost';" 2>/dev/null
+  local u=${2:-$1}
+  [[ $u =~ ^[A-Za-z0-9_]+$ && $u != root ]] || u=$1
+  mysql -e "DROP DATABASE IF EXISTS \`$1\`; DROP USER IF EXISTS '$u'@'localhost';" 2>/dev/null
 }
 
 php_exts_ensure() {  # php_exts_ensure PHP版本 扩展...  (尽力安装, 装不上的跳过)
