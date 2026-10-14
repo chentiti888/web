@@ -5,7 +5,7 @@
 APP_ID=xboard
 APP_NAME="Xboard 面板"
 APP_DESC="机场面板, 自动建站+数据库+Redis+队列+定时任务"
-APP_VER=1.2
+APP_VER=1.3
 
 XB_REPO_HTTPS=${XB_REPO_HTTPS:-https://github.com/chentiti888/xboard.git}
 XB_REPO_SSH=${XB_REPO_SSH:-git@github.com:chentiti888/xboard.git}
@@ -224,9 +224,7 @@ PHP
   xb_services "$domain" "$app" "$v"
   app_mark_site "$domain" xboard
   xb_secure_save "$domain" "$secure"
-  if confirm "开启防 CC / 防恶意 bot 吗? (节点接口和订阅链接不受影响)" y; then
-    guard_set "$domain" on || warn "防护没开成功, 以后可在 [站点设置] 里开启"
-  fi
+  echo "  防 CC 默认不开启, 需要时到 [安全防护 → 防 CC / 恶意 bot] 里开 (节点接口和订阅链接不受影响)"
   echo
   info "Xboard 部署完成 (请截图或记下下面的信息)"
   echo "  后台地址: $scheme://$domain/$secure"
