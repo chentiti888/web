@@ -19,7 +19,7 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="2.11.2"
+WSM_VER="2.11.4"
 # CHANGELOG-BEGIN  (更新时会显示比当前版本新的条目, 新的写在最上面)
 # v2.11.2 修复: 从旧版本更新后防 CC 规则没有自动升级 (空 User-Agent 仍被拦截)
 # v2.11.1 防 CC 不再拦截空 User-Agent (只有 [严格] 才拦), 避免误伤机器人探针/回调; 每个站点可设 [放行路径]; 拦截记录显示原因/路径/程序名并可一键放行; 开启防 CC 前提示可能误伤哪些访问; 部署 Xboard 不再默认开防 CC
@@ -3030,8 +3030,12 @@ install_nodejs() {
   local v
   pkg_refresh
   if [[ $PM == apt ]]; then
-    choose v "选择 Node.js 版本 (以 NodeSource 实际提供为准):" \
-      "24 (LTS, 推荐)" "22 (LTS 维护期)" "系统自带版本 (最稳, 但版本较旧)" || return 1
+    if [[ ${WSM_NODE_VER:-} =~ ^[0-9]+$ ]]; then v="$WSM_NODE_VER (还原)"      # 全量还原: 和旧服务器同一个大版本
+    elif [[ ${WSM_NODE_VER:-} == sys ]]; then v="系统自带"
+    else
+      choose v "选择 Node.js 版本 (以 NodeSource 实际提供为准):" \
+        "24 (LTS, 推荐)" "22 (LTS 维护期)" "系统自带版本 (最稳, 但版本较旧)" || return 1
+    fi
     if [[ $v == 系统* ]]; then
       pkg_install nodejs npm || return 1
     else
@@ -4499,6 +4503,8 @@ fb_bots_backup() {  # fb_bots_backup 暂存目录 : 每个机器人一个子目�
       (( $? > 1 )) && { err "打包机器人 $u 失败"; return 1; }
     fi
     [[ -n $wd && -f $wd/requirements.txt ]] && cp -f "$wd/requirements.txt" "$st/bots/$u/requirements.txt"
+    fb_bot_syspkgs "$wd" > "$st/bots/$u/sys-packages.txt"
+    [[ -s $st/bots/$u/sys-packages.txt ]] || rm -f "$st/bots/$u/sys-packages.txt"
     {
       printf 'BOT_UNIT=%q\n' "$u"
       printf 'BOT_DIR=%q\n' "$wd"
@@ -4549,6 +4555,21 @@ fb_bot_restore() {  # fb_bot_restore 备份里的机器人目录
   systemctl daemon-reload
   systemctl enable "$BOT_UNIT" >/dev/null 2>&1
   command -v python3 >/dev/null 2>&1 || pkg_install python3 >/dev/null 2>&1
+  if [[ -s $d/sys-packages.txt ]]; then
+    local p miss=() fails=""
+    while read -r p; do
+      [[ $p =~ ^[A-Za-z0-9][A-Za-z0-9_.+-]*$ ]] || continue
+      if command -v dpkg >/dev/null 2>&1; then dpkg -s "$p" >/dev/null 2>&1 && continue
+      else rpm -q "$p" >/dev/null 2>&1 && continue; fi
+      miss+=("$p")
+    done < "$d/sys-packages.txt"
+    if ((${#miss[@]})); then
+      info "  安装机器人用到的系统工具: ${miss[*]}"
+      pkg_refresh >/dev/null 2>&1
+      pkg_install "${miss[@]}" >/dev/null 2>&1 || for p in "${miss[@]}"; do pkg_install "$p" >/dev/null 2>&1 || fails+=" $p"; done
+      [[ -z $fails ]] || warn "  这些系统工具没装上 (新系统可能换了包名):$fails"
+    fi
+  fi
   req=$d/requirements.txt; [[ -s $req ]] || req=${d%/*}/pip-packages.txt
   if [[ -s $req ]]; then
     info "  安装 Python 依赖 (装到系统 Python, 不影响网站) ..."
@@ -4568,6 +4589,189 @@ fb_bot_restore() {  # fb_bot_restore 备份里的机器人目录
   else
     echo "  已设好开机自启但没有启动。停掉旧服务器的之后执行: systemctl start $BOT_UNIT"
   fi
+}
+
+# ---------------- 运行环境清单 (还原到新服务器时自动装好, 不用手动配环境)
+fb_soft_list() {  # wsm 软件商店里已安装的软件 (Nginx/phpMyAdmin 另外处理)
+  local a out=""
+  for a in "${APP_IDS[@]}"; do
+    case $a in webbase|phpmyadmin) continue ;; esac
+    app_installed "$a" && out+="$a "
+  done
+  echo "${out% }"
+}
+
+fb_node_ver() {  # Node.js 大版本; 用系统自带包装的输出 sys
+  command -v node >/dev/null 2>&1 || return 0
+  if [[ -f /etc/apt/sources.list.d/nodesource.list ]] || grep -qs nodesource /etc/yum.repos.d/*.repo; then
+    node -v 2>/dev/null | sed 's/^v\([0-9]*\).*/\1/'
+  else echo sys; fi
+}
+
+fb_php_exts() {  # 每个 PHP 版本已加载的扩展: "版本 扩展" 一行一个
+  local v b
+  for v in $(php_installed); do
+    b=$(php_bin "$v"); command -v "$b" >/dev/null 2>&1 || continue
+    "$b" -m 2>/dev/null | awk -v v="$v" 'NF && $0 !~ /^\[/ {n=tolower($0); if (n=="zend opcache") n="opcache"; print v, n}'
+  done
+}
+
+php_ext_pkg() {  # php -m 里的扩展名 -> 软件包里的扩展名 (空 = 跟着基础包/核心自带)
+  case $1 in
+    mysqli|mysqlnd|pdo_mysql) echo mysql ;;
+    pgsql|pdo_pgsql) echo pgsql ;;
+    sqlite3|pdo_sqlite) echo sqlite3 ;;
+    dom|simplexml|xmlreader|xmlwriter|xml|libxml|xsl) [[ $1 == xsl ]] && echo xsl || echo xml ;;
+    core|date|filter|hash|json|pcre|random|reflection|session|spl|standard|zlib|openssl|ctype|fileinfo|tokenizer| \
+    iconv|phar|posix|sockets|calendar|exif|ftp|gettext|shmop|sysvmsg|sysvsem|sysvshm|pdo|readline|sodium|ffi|cgi-fcgi) ;;
+    *) echo "$1" ;;
+  esac
+}
+
+fb_php_exts_restore() {  # fb_php_exts_restore 清单文件 : 补装新服务器上缺少的 PHP 扩展
+  local f=$1 v e pkg b miss fails=""
+  [[ -s $f ]] || return 0
+  for v in $(awk '{print $1}' "$f" | sort -u); do
+    php_installed | grep -qx "$v" || continue
+    b=$(php_bin "$v")
+    miss=()
+    while read -r e; do
+      "$b" -m 2>/dev/null | awk '{print tolower($0)}' | grep -qx "$e" && continue
+      [[ $e == opcache ]] && "$b" -m 2>/dev/null | grep -qi 'zend opcache' && continue
+      pkg=$(php_ext_pkg "$e"); [[ -n $pkg ]] || continue
+      "$b" -m 2>/dev/null | grep -qix "$pkg" && continue                 # 同一个包里的别的扩展已经有了
+      [[ $pkg == mysql ]] && "$b" -m 2>/dev/null | grep -qix mysqli && continue
+      [[ " ${miss[*]} " == *" $pkg "* ]] || miss+=("$pkg")
+    done < <(awk -v v="$v" '$1==v {print $2}' "$f")
+    ((${#miss[@]})) || continue
+    info "  PHP $v 补装扩展: ${miss[*]}"
+    php_exts_ensure "$v" "${miss[@]}"
+    for e in "${miss[@]}"; do
+      "$b" -m 2>/dev/null | awk '{print tolower($0)}' | grep -qx "$e" || \
+        { [[ $e == mysql ]] && "$b" -m 2>/dev/null | grep -qix mysqli; } || fails+=" $v/$e"
+    done
+  done
+  [[ -z $fails ]] || warn "  这些 PHP 扩展没装上 (可到 软件管理 → PHP 扩展 手动安装):$fails"
+  return 0
+}
+
+fb_soft_restore() {  # fb_soft_restore "软件..." Node大版本 : 补装旧服务器上有、本机没有的软件
+  local a fails=""
+  for a in $1; do
+    app_valid "$a" 2>/dev/null || continue
+    app_installed "$a" && continue
+    info "  安装 $(app_name "$a" 2>/dev/null || echo "$a") ..."
+    if [[ $a == nodejs ]]; then
+      ( WSM_NODE_VER=${2:-24} app_install nodejs ) >/dev/null 2>&1 || ( WSM_NODE_VER=sys app_install nodejs ) >/dev/null 2>&1
+    else
+      ( app_install "$a" ) >/dev/null 2>&1
+    fi
+    app_installed "$a" || fails+=" $a"
+  done
+  [[ -z $fails ]] || warn "  这些软件没装上, 请到 软件管理 里手动安装:$fails"
+  return 0
+}
+
+fb_cmd_list() {  # /usr/local/bin 下自己装的命令 (如 tgbot): shell 脚本、不属于系统软件包、不是 wsm 本身
+  local f
+  for f in /usr/local/bin/*; do
+    [[ -f $f && ! -L $f && $f != "$WSM_BIN" ]] || continue
+    (( $(stat -c %s "$f" 2>/dev/null || echo 9999999) < 1048576 )) || continue
+    head -1 "$f" 2>/dev/null | grep -qE '^#!.*(/|env +)(ba)?sh\b' || continue   # 只要 shell 脚本 (pip 装的 python 命令跟着依赖重装)
+    if command -v dpkg >/dev/null 2>&1; then dpkg -S "$f" >/dev/null 2>&1 && continue
+    elif command -v rpm >/dev/null 2>&1; then rpm -qf "$f" >/dev/null 2>&1 && continue; fi
+    echo "${f#/}"
+  done
+}
+
+fb_cmd_restore() {  # fb_cmd_restore 备份目录 : 还原自定义命令 (本机已有同名的不覆盖)
+  local b=$1 tmp f n=0
+  [[ -f $b/cmds.tar.gz ]] || return 0
+  tmp=$(mktemp -d)
+  tar -xzpf "$b/cmds.tar.gz" -C "$tmp" 2>/dev/null || { rm -rf "$tmp"; return 0; }
+  for f in "$tmp"/usr/local/bin/*; do
+    [[ -f $f ]] || continue
+    [[ -e /usr/local/bin/${f##*/} ]] && continue
+    install -m 755 "$f" "/usr/local/bin/${f##*/}" && n=$((n + 1)) && info "  已还原命令: ${f##*/}"
+  done
+  rm -rf "$tmp"
+  return 0
+}
+
+fb_ssh_restore() {  # fb_ssh_restore 端口 关密码(0|1) : 把旧服务器的 SSH 设置套用到本机
+  local port=${1:-22} nopass=${2:-0} cur
+  [[ $port =~ ^[0-9]+$ ]] || port=22
+  cur=$(ssh_port_now)
+  [[ $port == "$cur" && $nopass == "$(ssh_nopass_now && echo 1 || echo 0)" ]] && return 0
+  [[ $port == 22 && $nopass == 0 ]] && return 0
+  echo
+  info "旧服务器的 SSH 设置: 端口 $port, 密码登录 $([[ $nopass == 1 ]] && echo 关闭 || echo 开启)"
+  echo "  本机现在: 端口 $cur, 密码登录 $(ssh_nopass_now && echo 关闭 || echo 开启)"
+  if [[ $nopass == 1 ]] && (( $(ssh_key_count) == 0 )); then
+    warn "本机没有登录密钥, 先不关闭密码登录"; nopass=0
+  fi
+  [[ $port != 22 ]] && echo "  云服务器有安全组的, 要先在服务商后台放行 TCP $port"
+  confirm "套用到本机?" y || { echo "  已跳过, 之后可在 安全防护 → SSH 安全 里设置"; return 0; }
+  if [[ $port != "$cur" ]] && ss -ltnH "sport = :$port" 2>/dev/null | grep -q .; then
+    warn "端口 $port 已被本机其他程序占用, 保持端口 $cur"; port=$cur
+  fi
+  [[ $port != 22 ]] && ssh_fw_open "$port"
+  ssh_apply "$nopass" "$port" || return 0
+  sleep 1
+  if [[ $port != "$cur" ]] && ! ss -ltnH "sport = :$port" 2>/dev/null | grep -q .; then
+    err "sshd 没有在 $port 上监听, 恢复为 $cur"; ssh_apply "$nopass" "$cur"; return 0
+  fi
+  info "SSH 已套用: 端口 $port$([[ $nopass == 1 ]] && echo ', 只能用密钥登录')"
+  warn "别关当前窗口! 新开一个窗口用端口 $port $([[ $nopass == 1 ]] && echo 和密钥)登录测试"
+  if ! confirm "新窗口登录成功了吗? (选 n 恢复成原来的设置)" n; then
+    ssh_apply 0 "$cur" && info "已恢复: 端口 $cur, 密码登录开启"
+  fi
+  return 0
+}
+
+fb_bot_syspkgs() {  # fb_bot_syspkgs 程序目录 : 机器人代码里调用的系统命令 -> 所属软件包名 (一行一个)
+  local wd=$1 c p real pkg
+  [[ -n $wd && -d $wd ]] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  while read -r c; do
+    [[ $c =~ ^[A-Za-z0-9_.+-]+$ ]] || continue
+    case $c in python|python3|sh|bash|env|sudo|systemctl|journalctl|kill|echo|true|false) continue ;; esac
+    p=$(command -v "$c" 2>/dev/null) || continue
+    [[ $p == /* ]] || continue
+    real=$(readlink -f "$p")
+    if command -v dpkg >/dev/null 2>&1; then
+      pkg=$(dpkg -S "$real" 2>/dev/null || dpkg -S "$p" 2>/dev/null)
+      pkg=${pkg%%:*}; pkg=${pkg%%,*}
+    else
+      pkg=$(rpm -qf --qf '%{NAME}\n' "$real" 2>/dev/null | head -1)
+    fi
+    [[ -n $pkg && $pkg != *" "* ]] && echo "$pkg"
+  done < <(python3 - "$wd" <<'PY' 2>/dev/null
+import os, re, sys
+root = sys.argv[1]
+pat = [
+    r"""(?:subprocess\.(?:run|Popen|check_output|check_call|call|getoutput|getstatusoutput)|create_subprocess_exec|create_subprocess_shell|shutil\.which|os\.system|os\.popen|os\.exec\w*)\(\s*\[?\s*[fFrR]?["']\s*([A-Za-z0-9_.+-]+)""",
+    r"""\[\s*[fF]?["']([A-Za-z0-9_.+-]+)["']\s*,\s*[fF]?["']-""",
+    r"""\b(?:cmd|command|args|argv)\s*=\s*\[\s*[fF]?["']([A-Za-z0-9_.+-]+)["']""",
+]
+found = set()
+base = root.rstrip(os.sep).count(os.sep)
+for dp, dn, fn in os.walk(root):
+    dn[:] = [d for d in dn if d not in {".git", "__pycache__", "venv", ".venv", "node_modules"}]
+    if dp.count(os.sep) - base >= 5:
+        dn[:] = []
+    for f in fn:
+        if not f.endswith(".py"):
+            continue
+        try:
+            t = open(os.path.join(dp, f), encoding="utf-8", errors="ignore").read()
+        except OSError:
+            continue
+        for p in pat:
+            found.update(re.findall(p, t))
+print("\n".join(sorted(found)))
+PY
+) | sort -u
 }
 
 fb_tar_part() {  # fb_tar_part 输出文件 路径... (相对 /; 没有路径就不生成)
@@ -4631,6 +4835,9 @@ fb_create() {  # fb_create [auto] : 生成全量备份 -> FB_LAST
     done < <(db_names)
     fb_dump_users > "$stage/db/users.sql"
   fi
+  fb_php_exts > "$stage/php-ext.txt"; [[ -s $stage/php-ext.txt ]] || rm -f "$stage/php-ext.txt"
+  local -a cmds=(); mapfile -t cmds < <(fb_cmd_list)
+  fb_tar_part "$stage/cmds.tar.gz" "${cmds[@]}" || true
   {
     printf 'FB_FORMAT=2\n'
     printf 'FB_WSM=%q\n' "$WSM_VER"
@@ -4642,6 +4849,12 @@ fb_create() {  # fb_create [auto] : 生成全量备份 -> FB_LAST
     printf 'FB_DBS=%q\n' "$(find "$stage/db" -name '*.sql.gz' 2>/dev/null | sed 's|.*/||; s|\.sql\.gz$||' | sort | tr '\n' ' ')"
     printf 'FB_EXTRAS=%q\n' "$(printf '/%s ' "${extra[@]}" | sed 's|^/ $||')"
     printf 'FB_BOTS=%q\n' "${bots% }"
+    printf 'FB_SOFT=%q\n' "$(fb_soft_list)"
+    printf 'FB_NODE=%q\n' "$(fb_node_ver)"
+    printf 'FB_CFW=%q\n' "$( { cfw_active || [[ -f $CFW_UNIT ]]; } && echo 1 || echo 0)"
+    printf 'FB_SSH_PORT=%q\n' "$(ssh_port_now 2>/dev/null)"
+    printf 'FB_SSH_NOPASS=%q\n' "$(ssh_nopass_now 2>/dev/null && echo 1 || echo 0)"
+    printf 'FB_CMDS=%q\n' "$(printf '%s ' "${cmds[@]##*/}" | sed 's/ $//')"
   } > "$stage/manifest.env"
   name="wsm-full-${host}-${ts}.tar"
   if ! tar -cf "$FB_DIR/$name" -C "$stage" .; then rm -rf "$stage" "${FB_DIR:?}/$name"; err "生成备份文件失败"; return 1; fi
@@ -5176,7 +5389,7 @@ fb_restore() {  # fb_restore [备份文件]
   tar -xf "$tarf" -C "$stage/b" 2>/dev/null || { rm -rf "$stage"; err "备份文件损坏或格式不对"; return 1; }
   [[ -f $stage/b/manifest.env ]] || { rm -rf "$stage"; err "这不是 wsm 全量备份"; return 1; }
   # shellcheck disable=SC2034  # 这些变量由 manifest.env 赋值
-  local FB_FORMAT="" FB_WSM="" FB_DATE="" FB_HOST="" FB_PHP="" FB_REDIS=0 FB_SITES="" FB_DBS="" FB_EXTRAS="" FB_BOTS=""
+  local FB_FORMAT="" FB_WSM="" FB_DATE="" FB_HOST="" FB_PHP="" FB_REDIS=0 FB_SITES="" FB_DBS="" FB_EXTRAS="" FB_BOTS="" FB_SOFT="" FB_NODE="" FB_CFW=0 FB_SSH_PORT="" FB_SSH_NOPASS=0 FB_CMDS=""
   # shellcheck disable=SC1091
   source "$stage/b/manifest.env"
   if [[ ${FB_FORMAT:-1} == 1 ]]; then
@@ -5187,7 +5400,9 @@ fb_restore() {  # fb_restore [备份文件]
   echo "  备份时间: $FB_DATE   来自: $FB_HOST (wsm v$FB_WSM)"
   echo "  网站:     ${FB_SITES:-无}"
   echo "  数据库:   ${FB_DBS:-无}"
-  echo "  PHP:      ${FB_PHP:-无}"
+  echo "  PHP:      ${FB_PHP:-无}$([[ -f $stage/b/php-ext.txt ]] && echo "  (扩展 $(awk '{print $2}' "$stage/b/php-ext.txt" | sort -u | grep -c .) 个, 缺的自动补装)")"
+  [[ -n $FB_SOFT ]] && echo "  软件:     $FB_SOFT  (本机没有的自动安装)"
+  [[ -n $FB_CMDS ]] && echo "  命令:     $FB_CMDS"
   echo "  机器人:   ${bots[*]:-无}"
   [[ -n ${FB_EXTRAS// /} ]] && echo "  额外内容: $FB_EXTRAS"
   echo
@@ -5212,8 +5427,10 @@ fb_restore() {  # fb_restore [备份文件]
     info "检查并安装运行环境 ..."
     command -v nginx >/dev/null 2>&1 || install_base
     for v in $FB_PHP; do php_installed | grep -qx "$v" || install_php "$v"; done
+    fb_php_exts_restore "$stage/b/php-ext.txt"
     if [[ -n $FB_DBS ]] && ! command -v mysql >/dev/null 2>&1; then install_db; fi
     if [[ $FB_REDIS == 1 ]] && ! unit_exists redis-server && ! unit_exists redis; then install_redis; fi
+    fb_soft_restore "$FB_SOFT" "$FB_NODE"
 
     for u in $(apps_units); do systemctl stop "$u" >/dev/null 2>&1; done
     info "还原网站和配置文件 ..."
@@ -5255,6 +5472,7 @@ fb_restore() {  # fb_restore [备份文件]
 
     systemctl daemon-reload
     apps_load; apps_migrate_once   # 模块随 /etc/wsm 一起还原; 老版本的备份没有模块, 自动从仓库找回
+    apps_hook restore              # 模块自己还需要补的环境 (可选钩子)
     for u in $(apps_units); do unit_exists "$u" && systemctl enable --now "$u" >/dev/null 2>&1; done
     for u in $FB_EXTRAS; do
       [[ $u == /etc/systemd/system/*.service && -f $u ]] && systemctl enable --now "${u##*/}" >/dev/null 2>&1
@@ -5272,6 +5490,13 @@ fb_restore() {  # fb_restore [备份文件]
   if ((do_bots)); then
     for b in "${pick[@]}"; do fb_bot_restore "$stage/b/bots/$b" || bad=$((bad + 1)); done
   fi
+  fb_cmd_restore "$stage/b"
+  if ((do_site)) && [[ $FB_CFW == 1 ]] && ! cfw_active; then
+    echo
+    info "旧服务器开着源站保护 (只让 CDN 访问 80/443), 现在为本机开启:"
+    cfw_enable
+  fi
+  ((do_site)) && [[ -n $FB_SSH_PORT ]] && fb_ssh_restore "$FB_SSH_PORT" "$FB_SSH_NOPASS"
   rm -rf "$stage"
 
   echo
@@ -5281,7 +5506,7 @@ fb_restore() {  # fb_restore [备份文件]
     echo "  接下来:"
     echo "   - 把域名解析改到本机 IP: $(public_ip_cached)"
     echo "   - 定时备份、Telegram 告警、异地目标已跟着还原, 本机会照常执行"
-    echo "   - 源站保护需要在本机重新开一次 (安全防护 → 1)"
+    [[ $FB_CFW == 1 ]] && ! cfw_active && echo "   - 源站保护没有开启, 需要时到 安全防护 → 1 开启"
     echo "   - 旧服务器不用了的话, 记得关掉它的定时备份, 免得两台一起往网盘传"
   fi
   if ((do_bots)); then
@@ -5300,7 +5525,7 @@ fb_menu() {
     fb_load
     last=$(ls -1t "$FB_DIR"/wsm-full-*.tar* 2>/dev/null | head -1)
     title "全量备份 / 搬家"
-    echo "  最近备份: ${last:+$(basename "$last") ($(du -h "$last" | cut -f1))}${last:-无}"
+    if [[ -n $last ]]; then echo "  最近备份: $(basename "$last") ($(du -h "$last" | cut -f1))"; else echo "  最近备份: 无"; fi
     echo "  定时备份: $(grep -q backup-all "$FB_CRON" 2>/dev/null && echo "${G}已开启${N}" || echo 未开启)"
     echo "  异地目标: ${FB_TARGETS:-无 (只存本机)}"
     echo "  加密:     $([[ -n $FB_PASS ]] && echo 已开启 || echo 未开启)"
