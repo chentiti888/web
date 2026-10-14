@@ -6,7 +6,7 @@
 #        访问密码, 防盗链, IP 黑白名单, Gzip, 静态缓存, 停用/启用, 日志分析,
 #        防篡改(文件锁定 + 可写目录禁PHP + 完整性基线检测/自动还原)
 #        网站应用模块(Xboard、WordPress 等, 随时添加删除), 访问统计(PV/IP/流量/TOP/蜘蛛), 在线更新(Git 仓库)
-#        全量备份/一键搬家/异地备份, Telegram 告警, SSH 密钥登录, 源站保护
+#        全量备份(网站/数据库/机器人分开)/一键搬家/异地备份, Telegram 告警, SSH 密钥登录, 源站保护(多 CDN)
 #  证书: Let's Encrypt(HTTP) / 通配符(Cloudflare DNS) / 自有证书 / 自签名, 自动续期
 #  PHP : 7.4-8.4 多版本共存, 扩展, 参数, 禁用函数, FPM 进程数
 #  其他: MariaDB + phpMyAdmin, Redis, Composer, 备份/还原, 计划任务, 服务管理,
@@ -19,8 +19,9 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="2.10.1"
+WSM_VER="2.11"
 # CHANGELOG-BEGIN  (更新时会显示比当前版本新的条目, 新的写在最上面)
+# v2.11 全量备份分开打包 (系统/网站/数据库/额外/机器人), 还原可选 全部/只网站/只机器人; Python 机器人自动识别并单独备份, 还原时自动装依赖、确认旧服务器已停才启动; root 定时任务一起备份; CDN 真实IP 可开关, 支持添加其他 CDN (IP 段 + 请求头, 源站保护同步放行); 安全防护里新增 [防 CC / 恶意 bot] 一览; 菜单默认 Nerd 图标, 去掉图标设置和多余说明
 # v2.10.1 每个扩展程序菜单里都有 [卸载]: 一次清理站点、证书、服务、定时任务、程序文件, 数据库和用户数据单独确认; 普通删除站点也会询问是否删除对应数据库
 # v2.10 新增扩展程序: Typecho / Nextcloud / 哪吒监控 / Uptime Kuma / OpenList; 部署时自动检测最新版本, 各程序菜单里可检查更新并升级 (含 Xboard 仓库新提交)
 # v2.9.1 3x-ui 也改为模块 (独立软件类); 程序下载里第三方程序统一放在 [扩展程序], 可随时添加删除
@@ -115,28 +116,18 @@ tz_suggest() {  # 时区是 UTC 时建议改成北京时间 (安装环境时调�
   return 0
 }
 
-# ---------------- 菜单图标风格: plain = 普通符号 (任何终端都能显示), nerd = Nerd 字体图标 (终端需用 Nerd 字体)
+# ---------------- 菜单图标: 默认 Nerd 字体图标; 终端没有 Nerd 字体显示成方框时, 用 wsm icons plain 换成普通符号
 UI_CONF=$WSM_DIR/ui.conf
-ICON_STYLE=plain
+ICON_STYLE=nerd
 declare -A ICO_PLAIN=([web]="⌂" [ssl]="◈" [php]="◇" [db]="▤" [bak]="⇅" [sys]="◎" [app]="⇩" [sec]="◆" [upd]="↻" [exit]="×" [c_panel]="▣" [c_web]="◫" [c_dev]="❯" [c_tool]="▥")
 declare -A ICO_NERD=([web]="" [ssl]="" [php]="" [db]="" [bak]="" [sys]="" [app]="" [sec]="" [upd]="" [exit]="" [c_panel]="" [c_web]="" [c_dev]="" [c_tool]="")
-ui_load() { ICON_STYLE=plain; [[ -f $UI_CONF ]] && source "$UI_CONF"; [[ $ICON_STYLE == nerd ]] || ICON_STYLE=plain; return 0; }
+ui_load() { ICON_STYLE=nerd; [[ -f $UI_CONF ]] && source "$UI_CONF"; [[ $ICON_STYLE == plain ]] || ICON_STYLE=nerd; return 0; }
 ico() { if [[ $ICON_STYLE == nerd ]]; then printf '%s' "${ICO_NERD[$1]:-}"; else printf '%s' "${ICO_PLAIN[$1]:-}"; fi; }
 ui_icon_set() {  # ui_icon_set plain|nerd
   [[ $1 == nerd || $1 == plain ]] || { err "只能是 nerd 或 plain"; return 1; }
   mkdir -p "$WSM_DIR"; printf 'ICON_STYLE=%s\n' "$1" > "$UI_CONF"; ICON_STYLE=$1
   info "菜单图标: $([[ $1 == nerd ]] && echo "Nerd 字体图标" || echo "普通符号")"
 }
-ui_icon_menu() {
-  local c
-  ui_load
-  echo "  当前: $([[ $ICON_STYLE == nerd ]] && echo "Nerd 字体图标" || echo "普通符号")"
-  echo "  Nerd 图标更清晰, 但终端必须用 Nerd 字体 (如 JetBrains Mono Nerd),"
-  echo "  否则会显示成方框。没把握就用普通符号。"
-  choose c "选择:" "Nerd 字体图标" "普通符号" || return 0
-  if [[ $c == Nerd* ]]; then ui_icon_set nerd; else ui_icon_set plain; fi
-}
-
 # mi 序号 图标 名称 说明 : 主菜单一行
 # 用"跳到第 N 列"控制码定位, 图标在不同终端显示 1 格还是 2 格都不影响对齐
 mi() { printf ' %2s) %s\e[8G%s\e[20G%s\n' "$1" "$2" "$3" "${4:-}"; }
@@ -1899,6 +1890,52 @@ guard_menu() {  # guard_menu 域名
         ;;
       查看拦截记录) guard_log "$d"; pause ;;
       *) return 0 ;;
+    esac
+  done
+}
+
+guard_sites() {  # 能开防护的站点 (重定向站点不需要)
+  local d
+  while read -r d; do
+    [[ -n $d ]] || continue
+    [[ $( load_meta "$d" 2>/dev/null; echo "$TYPE" ) == redirect ]] || echo "$d"
+  done < <(list_site_names)
+}
+
+guard_summary() {
+  local n=0 t=0 d
+  while read -r d; do
+    [[ -n $d ]] || continue
+    t=$((t + 1))
+    [[ $( load_meta "$d" 2>/dev/null; echo "${GUARD:-0}" ) == 1 ]] && n=$((n + 1))
+  done < <(guard_sites)
+  ((t)) || { echo "没有站点"; return 0; }
+  if ((n)); then echo "${G}$n${N}/$t 个站点已开启"; else echo "0/$t 个站点已开启"; fi
+}
+
+guard_overview() {  # 安全防护 → 防 CC / 恶意 bot: 所有站点一览
+  local c d st
+  local -a sites=() opts=()
+  while true; do
+    mapfile -t sites < <(guard_sites)
+    title "防 CC / 恶意 bot"
+    echo "  拦截扫描器/攻击工具/高频采集爬虫、敏感文件探测, 并限制单个 IP 的请求速度"
+    echo "  按站点开关; 正常搜索引擎、静态文件和模块声明的接口不受影响"
+    echo
+    ((${#sites[@]})) || { warn "还没有站点"; pause; return 0; }
+    opts=()
+    for d in "${sites[@]}"; do
+      st=$( load_meta "$d" 2>/dev/null; if [[ ${GUARD:-0} == 1 ]]; then echo "${G}已开启${N} ($(guard_level_name "${GUARD_LEVEL:-2}"))"; else echo "未开启"; fi )
+      printf '   %-30s %s\n' "$d" "$st"
+      opts+=("$d")
+    done
+    opts+=("全部开启" "全部关闭" "返回")
+    choose c "选择站点进入设置, 或批量操作:" "${opts[@]}" || return 0
+    case $c in
+      全部开启) for d in "${sites[@]}"; do (guard_set "$d" on); done; pause ;;
+      全部关闭) confirm "关闭所有站点的防护?" n && for d in "${sites[@]}"; do (guard_set "$d" off); done; pause ;;
+      返回) return 0 ;;
+      *) (guard_menu "$c") ;;
     esac
   done
 }
@@ -4189,7 +4226,8 @@ tg_menu() {
 }
 
 # ================================================================ 全量备份 / 搬家 / 异地备份
-# 一个备份文件 = 全部网站 + 全部数据库(含账号) + 证书 + Nginx/wsm 配置(含网站应用模块) + 模块的后台服务 + 你指定的额外目录
+# 一个备份文件, 里面分开放: 系统配置 (wsm/Nginx/证书/定时任务) | 网站 (含模块程序) | 数据库 | 额外目录 | 机器人 (每个单独一份)
+# 还原时可以选: 全部 / 只还原网站+数据库+系统 / 只还原机器人
 # 可加密; 可定时; 可自动上传到谷歌网盘 / 其他服务器 (rclone); 新服务器上一条命令还原 (搬家)
 FB_DIR=$BACKUP_DIR/full
 FB_CONF=$WSM_DIR/fullbak.conf
@@ -4219,23 +4257,30 @@ fb_save() {
 
 fb_host() { local h; h=$(hostname -s 2>/dev/null); h=${h//[^A-Za-z0-9-]/_}; echo "${h:-server}"; }
 
-fb_extra_list() {  # 额外备份路径 (存在的才输出)
+fb_extra_list() {  # 额外备份路径 (存在的才输出; 已经按机器人自动备份的不重复)
   [[ -f $FB_EXTRA ]] || return 0
-  local p
+  local p b skip
+  local -a bp=()
+  mapfile -t bp < <(fb_bot_paths)
   while IFS= read -r p; do
-    [[ $p == /* && -e $p ]] && echo "$p"
+    [[ $p == /* && -e $p ]] || continue
+    skip=0
+    for b in "${bp[@]}"; do [[ -n $b && ( $p == "$b" || $p == "$b"/* ) ]] && { skip=1; break; }; done
+    ((skip)) || echo "$p"
   done < "$FB_EXTRA"
   return 0
 }
 
-fb_extra_detect() {  # 自动发现: 自定义 systemd 服务 + 它们的程序目录/配置, /root 下的 json/env
-  local f wd ef au
+fb_extra_detect() {  # 自动发现 (非 Python 机器人的) 自定义 systemd 服务 + 它们的程序目录/配置, /root 下的 json/env
+  local f wd ef au bots
   au=" $(apps_units | tr '\n' ' ') "
+  bots=" $(fb_bots | cut -d'|' -f1 | tr '\n' ' ') "
   {
     for f in /etc/systemd/system/*.service; do
       [[ -f $f && ! -L $f ]] || continue
       case ${f##*/} in wsm-*) continue ;; esac
-      wd=${f##*/}; [[ $au == *" ${wd%.service} "* ]] && continue
+      wd=${f##*/}; wd=${wd%.service}
+      [[ $au == *" $wd "* || $bots == *" $wd "* ]] && continue
       command -v dpkg >/dev/null 2>&1 && dpkg -S "$f" >/dev/null 2>&1 && continue
       echo "$f"
       wd=$(sed -n 's/^WorkingDirectory=-\{0,1\}//p' "$f" | head -1)
@@ -4244,7 +4289,174 @@ fb_extra_detect() {  # 自动发现: 自定义 systemd 服务 + 它们的程序�
       [[ -n $ef && -f $ef && ( -z $wd || $ef != "$wd"/* ) ]] && echo "$ef"
     done
     for f in /root/*.json /root/*.env; do [[ -f $f ]] && echo "$f"; done
-  } | sort -u
+  } | sort -u | grep -vxF -f <(fb_bot_paths; echo /nonexistent)
+}
+
+# ---------------- 机器人 (Python 写的自定义 systemd 服务, 如 Telegram 机器人)
+# 每个机器人单独打包: 程序目录 + .service + 环境变量文件 + 依赖清单; 还原时可以只还原机器人, 和网站互不干扰
+fb_bots() {  # 输出: 服务名|程序目录|环境变量文件  (程序目录为空 = 只有单个脚本)
+  local f u wd ex sc ef au
+  au=" $(apps_units | tr '\n' ' ') "
+  for f in /etc/systemd/system/*.service; do
+    [[ -f $f && ! -L $f ]] || continue
+    u=${f##*/}; u=${u%.service}
+    case $u in wsm-*) continue ;; esac
+    [[ $au == *" $u "* ]] && continue
+    command -v dpkg >/dev/null 2>&1 && dpkg -S "$f" >/dev/null 2>&1 && continue
+    ex=$(sed -n 's/^ExecStart=[-@+!]*//p' "$f" | head -1)
+    [[ $ex == *python* ]] || continue
+    wd=$(sed -n 's/^WorkingDirectory=-\{0,1\}//p' "$f" | head -1)
+    if [[ -z $wd ]]; then  # 没写工作目录: 用脚本所在目录
+      sc=$(printf '%s\n' "$ex" | tr ' ' '\n' | grep -m1 '\.py$')
+      [[ $sc == /* ]] && wd=${sc%/*}
+    fi
+    case $wd in /|/root|/home|/usr*|/etc*|/var|/opt|"") wd="" ;; esac
+    [[ -n $wd && ! -d $wd ]] && wd=""
+    ef=$(sed -n 's/^EnvironmentFile=-\{0,1\}//p' "$f" | head -1)
+    [[ -n $ef && -f $ef ]] || ef=""
+    echo "$u|$wd|$ef"
+  done
+  return 0
+}
+
+fb_bots_desc() {  # okbot (/root/mybot), ...
+  local u wd ef out=""
+  while IFS='|' read -r u wd ef; do [[ -n $u ]] && out+="${out:+, }$u${wd:+ ($wd)}"; done < <(fb_bots)
+  echo "${out:-无}"
+}
+
+fb_bot_paths() {  # 机器人占用的全部路径 (给额外备份去重用)
+  local u wd ef
+  while IFS='|' read -r u wd ef; do
+    [[ -n $u ]] || continue
+    echo "/etc/systemd/system/$u.service"
+    [[ -n $wd ]] && echo "$wd"
+    [[ -n $ef ]] && echo "$ef"
+  done < <(fb_bots)
+}
+
+fb_pip_freeze() {  # 本机用 pip 装到系统 Python 的顶层包 (不含系统自带的、不含被依赖的)
+  command -v python3 >/dev/null 2>&1 || return 0
+  python3 - <<'PY' 2>/dev/null
+import re
+try:
+    import importlib.metadata as m
+except ImportError:
+    raise SystemExit
+dists = []
+for d in m.distributions():
+    try:
+        loc = str(d.locate_file(""))
+    except Exception:
+        continue
+    if loc.startswith("/usr/local") and d.metadata.get("Name"):
+        dists.append(d)
+norm = lambda s: re.sub(r"[-_.]+", "-", s).lower()
+req = set()
+for d in dists:
+    for r in (d.requires or []):
+        if "extra ==" in r:
+            continue
+        req.add(norm(re.split(r"[ ;<>=!~\[(]", r, 1)[0]))
+for d in sorted(dists, key=lambda x: norm(x.metadata["Name"])):
+    if norm(d.metadata["Name"]) not in req:
+        print(f'{d.metadata["Name"]}=={d.version}')
+PY
+}
+
+fb_bots_backup() {  # fb_bots_backup 暂存目录 : 每个机器人一个子目录
+  local st=$1 u wd ef n=0
+  local -a paths=()
+  while IFS='|' read -r u wd ef; do
+    [[ -n $u ]] || continue
+    mkdir -p "$st/bots/$u"
+    cp -f "/etc/systemd/system/$u.service" "$st/bots/$u/$u.service"
+    paths=()
+    [[ -n $wd ]] && paths+=("${wd#/}")
+    [[ -n $ef && ( -z $wd || $ef != "$wd"/* ) ]] && paths+=("${ef#/}")
+    if ((${#paths[@]})); then
+      tar -czpf "$st/bots/$u/files.tar.gz" -C / --ignore-failed-read --warning=no-file-changed \
+        --exclude='__pycache__' --exclude='*.pyc' --exclude='*.log' "${paths[@]}" 2>/dev/null
+      (( $? > 1 )) && { err "打包机器人 $u 失败"; return 1; }
+    fi
+    [[ -n $wd && -f $wd/requirements.txt ]] && cp -f "$wd/requirements.txt" "$st/bots/$u/requirements.txt"
+    {
+      printf 'BOT_UNIT=%q\n' "$u"
+      printf 'BOT_DIR=%q\n' "$wd"
+      printf 'BOT_ENV=%q\n' "$ef"
+      printf 'BOT_PY=%q\n' "$(python3 -V 2>&1 | awk '{print $2}')"
+      printf 'BOT_ACTIVE=%q\n' "$(systemctl is-active "$u" 2>/dev/null)"
+    } > "$st/bots/$u/info.env"
+    n=$((n + 1))
+  done < <(fb_bots)
+  ((n)) && fb_pip_freeze > "$st/bots/pip-packages.txt"
+  return 0
+}
+
+fb_pip_install() {  # fb_pip_install 依赖清单文件 : 装到系统 Python (只装不删)
+  local f=$1 flag="" out
+  [[ -s $f ]] || return 0
+  command -v pip3 >/dev/null 2>&1 || pkg_install python3-pip >/dev/null 2>&1 || { warn "pip 安装失败, 依赖没装"; return 1; }
+  pip3 install --help 2>/dev/null | grep -q -- --break-system-packages && flag=--break-system-packages
+  out=$(pip3 install $flag --disable-pip-version-check -q -r "$f" 2>&1) && return 0
+  # 整体失败 (常见: 某个版本没有适合新 Python 的安装包) -> 逐个装, 装不上的换最新版
+  local line pkg fails=""
+  while read -r line; do
+    [[ -n $line && $line != \#* ]] || continue
+    pip3 install $flag --disable-pip-version-check -q "$line" >/dev/null 2>&1 && continue
+    pkg=${line%%[=<>!~ ;]*}
+    if pip3 install $flag --disable-pip-version-check -q "$pkg" >/dev/null 2>&1; then
+      warn "  $line 装不上, 已改装最新版 $pkg"
+    else fails+=" $pkg"; fi
+  done < "$f"
+  [[ -z $fails ]] || { warn "  这些依赖没装上:$fails"; return 1; }
+}
+
+fb_bot_restore() {  # fb_bot_restore 备份里的机器人目录
+  # shellcheck disable=SC2034  # BOT_ENV / BOT_ACTIVE 来自 info.env, 留着给以后用
+  local d=$1 BOT_UNIT="" BOT_DIR="" BOT_ENV="" BOT_PY="" BOT_ACTIVE="" req
+  # shellcheck disable=SC1091
+  source "$d/info.env"
+  [[ $BOT_UNIT =~ ^[A-Za-z0-9_.@-]+$ ]] || { err "机器人信息异常"; return 1; }
+  echo
+  info "还原机器人 $BOT_UNIT (${BOT_DIR:-单个脚本}) ..."
+  if systemctl is-active --quiet "$BOT_UNIT" 2>/dev/null; then
+    warn "本机已有正在运行的 $BOT_UNIT"
+    confirm "停止它并用备份覆盖?" n || return 0
+    systemctl stop "$BOT_UNIT"
+  fi
+  [[ -f $d/files.tar.gz ]] && { tar -xzpf "$d/files.tar.gz" -C / || { err "解压失败"; return 1; }; }
+  install -m 644 "$d/$BOT_UNIT.service" "/etc/systemd/system/$BOT_UNIT.service"
+  systemctl daemon-reload
+  systemctl enable "$BOT_UNIT" >/dev/null 2>&1
+  command -v python3 >/dev/null 2>&1 || pkg_install python3 >/dev/null 2>&1
+  req=$d/requirements.txt; [[ -s $req ]] || req=${d%/*}/pip-packages.txt
+  if [[ -s $req ]]; then
+    info "  安装 Python 依赖 (装到系统 Python, 不影响网站) ..."
+    [[ -n $BOT_PY && $BOT_PY != "$(python3 -V 2>&1 | awk '{print $2}')" ]] && \
+      echo "  旧服务器 Python $BOT_PY, 本机 $(python3 -V 2>&1 | awk '{print $2}'), 版本不同时个别依赖可能要换版本"
+    fb_pip_install "$req"
+  fi
+  echo "  ${Y}同一个机器人 (同一个 Token) 不能两台服务器同时运行, 否则两边都收不到消息${N}"
+  if confirm "旧服务器上的 $BOT_UNIT 已经停了? 现在启动本机的" n; then
+    systemctl restart "$BOT_UNIT"; sleep 5
+    if systemctl is-active --quiet "$BOT_UNIT"; then info "  $BOT_UNIT 已启动, 运行正常 (开机自启)"
+    else
+      err "  $BOT_UNIT 没有跑起来, 最近日志:"
+      journalctl -u "$BOT_UNIT" -n 15 --no-pager 2>/dev/null | sed 's/^/    /'
+      echo "  常见原因: 缺依赖 (pip3 install 包名 --break-system-packages 后 systemctl restart $BOT_UNIT)"
+    fi
+  else
+    echo "  已设好开机自启但没有启动。停掉旧服务器的之后执行: systemctl start $BOT_UNIT"
+  fi
+}
+
+fb_tar_part() {  # fb_tar_part 输出文件 路径... (相对 /; 没有路径就不生成)
+  local out=$1; shift
+  (($#)) || return 0
+  tar -czpf "$out" -C / --ignore-failed-read --warning=no-file-changed \
+    --exclude='storage/logs/*.log' --exclude="${FB_DIR#/}" "$@" 2>/dev/null
+  (( $? <= 1 ))
 }
 
 fb_dump_users() {  # 导出数据库账号和权限 (MariaDB 10.2+)
@@ -4257,19 +4469,24 @@ fb_dump_users() {  # 导出数据库账号和权限 (MariaDB 10.2+)
 }
 
 fb_create() {  # fb_create [auto] : 生成全量备份 -> FB_LAST
+  # 包里分开放: system / sites / extra / db / bots/<每个机器人>, 还原时可以分开选
   fb_load
-  local mode=${1:-} ts host name stage p d need avail rc
-  local -a files=()
+  local mode=${1:-} ts host name stage p d need avail rc bots="" u wd ef
+  local -a sys=() sites=() extra=() all=()
   ts=$(date +%Y%m%d_%H%M%S); host=$(fb_host)
   mkdir -p "$FB_DIR"; chmod 700 "$FB_DIR"
-  for p in "$WSM_DIR" "$WWW_ROOT" /etc/letsencrypt "$NGX_CONF" /root/.config/rclone \
-           /etc/cron.d/wsm-* $(apps_hook backup_paths) \
+  for p in "$WSM_DIR" /etc/letsencrypt "$NGX_CONF" /root/.config/rclone /etc/cron.d/wsm-* \
            /etc/php/*/fpm/conf.d/99-wsm.ini /etc/opt/remi/php*/php.d/99-wsm.ini; do
-    [[ -e $p ]] && files+=("${p#/}")
+    [[ -e $p ]] && sys+=("${p#/}")
   done
-  while IFS= read -r p; do files+=("${p#/}"); done < <(fb_extra_list)
-  # 空间检查 (按未压缩大小估算)
-  need=$( (cd / && du -sk "${files[@]}" 2>/dev/null) | awk '{s+=$1} END{print s+0}')
+  for p in "$WWW_ROOT" $(apps_hook backup_paths); do [[ -e $p ]] && sites+=("${p#/}"); done
+  while IFS= read -r p; do extra+=("${p#/}"); done < <(fb_extra_list)
+  while IFS='|' read -r u wd ef; do
+    [[ -n $u ]] || continue
+    bots+="$u "; [[ -n $wd ]] && all+=("${wd#/}")
+  done < <(fb_bots)
+  all+=("${sys[@]}" "${sites[@]}" "${extra[@]}")
+  need=$( (cd / && du -sk "${all[@]}" 2>/dev/null) | awk '{s+=$1} END{print s+0}')
   avail=$(df -Pk "$FB_DIR" | awk 'NR==2{print $4}')
   if (( avail < need / 2 + 102400 )); then
     err "磁盘空间可能不够: 需要约 $((need / 1024))MB, 剩余 $((avail / 1024))MB"
@@ -4277,11 +4494,13 @@ fb_create() {  # fb_create [auto] : 生成全量备份 -> FB_LAST
     confirm "仍然继续?" n || return 1
   fi
   stage=$(mktemp -d "$FB_DIR/.tmp-XXXXXX")
-  info "打包网站和配置 (大约 $((need / 1024))MB, 请稍等) ..."
-  tar -czpf "$stage/files.tar.gz" -C / --ignore-failed-read --warning=no-file-changed \
-      --exclude='storage/logs/*.log' --exclude="${FB_DIR#/}" "${files[@]}" 2>/dev/null
-  rc=$?
-  if (( rc > 1 )); then rm -rf "$stage"; err "打包文件失败"; return 1; fi
+  info "打包 (大约 $((need / 1024))MB, 请稍等) ..."
+  fb_tar_part "$stage/system.tar.gz" "${sys[@]}" && fb_tar_part "$stage/sites.tar.gz" "${sites[@]}" \
+    && fb_tar_part "$stage/extra.tar.gz" "${extra[@]}" || { rm -rf "$stage"; err "打包文件失败"; return 1; }
+  crontab -l -u root 2>/dev/null | grep -v '^[[:space:]]*$' > "$stage/root.crontab"
+  [[ -s $stage/root.crontab ]] || rm -f "$stage/root.crontab"
+  [[ -s $SSH_AK ]] && cp -f "$SSH_AK" "$stage/authorized_keys"
+  fb_bots_backup "$stage" || { rm -rf "$stage"; return 1; }
   if command -v mysql >/dev/null 2>&1 && mysql -e "SELECT 1" >/dev/null 2>&1; then
     info "导出数据库 ..."
     mkdir -p "$stage/db"
@@ -4293,9 +4512,8 @@ fb_create() {  # fb_create [auto] : 生成全量备份 -> FB_LAST
     done < <(db_names)
     fb_dump_users > "$stage/db/users.sql"
   fi
-  [[ -s $SSH_AK ]] && cp -f "$SSH_AK" "$stage/authorized_keys"
   {
-    printf 'FB_FORMAT=1\n'
+    printf 'FB_FORMAT=2\n'
     printf 'FB_WSM=%q\n' "$WSM_VER"
     printf 'FB_DATE=%q\n' "$(date '+%F %T')"
     printf 'FB_HOST=%q\n' "$host"
@@ -4303,7 +4521,8 @@ fb_create() {  # fb_create [auto] : 生成全量备份 -> FB_LAST
     printf 'FB_REDIS=%q\n' "$( { unit_exists redis-server || unit_exists redis; } && echo 1 || echo 0)"
     printf 'FB_SITES=%q\n' "$(list_site_names | tr '\n' ' ')"
     printf 'FB_DBS=%q\n' "$(find "$stage/db" -name '*.sql.gz' 2>/dev/null | sed 's|.*/||; s|\.sql\.gz$||' | sort | tr '\n' ' ')"
-    printf 'FB_EXTRAS=%q\n' "$(fb_extra_list | tr '\n' ' ')"
+    printf 'FB_EXTRAS=%q\n' "$(printf '/%s ' "${extra[@]}" | sed 's|^/ $||')"
+    printf 'FB_BOTS=%q\n' "${bots% }"
   } > "$stage/manifest.env"
   name="wsm-full-${host}-${ts}.tar"
   if ! tar -cf "$FB_DIR/$name" -C "$stage" .; then rm -rf "$stage" "${FB_DIR:?}/$name"; err "生成备份文件失败"; return 1; fi
@@ -4320,6 +4539,7 @@ fb_create() {  # fb_create [auto] : 生成全量备份 -> FB_LAST
   # shellcheck disable=SC2012
   ls -1t "$FB_DIR"/wsm-full-*.tar* 2>/dev/null | tail -n +$((FB_KEEP_LOCAL + 1)) | xargs -r rm -f
   info "全量备份完成: $FB_LAST ($(du -h "$FB_LAST" | cut -f1))"
+  echo "  网站 $(list_site_names | grep -c .) 个 · 数据库 $(db_names 2>/dev/null | grep -c .) 个 · 机器人: ${bots:-无}"
 }
 
 fb_upload() {  # fb_upload 文件 : 上传到全部异地目标, 并清理多余的旧备份; 返回失败个数
@@ -4706,8 +4926,8 @@ fb_extra_menu() {
   while true; do
     mapfile -t cur < <(grep -v '^[[:space:]]*$' "$FB_EXTRA" 2>/dev/null)
     title "额外备份的目录/文件"
-    echo "  (网站、数据库、证书、wsm 配置和网站应用的服务会自动备份, 这里加其他的,"
-    echo "   比如机器人程序目录 /root/mybot、它的 .service 文件)"
+    echo "  (网站、数据库、证书、wsm 配置、扩展程序和 Python 机器人都会自动备份,"
+    echo "   这里只需要加其他的, 比如 Node 写的程序目录、它的 .service 文件)"
     if ((${#cur[@]})); then for p in "${cur[@]}"; do echo "  - $p$([[ -e $p ]] || echo "  ${R}(不存在)${N}")"; done
     else echo "  (无)"; fi
     choose c "操作:" "自动发现" "手动添加" "删除" "返回" || return 0
@@ -4802,14 +5022,16 @@ fb_pick_scp_file() {  # -> PICKED_FILE (从旧服务器直接拉取)
 }
 
 fb_restore() {  # fb_restore [备份文件]
-  local file=${1:-} src tarf stage pass u v d okdb=0 bad=0
+  local file=${1:-} src tarf stage pass u v d okdb=0 bad=0 what b
+  local do_site=1 do_bots=1
+  local -a bots=() pick=()
   title "从全量备份还原 / 搬家"
   if [[ -z $file ]]; then
-    choose src "备份文件从哪里来:" "本机已有的全量备份" "从旧服务器直接拉取" "从谷歌网盘/异地服务器下载" "手动输入文件路径" || return 1
+    choose src "备份文件从哪里来:" "本机已有的全量备份" "从旧服务器直接拉取" "从异地备份下载 (网盘/R2/服务器)" "手动输入文件路径" || return 1
     case $src in
       本机*) pick_file "$FB_DIR" "wsm-full-*.tar*" || return 1; file=$PICKED_FILE ;;
       从旧*) fb_pick_scp_file || return 1; file=$PICKED_FILE ;;
-      从谷歌*) fb_pick_remote_file || return 1; file=$PICKED_FILE ;;
+      从异地*) fb_pick_remote_file || return 1; file=$PICKED_FILE ;;
       *) read -r -p "备份文件完整路径: " file || return 1 ;;
     esac
   fi
@@ -4833,74 +5055,123 @@ fb_restore() {  # fb_restore [备份文件]
   fi
   mkdir -p "$stage/b"
   tar -xf "$tarf" -C "$stage/b" 2>/dev/null || { rm -rf "$stage"; err "备份文件损坏或格式不对"; return 1; }
-  [[ -f $stage/b/manifest.env && -f $stage/b/files.tar.gz ]] || { rm -rf "$stage"; err "这不是 wsm 全量备份"; return 1; }
-  local FB_FORMAT="" FB_WSM="" FB_DATE="" FB_HOST="" FB_PHP="" FB_REDIS=0 FB_SITES="" FB_DBS="" FB_EXTRAS=""
+  [[ -f $stage/b/manifest.env ]] || { rm -rf "$stage"; err "这不是 wsm 全量备份"; return 1; }
+  # shellcheck disable=SC2034  # 这些变量由 manifest.env 赋值
+  local FB_FORMAT="" FB_WSM="" FB_DATE="" FB_HOST="" FB_PHP="" FB_REDIS=0 FB_SITES="" FB_DBS="" FB_EXTRAS="" FB_BOTS=""
   # shellcheck disable=SC1091
   source "$stage/b/manifest.env"
+  if [[ ${FB_FORMAT:-1} == 1 ]]; then
+    [[ -f $stage/b/files.tar.gz ]] || { rm -rf "$stage"; err "这不是 wsm 全量备份"; return 1; }
+  fi
+  for b in "$stage"/b/bots/*/info.env; do [[ -f $b ]] && { b=${b%/info.env}; bots+=("${b##*/}"); }; done
   echo
   echo "  备份时间: $FB_DATE   来自: $FB_HOST (wsm v$FB_WSM)"
   echo "  网站:     ${FB_SITES:-无}"
   echo "  数据库:   ${FB_DBS:-无}"
   echo "  PHP:      ${FB_PHP:-无}"
-  echo "  额外内容: ${FB_EXTRAS:-无}"
+  echo "  机器人:   ${bots[*]:-无}"
+  [[ -n ${FB_EXTRAS// /} ]] && echo "  额外内容: $FB_EXTRAS"
   echo
-  warn "会覆盖本机同名的网站、数据库和配置"
+  if ((${#bots[@]})); then
+    choose what "还原哪些:" "全部" "只还原 网站 + 数据库 + 系统配置" "只还原 机器人" || { rm -rf "$stage"; return 0; }
+    case $what in 只还原\ 网站*) do_bots=0 ;; 只还原\ 机器人) do_site=0 ;; esac
+  else
+    do_bots=0
+  fi
+  if ((do_bots)); then
+    if ((${#bots[@]} == 1)); then pick=("${bots[@]}")
+    else
+      choose b "还原哪个机器人:" "全部机器人 (${bots[*]})" "${bots[@]}" || { rm -rf "$stage"; return 0; }
+      if [[ $b == 全部机器人* ]]; then pick=("${bots[@]}"); else pick=("$b"); fi
+    fi
+  fi
+  ((do_site)) && warn "会覆盖本机同名的网站、数据库和配置"
+  ((do_bots)) && warn "会覆盖本机同名机器人的程序文件: ${pick[*]}"
   confirm "确认还原?" n || { rm -rf "$stage"; return 0; }
 
-  info "检查并安装运行环境 ..."
-  command -v nginx >/dev/null 2>&1 || install_base
-  for v in $FB_PHP; do php_installed | grep -qx "$v" || install_php "$v"; done
-  if [[ -n $FB_DBS ]] && ! command -v mysql >/dev/null 2>&1; then install_db; fi
-  if [[ $FB_REDIS == 1 ]] && ! unit_exists redis-server && ! unit_exists redis; then install_redis; fi
+  if ((do_site)); then
+    info "检查并安装运行环境 ..."
+    command -v nginx >/dev/null 2>&1 || install_base
+    for v in $FB_PHP; do php_installed | grep -qx "$v" || install_php "$v"; done
+    if [[ -n $FB_DBS ]] && ! command -v mysql >/dev/null 2>&1; then install_db; fi
+    if [[ $FB_REDIS == 1 ]] && ! unit_exists redis-server && ! unit_exists redis; then install_redis; fi
 
-  for u in $(apps_units); do systemctl stop "$u" >/dev/null 2>&1; done
-  info "还原网站和配置文件 ..."
-  tar -xzpf "$stage/b/files.tar.gz" -C / || { rm -rf "$stage"; err "解压文件失败"; return 1; }
+    for u in $(apps_units); do systemctl stop "$u" >/dev/null 2>&1; done
+    info "还原网站和配置文件 ..."
+    if [[ ${FB_FORMAT:-1} == 1 ]]; then
+      tar -xzpf "$stage/b/files.tar.gz" -C / || { rm -rf "$stage"; err "解压文件失败"; return 1; }
+    else
+      for b in system sites extra; do
+        [[ -f $stage/b/$b.tar.gz ]] || continue
+        tar -xzpf "$stage/b/$b.tar.gz" -C / || { rm -rf "$stage"; err "解压 $b 失败"; return 1; }
+      done
+    fi
+    rm -rf "$WSM_DIR/sftp" 2>/dev/null
 
-  rm -rf "$WSM_DIR/sftp" 2>/dev/null
+    if [[ -n $FB_DBS ]]; then
+      info "还原数据库 ..."
+      for d in $FB_DBS; do
+        if gunzip -c "$stage/b/db/$d.sql.gz" | mysql; then okdb=$((okdb + 1)); else warn "数据库 $d 还原失败"; bad=$((bad + 1)); fi
+      done
+      [[ -s $stage/b/db/users.sql ]] && { mysql < "$stage/b/db/users.sql" || warn "部分数据库账号还原失败"; }
+      mysql -e "FLUSH PRIVILEGES" 2>/dev/null
+    fi
 
-  if [[ -n $FB_DBS ]]; then
-    info "还原数据库 ..."
-    for d in $FB_DBS; do
-      if gunzip -c "$stage/b/db/$d.sql.gz" | mysql; then okdb=$((okdb + 1)); else warn "数据库 $d 还原失败"; bad=$((bad + 1)); fi
+    if [[ -s $stage/b/authorized_keys ]]; then
+      ssh_ak_prepare
+      while IFS= read -r u; do
+        [[ $u =~ ^[[:space:]]*(#|$) ]] && continue
+        grep -qxF -- "$u" "$SSH_AK" || printf '%s\n' "$u" >> "$SSH_AK"
+      done < "$stage/b/authorized_keys"
+    fi
+    if [[ -s $stage/b/root.crontab ]]; then  # root 的定时任务: 只追加本机没有的
+      local cur add
+      cur=$(crontab -l -u root 2>/dev/null)
+      add=$(grep -vxF -f <(printf '%s\n' "$cur"; echo '#__none__') "$stage/b/root.crontab")
+      if [[ -n $add ]]; then
+        { [[ -n $cur ]] && printf '%s\n' "$cur"; printf '%s\n' "$add"; } | crontab -u root - \
+          && info "已追加 $(printf '%s\n' "$add" | grep -c .) 条 root 定时任务"
+      fi
+    fi
+
+    systemctl daemon-reload
+    apps_load; apps_migrate_once   # 模块随 /etc/wsm 一起还原; 老版本的备份没有模块, 自动从仓库找回
+    for u in $(apps_units); do unit_exists "$u" && systemctl enable --now "$u" >/dev/null 2>&1; done
+    for u in $FB_EXTRAS; do
+      [[ $u == /etc/systemd/system/*.service && -f $u ]] && systemctl enable --now "${u##*/}" >/dev/null 2>&1
     done
-    [[ -s $stage/b/db/users.sql ]] && { mysql < "$stage/b/db/users.sql" || warn "部分数据库账号还原失败"; }
-    mysql -e "FLUSH PRIVILEGES" 2>/dev/null
+
+    info "重新生成站点配置 ..."
+    for d in $(list_site_names); do ( render_site "$d" ) >/dev/null 2>&1 || { warn "站点 $d 配置生成失败, 请到站点设置里检查"; bad=$((bad + 1)); }; done
+    for v in $(php_installed); do systemctl restart "$(php_svc "$v")" >/dev/null 2>&1; done
+    nginx_reload >/dev/null 2>&1
+    ensure_renew_cron
+    self_install >/dev/null 2>&1
+    realip_ensure
   fi
 
-  if [[ -s $stage/b/authorized_keys ]]; then
-    ssh_ak_prepare
-    while IFS= read -r u; do
-      [[ $u =~ ^[[:space:]]*(#|$) ]] && continue
-      grep -qxF -- "$u" "$SSH_AK" || printf '%s\n' "$u" >> "$SSH_AK"
-    done < "$stage/b/authorized_keys"
+  if ((do_bots)); then
+    for b in "${pick[@]}"; do fb_bot_restore "$stage/b/bots/$b" || bad=$((bad + 1)); done
   fi
-
-  systemctl daemon-reload
-  apps_load; apps_migrate_once   # 模块随 /etc/wsm 一起还原; 老版本的备份没有模块, 自动从仓库找回
-  for u in $(apps_units); do unit_exists "$u" && systemctl enable --now "$u" >/dev/null 2>&1; done
-  for u in $FB_EXTRAS; do
-    [[ $u == /etc/systemd/system/*.service && -f $u ]] && systemctl enable --now "${u##*/}" >/dev/null 2>&1
-  done
-
-  info "重新生成站点配置 ..."
-  for d in $(list_site_names); do ( render_site "$d" ) >/dev/null 2>&1 || { warn "站点 $d 配置生成失败, 请到站点设置里检查"; bad=$((bad + 1)); }; done
-  for v in $(php_installed); do systemctl restart "$(php_svc "$v")" >/dev/null 2>&1; done
-  nginx_reload >/dev/null 2>&1
-  ensure_renew_cron
-  self_install >/dev/null 2>&1
-  realip_ensure
   rm -rf "$stage"
 
   echo
   if ((bad)); then warn "还原完成, 但有 $bad 处出错, 请看上面的提示"; else info "还原完成!"; fi
-  echo "  网站 $(list_site_names | wc -l) 个, 数据库 $okdb 个"
-  echo "  接下来:"
-  echo "   - 把域名解析改到本机 IP: $(public_ip_cached)"
-  echo "   - 定时备份、Telegram 告警、异地目标已跟着还原, 本机会照常执行"
-  echo "   - 源站保护需要在本机重新开一次 (安全防护 → 1)"
-  echo "   - 旧服务器不用了的话, 记得关掉它的定时备份, 免得两台一起往网盘传"
-  [[ -n $FB_EXTRAS ]] && echo "   - 检查机器人等额外程序是否正常运行 (Python 版本不同时可能要重装依赖)"
+  if ((do_site)); then
+    echo "  网站 $(list_site_names | grep -c .) 个, 数据库 $okdb 个"
+    echo "  接下来:"
+    echo "   - 把域名解析改到本机 IP: $(public_ip_cached)"
+    echo "   - 定时备份、Telegram 告警、异地目标已跟着还原, 本机会照常执行"
+    echo "   - 源站保护需要在本机重新开一次 (安全防护 → 1)"
+    echo "   - 旧服务器不用了的话, 记得关掉它的定时备份, 免得两台一起往网盘传"
+  fi
+  if ((do_bots)); then
+    echo "   - 机器人: 确认旧服务器上的 ${pick[*]} 已停止 (systemctl disable --now 服务名)"
+  elif ((${#bots[@]})); then
+    echo "   - 备份里还有机器人 (${bots[*]}) 没有还原, 需要时再选 [只还原 机器人]"
+  elif [[ ${FB_FORMAT:-1} == 1 && -n $FB_EXTRAS ]]; then
+    echo "   - 检查机器人等额外程序是否正常运行 (Python 版本不同时可能要重装依赖)"
+  fi
   return 0
 }
 
@@ -4914,7 +5185,8 @@ fb_menu() {
     echo "  定时备份: $(grep -q backup-all "$FB_CRON" 2>/dev/null && echo "${G}已开启${N}" || echo 未开启)"
     echo "  异地目标: ${FB_TARGETS:-无 (只存本机)}"
     echo "  加密:     $([[ -n $FB_PASS ]] && echo 已开启 || echo 未开启)"
-    choose c "操作:" "立即全量备份" "定时自动备份" "异地备份 (R2/B2/服务器/网盘)" \
+    echo "  机器人:   $(fb_bots_desc)  ${D}(自动识别, 单独备份)${N}"
+    choose c "操作:" "立即全量备份" "定时自动备份" "异地备份" \
       "额外备份的目录" "保留份数 / 加密" "还原 / 搬家到本机" "返回" || return 0
     case $c in
       立即*) (fb_run); pause ;;
@@ -4929,8 +5201,8 @@ fb_menu() {
 }
 
 # ================================================================ 安全防护
-# 源站保护: 用 iptables 让 80/443 只接受 Cloudflare 的连接 (SSH 等其他端口不受影响)
-#   规则放在独立链 WSM_CF 里, 开机由 systemd 服务自动加载, 每周自动更新 Cloudflare IP 段
+# 源站保护: 用 iptables 让 80/443 只接受 CDN (Cloudflare + 自定义 CDN) 的连接 (SSH 等其他端口不受影响)
+#   默认关闭, 手动开启; 开启后规则放在独立链 WSM_CF 里, 开机由 systemd 服务自动加载, 每周自动更新 IP 段
 CFW_IPS=$WSM_DIR/cf-ips.txt
 CFW_UNIT=/etc/systemd/system/wsm-cf-firewall.service
 CFW_CRON=/etc/cron.d/wsm-cf-ips
@@ -4939,9 +5211,9 @@ CFW_CHAIN=WSM_CF
 cfw_active() { command -v iptables >/dev/null 2>&1 && iptables -w -S "$CFW_CHAIN" >/dev/null 2>&1; }
 
 cfw_state() {
-  if cfw_active; then echo "${G}已开启${N} ($(grep -c . "$CFW_IPS" 2>/dev/null || echo 0) 个IP段)"
+  if cfw_active; then echo "${G}已开启${N} (开机自动生效 · $(grep -c . "$CDN_ALLOW" 2>/dev/null || echo 0) 个IP段)"
   elif [[ -f $CFW_UNIT ]]; then echo "${R}已设置但规则未生效${N}"
-  else echo "未开启"; fi
+  else echo "已关闭"; fi
 }
 
 cfw_ensure_iptables() {
@@ -4979,7 +5251,8 @@ cfw_remove_rules() {
 }
 
 cfw_apply_rules() {
-  [[ -s $CFW_IPS ]] || { err "没有 Cloudflare IP 列表"; return 1; }
+  mkdir -p "$WSM_DIR"; cdn_all_ips > "$CDN_ALLOW"
+  [[ -s $CDN_ALLOW ]] || { err "没有 CDN IP 列表"; return 1; }
   cfw_ensure_iptables || return 1
   cfw_remove_rules
   local t r v6 ok=0
@@ -4996,7 +5269,7 @@ cfw_apply_rules() {
       [[ -n $r ]] || continue
       if [[ $r == *:* ]]; then ((v6)) || continue; else ((v6)) && continue; fi
       "$t" -w -A "$CFW_CHAIN" -s "$r" -j ACCEPT
-    done < "$CFW_IPS"
+    done < "$CDN_ALLOW"
     "$t" -w -A "$CFW_CHAIN" -j DROP
     "$t" -w -I INPUT 1 -p tcp -m multiport --dports 80,443 -j "$CFW_CHAIN" \
       || { ((v6)) && { "$t" -w -F "$CFW_CHAIN"; "$t" -w -X "$CFW_CHAIN"; continue; }; cfw_remove_rules; err "加载规则失败"; return 1; }
@@ -5005,18 +5278,24 @@ cfw_apply_rules() {
   ((ok)) || { cfw_remove_rules; err "IPv4 规则没有生效"; return 1; }
 }
 
-cfw_check_sites() {  # 检查每个站点是否经过 Cloudflare (橙云) -> CFW_BAD = 没经过的数量
-  local d names n
+cfw_check_sites() {  # 检查每个站点是否经过 CDN -> CFW_BAD = 没经过的数量
+  local d names n ip me
   CFW_BAD=0
-  echo "检查站点是否已开启 Cloudflare 橙云:"
+  me=$(public_ip_cached)
+  echo "检查站点是否经过 CDN:"
   while read -r d; do
     [[ -n $d ]] || continue
     names=$(load_meta "$d" 2>/dev/null; [[ $DISABLED == 1 ]] || echo "$DOMAIN $ALIASES")
     for n in $names; do
       if curl -sI --max-time 8 "http://$n/" 2>/dev/null | tr -d '\r' | grep -qi '^server: *cloudflare'; then
-        echo "  ${G}✔${N} $n"
+        echo "  ${G}✔${N} $n  (Cloudflare)"
+        continue
+      fi
+      ip=$(getent ahostsv4 "$n" 2>/dev/null | awk '{print $1; exit}')
+      if [[ -n $(cdn_ids) && -n $ip && $ip != "$me" ]]; then
+        echo "  ${G}✔${N} $n  (解析到 $ip, 不是本机, 应该经过了其他 CDN)"
       else
-        echo "  ${R}✘${N} $n  (没走橙云, 开启后打不开)"
+        echo "  ${R}✘${N} $n  (没经过 CDN, 开启后打不开)"
         CFW_BAD=$((CFW_BAD + 1))
       fi
     done
@@ -5027,7 +5306,7 @@ cfw_check_ports() {  # 列出 80/443 上除 Nginx 以外的程序
   local o
   o=$(ss -ltnpH 2>/dev/null | awk '$4 ~ /:(80|443)$/' | grep -v '"nginx"' || true)
   [[ -n $o ]] || return 0
-  warn "80/443 上还有其他程序, 开启后它们也只有 Cloudflare 能连:"
+  warn "80/443 上还有其他程序, 开启后它们也只有 CDN 能连:"
   printf '%s\n' "$o" | awk '{print "  " $4 "  " $6}'
 }
 
@@ -5036,7 +5315,7 @@ cfw_install_unit() {
   [[ -x $WSM_BIN ]] || { err "找不到 $WSM_BIN, 无法设置开机自动加载"; return 1; }
   cat > "$CFW_UNIT" <<EOF
 [Unit]
-Description=wsm: 80/443 only accept Cloudflare
+Description=wsm: 80/443 only accept CDN
 After=network-online.target ufw.service firewalld.service netfilter-persistent.service nftables.service docker.service
 Wants=network-online.target
 
@@ -5056,31 +5335,34 @@ EOF
 }
 
 cfw_enable() {
+  local x
   if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
     warn "检测到 firewalld 正在运行, 它重载时可能清掉本规则"
     confirm "仍然继续?" n || return 0
   fi
-  echo "开启后: 只有 Cloudflare 能连本机 80/443 端口,"
-  echo "  直接用 IP 访问、或没开橙云的域名, 都会打不开。"
-  echo "  SSH 和其他端口不受影响。"
-  echo "  面板类程序的节点/客户端要用开了橙云的域名对接。"
+  echo "开启后: 只有 CDN ($(cdn_names)) 能连本机 80/443 端口,"
+  echo "  直接用 IP 访问、或没走 CDN (Cloudflare 灰云) 的域名, 都会打不开。"
+  echo "  SSH 和其他端口不受影响; 开启后重启服务器也一直有效, 直到你手动关闭。"
+  echo "  面板类程序的节点/订阅域名也要走 CDN, 或者改用其他端口对接。"
+  echo "  用的不是 Cloudflare? 先到 [安全防护 → CDN 设置] 添加你的 CDN。"
   echo
   cfw_check_sites
   cfw_check_ports
   echo
   if ((CFW_BAD)); then
-    warn "有 $CFW_BAD 个域名没走橙云, 开启后它们会打不开"
+    warn "有 $CFW_BAD 个域名没经过 CDN, 开启后它们会打不开"
     confirm "仍然开启?" n || return 0
   else
     confirm "确认开启源站保护?" y || return 0
   fi
   cfw_ensure_iptables || return 1
-  info "获取 Cloudflare IP 段 ..."
+  info "获取 CDN IP 段 ..."
   cfw_fetch || return 1
+  for x in $(cdn_ids); do cdn_fetch_one "$x"; done
   cfw_apply_rules || return 1
   cfw_install_unit || { cfw_remove_rules; return 1; }
   realip_write || true
-  info "源站保护已开启 ($(grep -c . "$CFW_IPS") 个 IP 段, 每周一自动更新)"
+  info "源站保护已开启 ($(grep -c . "$CDN_ALLOW") 个 IP 段, 开机自动生效, 每周一自动更新)"
   echo "  网站打不开时, SSH 执行: wsm cf-firewall off"
 }
 
@@ -5089,7 +5371,7 @@ cfw_disable() {
   cfw_remove_rules
   rm -f "$CFW_UNIT"
   systemctl daemon-reload
-  info "源站保护已关闭, 80/443 对所有 IP 开放"
+  info "源站保护已关闭, 80/443 对所有 IP 开放 (重启后也保持关闭)"
 }
 
 cfw_toggle() { if cfw_active || [[ -f $CFW_UNIT ]]; then confirm "关闭源站保护?" n && cfw_disable; else cfw_enable; fi; }
@@ -5107,28 +5389,86 @@ cfw_cli() {  # wsm cf-firewall [on|off|apply|remove|refresh|status]
   esac
 }
 
-# ---------------- Cloudflare 真实 IP (所有站点生效)
-# 只信任来自 Cloudflare IP 段的 CF-Connecting-IP 头, 别人伪造不了; 不走 Cloudflare 的站点不受影响
+# ---------------- CDN 真实 IP (所有站点生效, 默认开启, 可关闭)
+# 只信任来自 CDN 回源 IP 段的请求头, 别人伪造不了; 不走 CDN 的访问不受影响
+#   只有 Cloudflare 时用 CF-Connecting-IP; 加了其他 CDN 后自动改用 X-Forwarded-For (Cloudflare 也会发), 两边都能识别
 REALIP_CONF=$NGX_CONF/00-wsm-realip.conf
+REALIP_OFF=$WSM_DIR/realip.off          # 有这个文件 = 用户关闭了真实 IP
+CDN_DIR=$WSM_DIR/cdn                    # 自定义 CDN: <id>.conf (NAME URL) + <id>.ips
+CDN_HEADER_CONF=$CDN_DIR/header         # 手动指定的真实 IP 请求头 (没有 = 自动)
+CDN_ALLOW=$WSM_DIR/cdn-allow.txt        # 源站保护放行的全部 IP 段 (Cloudflare + 自定义)
 
-realip_state() { [[ -f $REALIP_CONF ]] && echo "${G}已启用${N} (所有站点)" || echo "未启用"; }
+cdn_ids() { local f; for f in "$CDN_DIR"/*.conf; do [[ -f $f ]] && { f=${f##*/}; echo "${f%.conf}"; }; done; return 0; }
+# shellcheck disable=SC1090
+cdn_name() { ( NAME=""; source "$CDN_DIR/$1.conf" 2>/dev/null; echo "${NAME:-$1}" ); }
+# shellcheck disable=SC1090
+cdn_url() { ( URL=""; source "$CDN_DIR/$1.conf" 2>/dev/null; echo "${URL:-}" ); }
+cdn_count() { grep -c . "$CDN_DIR/$1.ips" 2>/dev/null || echo 0; }
+cdn_names() { local i n="Cloudflare"; for i in $(cdn_ids); do n+=" + $(cdn_name "$i")"; done; echo "$n"; }
 
-realip_write() {  # 生成/更新真实 IP 配置, nginx 检测不通过就恢复
+cdn_cf_ips() { if [[ -s $CFW_IPS ]]; then cat "$CFW_IPS"; else guard_cf_ranges; fi; }
+cdn_all_ips() {  # Cloudflare + 自定义 CDN 的全部 IP 段 (去重)
+  { cdn_cf_ips; local i; for i in $(cdn_ids); do cat "$CDN_DIR/$i.ips" 2>/dev/null; done; } \
+    | grep -E '^[0-9a-fA-F:.]+/[0-9]+$' | sort -u
+}
+
+cdn_header() {  # 实际使用的真实 IP 请求头
+  local h=""
+  [[ -s $CDN_HEADER_CONF ]] && h=$(head -1 "$CDN_HEADER_CONF")
+  if [[ $h =~ ^[A-Za-z0-9-]{2,40}$ ]]; then echo "$h"
+  elif [[ -n $(cdn_ids) ]]; then echo "X-Forwarded-For"
+  else echo "CF-Connecting-IP"; fi
+}
+
+cdn_parse_ips() {  # 从任意文本 (纯列表 / JSON) 里提取 IP 段, 逐个校验; 单个 IP 补成 /32 或 /128
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c '
+import sys, re, ipaddress
+out = set()
+for m in re.findall(r"[0-9A-Fa-f:.]+(?:/[0-9]{1,3})?", sys.stdin.read()):
+    if m.count(":") < 2 and m.count(".") != 3:
+        continue
+    try:
+        out.add(str(ipaddress.ip_network(m, strict=False)))
+    except ValueError:
+        pass
+print("\n".join(sorted(out)))
+' | grep .
+  else  # 没有 python3 时只认 IPv4
+    grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' \
+      | awk -F'[./]' '$1<256 && $2<256 && $3<256 && $4<256 && (NF<5 || $5<=32) { print ($0 ~ /\//) ? $0 : $0 "/32" }' | sort -u
+  fi
+}
+
+realip_on() { [[ ! -f $REALIP_OFF ]]; }
+
+realip_state() {
+  if ! realip_on; then echo "${Y}已关闭${N}"
+  elif [[ -f $REALIP_CONF ]]; then echo "${G}已开启${N} ($(cdn_names))"
+  else echo "未生效 (还没装 Nginx, 或已有其他 real_ip 设置)"; fi
+}
+
+realip_write() {  # 生成/更新真实 IP 配置, nginx 检测不通过就恢复; 关闭状态下删除配置
   command -v nginx >/dev/null 2>&1 || return 0
-  local r list old="" gold=""
-  if [[ -s $CFW_IPS ]]; then list=$(cat "$CFW_IPS"); else list=$(guard_cf_ranges); fi
+  local r old="" gold="" h
+  if ! realip_on; then
+    [[ -f $REALIP_CONF ]] || return 0
+    old=$(mktemp); mv -f "$REALIP_CONF" "$old"
+    if nginx -t >/dev/null 2>&1; then systemctl reload nginx >/dev/null 2>&1; rm -f "$old"; return 0; fi
+    mv -f "$old" "$REALIP_CONF"; warn "关闭真实 IP 后 Nginx 检测不通过, 已恢复"; return 1
+  fi
   [[ -f $REALIP_CONF ]] && { old=$(mktemp); cp -f "$REALIP_CONF" "$old"; }
   # 旧版防 CC 规则里也写过真实 IP, 先去掉, 否则重复报错
   if [[ -f $GUARD_CONF ]] && grep -q real_ip_header "$GUARD_CONF"; then
     gold=$(mktemp); cp -f "$GUARD_CONF" "$gold"
     guard_write_global; mv -f "$GUARD_CONF.tmp" "$GUARD_CONF"
   fi
+  h=$(cdn_header)
   {
-    echo "# managed by wsm - 网站开了 Cloudflare 橙云时, 日志/统计/限速/IP规则 都用访客真实 IP"
-    for r in $list; do
-      [[ $r =~ ^[0-9a-fA-F:.]+/[0-9]+$ ]] && echo "set_real_ip_from $r;"
-    done
-    echo "real_ip_header CF-Connecting-IP;"
+    echo "# managed by wsm - 网站走 CDN ($(cdn_names)) 时, 日志/统计/限速/IP规则 都用访客真实 IP"
+    while read -r r; do echo "set_real_ip_from $r;"; done < <(cdn_all_ips)
+    echo "real_ip_header $h;"
+    [[ $h == X-Forwarded-For ]] && echo "real_ip_recursive on;"
   } > "$REALIP_CONF"
   if nginx -t >/dev/null 2>&1; then
     systemctl reload nginx >/dev/null 2>&1
@@ -5136,8 +5476,148 @@ realip_write() {  # 生成/更新真实 IP 配置, nginx 检测不通过就恢�
   fi
   if [[ -n $old ]]; then mv -f "$old" "$REALIP_CONF"; else rm -f "$REALIP_CONF"; fi
   [[ -n $gold ]] && mv -f "$gold" "$GUARD_CONF"
-  warn "Cloudflare 真实 IP 配置没生效 (可能已有其他 real_ip 设置)"
+  warn "CDN 真实 IP 配置没生效 (可能已有其他 real_ip 设置)"
   return 1
+}
+
+realip_set() {  # realip_set on|off
+  if [[ $1 == off ]]; then
+    local n=0 d
+    while read -r d; do [[ -n $d ]] && [[ $( load_meta "$d" 2>/dev/null; echo "${GUARD:-0}" ) == 1 ]] && n=$((n + 1)); done < <(list_site_names)
+    warn "关闭后, 走 CDN 的网站在日志里只能看到 CDN 节点的 IP"
+    ((n)) && warn "有 $n 个站点开着防 CC: 会按 CDN 节点 IP 限速, 可能误封大量正常访客"
+    confirm "确认关闭 CDN 真实 IP?" n || return 0
+    mkdir -p "$WSM_DIR"; touch "$REALIP_OFF"
+    realip_write && info "已关闭 CDN 真实 IP (重启后也保持关闭)"
+  else
+    rm -f "$REALIP_OFF"
+    realip_write && info "已开启 CDN 真实 IP ($(cdn_names))"
+  fi
+}
+
+cdn_apply() {  # CDN 列表变了: 更新真实 IP 配置和源站保护规则
+  realip_write >/dev/null 2>&1 || true
+  if cfw_active || [[ -f $CFW_UNIT ]]; then cfw_apply_rules || return 1; fi
+  return 0
+}
+
+cdn_fetch_one() {  # cdn_fetch_one id : 从网址更新某个自定义 CDN 的 IP 段 (失败保留旧的)
+  local u tmp
+  u=$(cdn_url "$1"); [[ -n $u ]] || return 0
+  tmp=$(mktemp)
+  if curl -fsSL --max-time 20 "$u" 2>/dev/null | cdn_parse_ips > "$tmp" && [[ -s $tmp ]]; then
+    mv -f "$tmp" "$CDN_DIR/$1.ips"; chmod 644 "$CDN_DIR/$1.ips"; return 0
+  fi
+  rm -f "$tmp"; warn "$(cdn_name "$1"): 在线获取失败, 继续用已保存的 IP 段"; return 1
+}
+
+cdn_add() {
+  local name url="" h id i=1 src tmp n
+  read -r -p "CDN 名称 (如 阿里云 / 腾讯云): " name || return 0
+  name=$(printf '%s' "$name" | tr -d '"$`\\' | cut -c1-30)
+  [[ -n $name ]] || return 0
+  while [[ -f $CDN_DIR/cdn$i.conf ]]; do i=$((i + 1)); done
+  id=cdn$i
+  choose src "IP 段从哪里来:" "粘贴 (从 CDN 控制台复制 [回源IP段])" "网址 (CDN 公开的 IP 列表地址, 会每周自动更新)" || return 0
+  tmp=$(mktemp)
+  if [[ $src == 网址* ]]; then
+    read -r -p "IP 列表网址 (https://...): " url || { rm -f "$tmp"; return 0; }
+    valid_url "$url" || { rm -f "$tmp"; err "网址格式不正确"; return 1; }
+    curl -fsSL --max-time 20 "$url" 2>/dev/null | cdn_parse_ips > "$tmp"
+  else
+    echo "粘贴 IP 段, 一行一个 (如 1.2.3.0/24, 单个 IP 也行), 完成后单独输入一行 END:"
+    read_block | cdn_parse_ips > "$tmp"
+  fi
+  n=$(grep -c . "$tmp")
+  ((n > 0)) || { rm -f "$tmp"; err "没有读到有效的 IP 段"; return 1; }
+  echo "  读到 $n 个 IP 段"
+  choose h "这个 CDN 用哪个请求头传访客真实 IP:" "X-Forwarded-For (绝大多数 CDN, 推荐)" "其他 (自己填)" || { rm -f "$tmp"; return 0; }
+  mkdir -p "$CDN_DIR"
+  if [[ $h == 其他* ]]; then
+    read -r -p "请求头名称 (如 Ali-Cdn-Real-Ip): " h || { rm -f "$tmp"; return 0; }
+    [[ $h =~ ^[A-Za-z0-9-]{2,40}$ ]] || { rm -f "$tmp"; err "请求头名称不正确"; return 1; }
+    warn "Nginx 全部网站只能用一个真实 IP 请求头: 改成 $h 后, Cloudflare 也会按这个头识别"
+    warn "(Cloudflare 不发这个头的话, 走 Cloudflare 的访问就认不出真实 IP)"
+    confirm "确定?" n || { rm -f "$tmp"; return 0; }
+    echo "$h" > "$CDN_HEADER_CONF"
+  fi
+  printf 'NAME=%q\nURL=%q\n' "$name" "$url" > "$CDN_DIR/$id.conf"
+  mv -f "$tmp" "$CDN_DIR/$id.ips"; chmod 644 "$CDN_DIR/$id.ips"
+  cdn_apply
+  info "已添加 CDN: $name ($n 个 IP 段), 真实 IP 请求头: $(cdn_header)"
+  cfw_active && echo "  源站保护已同步放行这些 IP 段"
+  [[ -z $url ]] && echo "  提示: CDN 的回源 IP 段会变, 隔一段时间到控制台核对一下, 变了就到这里 [修改 IP 段]"
+  return 0
+}
+
+cdn_pick() {  # -> CDN_PICK
+  local i; local -a opts=()
+  CDN_PICK=""
+  for i in $(cdn_ids); do opts+=("$(cdn_name "$i") ($i)"); done
+  ((${#opts[@]})) || { warn "还没有添加自定义 CDN"; return 1; }
+  choose CDN_PICK "选择 CDN:" "${opts[@]}" || return 1
+  CDN_PICK=${CDN_PICK##*(}; CDN_PICK=${CDN_PICK%)}
+}
+
+cdn_del() {
+  cdn_pick || return 0
+  confirm "删除 CDN $(cdn_name "$CDN_PICK") ?" n || return 0
+  rm -f "$CDN_DIR/$CDN_PICK.conf" "$CDN_DIR/$CDN_PICK.ips"
+  [[ -z $(cdn_ids) ]] && rm -f "$CDN_HEADER_CONF"
+  cdn_apply
+  info "已删除, 真实 IP 请求头: $(cdn_header)"
+}
+
+cdn_edit() {
+  local tmp n
+  cdn_pick || return 0
+  [[ -n $(cdn_url "$CDN_PICK") ]] && { cdn_fetch_one "$CDN_PICK" && cdn_apply && info "已从网址更新: $(cdn_count "$CDN_PICK") 个 IP 段"; return 0; }
+  echo "当前 $(cdn_count "$CDN_PICK") 个 IP 段。粘贴新的完整列表 (会替换旧的), 完成后单独输入一行 END:"
+  tmp=$(mktemp); read_block | cdn_parse_ips > "$tmp"
+  n=$(grep -c . "$tmp")
+  ((n > 0)) || { rm -f "$tmp"; err "没有读到有效的 IP 段, 没有改动"; return 1; }
+  mv -f "$tmp" "$CDN_DIR/$CDN_PICK.ips"
+  cdn_apply && info "已更新: $n 个 IP 段"
+}
+
+cdn_header_menu() {
+  local c h
+  echo "  当前: $(cdn_header) $([[ -s $CDN_HEADER_CONF ]] && echo "(手动指定)" || echo "(自动)")"
+  echo "  自动: 只有 Cloudflare 时用 CF-Connecting-IP, 加了其他 CDN 后用 X-Forwarded-For"
+  choose c "真实 IP 请求头:" "自动 (推荐)" "手动指定" || return 0
+  if [[ $c == 自动* ]]; then rm -f "$CDN_HEADER_CONF"
+  else
+    read -r -p "请求头名称: " h || return 0
+    [[ $h =~ ^[A-Za-z0-9-]{2,40}$ ]] || { err "请求头名称不正确"; return 1; }
+    mkdir -p "$CDN_DIR"; echo "$h" > "$CDN_HEADER_CONF"
+  fi
+  realip_write && info "真实 IP 请求头: $(cdn_header)"
+}
+
+cdn_menu() {
+  local c i u
+  while true; do
+    title "CDN 设置"
+    echo "  CDN 真实IP: $(realip_state)"
+    echo "  请求头:     $(cdn_header) $([[ -s $CDN_HEADER_CONF ]] && echo "(手动指定)" || echo "(自动)")"
+    echo "  Cloudflare: $(cdn_cf_ips | grep -c .) 个IP段 (每周自动更新)"
+    for i in $(cdn_ids); do
+      u=$(cdn_url "$i")
+      echo "  $(cdn_name "$i"): $(cdn_count "$i") 个IP段 ($([[ -n $u ]] && echo 网址自动更新 || echo 手动))"
+    done
+    choose c "操作:" "$(realip_on && echo "关闭 CDN 真实IP" || echo "开启 CDN 真实IP")" "添加其他 CDN" \
+      "修改 CDN 的 IP 段" "删除 CDN" "立即更新全部 IP 列表" "真实IP请求头" "返回" || return 0
+    case $c in
+      关闭*) (realip_set off); pause ;;
+      开启*) (realip_set on); pause ;;
+      添加*) (cdn_add); pause ;;
+      修改*) (cdn_edit); pause ;;
+      删除*) (cdn_del); pause ;;
+      立即*) (cf_refresh_all); pause ;;
+      真实IP*) (cdn_header_menu); pause ;;
+      *) return 0 ;;
+    esac
+  done
 }
 
 wsm_logrotate() {  # wsm 自己的日志按周轮转, 保留 4 份
@@ -5155,9 +5635,9 @@ wsm_logrotate() {  # wsm 自己的日志按周轮转, 保留 4 份
 EOF
 }
 
-realip_ensure() {  # 装了 Nginx 就确保真实 IP 配置和每周更新任务存在
+realip_ensure() {  # 装了 Nginx 就确保真实 IP 配置 (没被关闭时) 和每周更新任务存在
   command -v nginx >/dev/null 2>&1 || return 0
-  [[ -f $REALIP_CONF ]] || realip_write >/dev/null 2>&1
+  realip_on && [[ ! -f $REALIP_CONF ]] && realip_write >/dev/null 2>&1
   if [[ ! -f $CFW_CRON && -x $WSM_BIN ]]; then
     printf 'SHELL=/bin/bash\nPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n23 4 * * 1 root %s cf-refresh >> /var/log/wsm-task.log 2>&1\n' "$WSM_BIN" > "$CFW_CRON"
     chmod 644 "$CFW_CRON"
@@ -5165,11 +5645,13 @@ realip_ensure() {  # 装了 Nginx 就确保真实 IP 配置和每周更新任务
   return 0
 }
 
-cf_refresh_all() {  # 更新 Cloudflare IP 段: 真实 IP 配置 + 源站保护规则
+cf_refresh_all() {  # 每周更新: Cloudflare + 有网址的自定义 CDN -> 真实 IP 配置 + 源站保护规则
+  local i
   cfw_fetch || return 1
+  for i in $(cdn_ids); do cdn_fetch_one "$i"; done
   realip_write || true
   if cfw_active || [[ -f $CFW_UNIT ]]; then cfw_apply_rules || return 1; fi
-  info "Cloudflare IP 列表已更新: $(grep -c . "$CFW_IPS") 个 IP 段"
+  info "CDN IP 列表已更新: Cloudflare $(grep -c . "$CFW_IPS") 个IP段$(for i in $(cdn_ids); do printf ', %s %s 个' "$(cdn_name "$i")" "$(cdn_count "$i")"; done)"
 }
 
 # ---------------- SSH 安全 (密钥登录 / 关闭密码登录 / 改端口)
@@ -5435,27 +5917,28 @@ menu_security() {
   local c
   while true; do
     title "安全防护"
-    echo "  源站保护: $(cfw_state)"
-    echo "  CF真实IP: $(realip_state)"
-    echo "  SSH: $(ssh_state)"
+    echo "  源站保护:   $(cfw_state)"
+    echo "  CDN真实IP:  $(realip_state)"
+    echo "  防CC/bot:   $(guard_summary)"
+    echo "  SSH:        $(ssh_state)"
     cat <<'EOF'
 
    1) 源站保护 开/关
-      (80/443 只允许 Cloudflare)
-   2) 更新 Cloudflare IP 列表
-   3) SSH 安全
-      (密钥登录/关闭密码/改端口)
-   4) 禁止IP直接访问 (开关)
-   5) 网站防篡改
+   2) CDN 设置 (真实IP / 其他CDN / 更新IP)
+   3) 防 CC / 恶意 bot
+   4) SSH 安全
+   5) 禁止IP直接访问 (开关)
+   6) 网站防篡改
 EOF
     echo "   0) ${G}返回${N}"
     read -r -p "请选择: " c || return 0
     case $c in
       1) (cfw_toggle); pause ;;
-      2) (cfw_refresh); pause ;;
-      3) ssh_menu ;;
-      4) (toggle_block_ip); pause ;;
-      5) (menu_tamper) ;;
+      2) cdn_menu ;;
+      3) guard_overview ;;
+      4) ssh_menu ;;
+      5) (toggle_block_ip); pause ;;
+      6) (menu_tamper) ;;
       0|q) return 0 ;;
       *) warn "无效选择" ;;
     esac
@@ -5638,7 +6121,6 @@ menu_backup() {
    7) 添加计划任务 (定时备份)
    8) 删除计划任务
    9) 全量备份 / 搬家 / 异地备份
-      (谷歌网盘/其他服务器, 可定时)
 EOF
     echo "   0) ${G}返回${N}"
     echo "  备份目录: $BACKUP_DIR"
@@ -5669,11 +6151,9 @@ menu_system() {
    3) 查看 Nginx 全局错误日志
    4) 磁盘与内存使用情况
    5) Telegram 告警
-      (服务挂了/磁盘满/证书到期/备份结果)
    6) 清理日志
    7) Swap 虚拟内存
    8) 服务器时区 (定时任务按它执行)
-   9) 菜单图标风格 (Nerd/普通)
 EOF
     echo "   0) ${G}返回${N}"
     read -r -p "请选择: " c || return 0
@@ -5686,7 +6166,6 @@ EOF
       6) (logs_clean); pause ;;
       7) swap_menu ;;
       8) (tz_menu); pause ;;
-      9) (ui_icon_menu); ui_load; pause ;;
       0|q) return 0 ;;
       *) warn "无效选择" ;;
     esac
@@ -5709,7 +6188,7 @@ main_menu() {
     mi 5 "$(ico bak)" "备份与搬家" "全量/异地/定时"
     mi 6 "$(ico sys)" "系统与服务" "服务/日志/Swap/告警"
     mi 7 "$(ico app)" "程序下载" "扩展程序/环境/工具"
-    mi 8 "$(ico sec)" "安全防护" "源站/SSH/防篡改"
+    mi 8 "$(ico sec)" "安全防护" "源站/CDN/防CC/SSH"
     mi 9 "$(ico upd)" "更新脚本" "从 Git 仓库更新"
     printf '  0) %s\e[8G%s\n' "$(ico exit)" "${R}退出${N}"
     read -r -p "请选择: " c || exit 0
@@ -5743,7 +6222,9 @@ wsm v$WSM_VER - Web Server Manager
   wsm app <模块> uninstall          卸载独立软件 (如 wsm app xui uninstall)
   wsm app <模块> [参数...]          模块自己的命令 (如 wsm app xboard info 域名)
   wsm guard [域名] [on|off]         防 CC / 防恶意 bot
-  wsm cf-firewall [on|off|refresh]  源站保护: 80/443 只允许 Cloudflare
+  wsm cf-firewall [on|off|refresh]  源站保护: 80/443 只允许 CDN (默认关闭)
+  wsm cdn                           CDN 设置 (真实IP开关 / 添加其他 CDN)
+  wsm realip [on|off]               CDN 真实 IP 开关 (默认开启)
   wsm ssh                           SSH 安全 (密钥登录/关闭密码/改端口)
   wsm tg                            Telegram 告警设置
   wsm icons nerd|plain              菜单图标: Nerd 字体图标 / 普通符号
@@ -5802,6 +6283,8 @@ case ${1:-menu} in
   guard)        guard_cli "${2:-}" "${3:-}" ;;
   cf-firewall)  cfw_cli "${2:-}" ;;
   cf-refresh)   cf_refresh_all ;;
+  cdn)          cdn_menu ;;
+  realip)       case ${2:-} in on|off) realip_set "$2" ;; *) echo "CDN 真实IP: $(realip_state)" ;; esac ;;
   monitor)      mon_check ;;
   tg)           tg_menu ;;
   ssh)          ssh_menu ;;
