@@ -19,8 +19,9 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="2.11.1"
+WSM_VER="2.11.2"
 # CHANGELOG-BEGIN  (更新时会显示比当前版本新的条目, 新的写在最上面)
+# v2.11.2 修复: 从旧版本更新后防 CC 规则没有自动升级 (空 User-Agent 仍被拦截)
 # v2.11.1 防 CC 不再拦截空 User-Agent (只有 [严格] 才拦), 避免误伤机器人探针/回调; 每个站点可设 [放行路径]; 拦截记录显示原因/路径/程序名并可一键放行; 开启防 CC 前提示可能误伤哪些访问; 部署 Xboard 不再默认开防 CC
 # v2.11 全量备份分开打包 (系统/网站/数据库/额外/机器人), 还原可选 全部/只网站/只机器人; Python 机器人自动识别并单独备份, 还原时自动装依赖、确认旧服务器已停才启动; root 定时任务一起备份; CDN 真实IP 可开关, 支持添加其他 CDN (IP 段 + 请求头, 源站保护同步放行); 安全防护里新增 [防 CC / 恶意 bot] 一览; 菜单默认 Nerd 图标, 去掉图标设置和多余说明
 # v2.10.1 每个扩展程序菜单里都有 [卸载]: 一次清理站点、证书、服务、定时任务、程序文件, 数据库和用户数据单独确认; 普通删除站点也会询问是否删除对应数据库
@@ -1836,8 +1837,11 @@ guard_pass_lines() {  # 各站点的放行路径 -> map 行: "~*^(域名|别名)
   return 0
 }
 
-guard_ensure_global() {  # 全局文件不存在就生成并检测, 失败回滚
-  [[ -f $GUARD_CONF ]] && return 0
+guard_ensure_global() {  # 全局文件不存在就生成并检测, 失败回滚; 旧版本生成的规则自动升级
+  if [[ -f $GUARD_CONF ]]; then
+    grep -q 'wsm_empty_ua' "$GUARD_CONF" || guard_refresh_global
+    return 0
+  fi
   guard_write_global
   mv -f "$GUARD_CONF.tmp" "$GUARD_CONF"
   nginx -t >/dev/null 2>&1 && return 0
@@ -6292,6 +6296,7 @@ main_menu() {
   SERVER_IP=$(public_ip)
   ui_load
   realip_ensure
+  [[ -f $GUARD_CONF ]] && guard_ensure_global >/dev/null 2>&1
   wsm_logrotate
   while true; do
     dashboard
