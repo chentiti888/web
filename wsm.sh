@@ -19,8 +19,9 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="2.11"
+WSM_VER="2.11.1"
 # CHANGELOG-BEGIN  (更新时会显示比当前版本新的条目, 新的写在最上面)
+# v2.11.1 防 CC 不再拦截空 User-Agent (只有 [严格] 才拦), 避免误伤机器人探针/回调; 每个站点可设 [放行路径]; 拦截记录显示原因/路径/程序名并可一键放行; 开启防 CC 前提示可能误伤哪些访问; 部署 Xboard 不再默认开防 CC
 # v2.11 全量备份分开打包 (系统/网站/数据库/额外/机器人), 还原可选 全部/只网站/只机器人; Python 机器人自动识别并单独备份, 还原时自动装依赖、确认旧服务器已停才启动; root 定时任务一起备份; CDN 真实IP 可开关, 支持添加其他 CDN (IP 段 + 请求头, 源站保护同步放行); 安全防护里新增 [防 CC / 恶意 bot] 一览; 菜单默认 Nerd 图标, 去掉图标设置和多余说明
 # v2.10.1 每个扩展程序菜单里都有 [卸载]: 一次清理站点、证书、服务、定时任务、程序文件, 数据库和用户数据单独确认; 普通删除站点也会询问是否删除对应数据库
 # v2.10 新增扩展程序: Typecho / Nextcloud / 哪吒监控 / Uptime Kuma / OpenList; 部署时自动检测最新版本, 各程序菜单里可检查更新并升级 (含 Xboard 仓库新提交)
@@ -454,12 +455,12 @@ EOF
 # ================================================================ 站点元数据
 META_KEYS=(TYPE DOMAIN ALIASES ROOT PHPVER UPSTREAM SSL FORCE_HTTPS CERT_MODE REWRITE
            AUTH HOTLINK HOTLINK_DOMAINS IP_MODE IP_LIST GZIP CACHE REDIRECT_TO REDIRECT_CODE DISABLED
-           TAMPER TAMPER_EXCLUDE NOEXEC GUARD GUARD_LEVEL APP)
+           TAMPER TAMPER_EXCLUDE NOEXEC GUARD GUARD_LEVEL GUARD_SKIP APP)
 
 meta_defaults() {
   TYPE=; DOMAIN=; ALIASES=; ROOT=; PHPVER=; UPSTREAM=; SSL=0; FORCE_HTTPS=0; CERT_MODE=le
   REWRITE=none; AUTH=0; HOTLINK=0; HOTLINK_DOMAINS=; IP_MODE=none; IP_LIST=; GZIP=1; CACHE=0
-  REDIRECT_TO=; REDIRECT_CODE=301; DISABLED=0; TAMPER=0; TAMPER_EXCLUDE=; NOEXEC=0; GUARD=0; GUARD_LEVEL=2; APP=
+  REDIRECT_TO=; REDIRECT_CODE=301; DISABLED=0; TAMPER=0; TAMPER_EXCLUDE=; NOEXEC=0; GUARD=0; GUARD_LEVEL=2; GUARD_SKIP=; APP=
 }
 
 meta_file() { echo "$META_DIR/$1.conf"; }
@@ -712,6 +713,9 @@ EOF
 render_site() {
   load_meta "$1"
   if [[ ${GUARD:-0} == 1 ]]; then guard_ensure_global || return 1; fi
+  if [[ -n ${GUARD_SKIP:-} && -f $GUARD_CONF ]] && ! grep -qF "${DOMAIN//./\\.}" "$GUARD_CONF"; then
+    guard_refresh_global >/dev/null 2>&1
+  fi
   local names="$DOMAIN${ALIASES:+ $ALIASES}"
   local conf="$NGX_CONF/$DOMAIN.conf"
   if [[ $DISABLED == 1 ]]; then
@@ -1382,7 +1386,7 @@ del_site() {  # del_site [域名]   (DEL_MODE=uninstall 时: 程序文件直接�
   fi
   rm -rf "$CERT_DIR/$d"
   rm -f "$AUTH_DIR/$d.htpasswd" "$META_DIR/$d.paths" "$META_DIR/$d.rewrite" "$META_DIR/$d.app.nginx" "$(meta_file "$d")"
-  [[ -n $app ]] && app_has "$app" guard_skip && guard_refresh_global
+  if [[ -n ${GUARD_SKIP:-} ]] || { [[ -n $app ]] && app_has "$app" guard_skip; }; then guard_refresh_global; fi
   nginx_reload >/dev/null 2>&1
 
   if ((del_files)); then
@@ -1761,18 +1765,33 @@ map $request_uri $wsm_skip {
 EOF
     apps_hook guard_skip
     echo "}"
+    echo
+    echo "# 各站点自己设置的放行路径 (站点 → 防 CC → 放行路径)"
+    echo 'map "$host:$uri" $wsm_pass {'
+    echo "    default 0;"
+    guard_pass_lines
+    echo "}"
     cat <<'EOF'
-map $wsm_skip $wsm_key {
+map "$wsm_skip$wsm_pass" $wsm_free {
+    "00"    0;
+    default 1;
+}
+map $wsm_free $wsm_key {
     1       "";
     default $binary_remote_addr;
 }
 
-# 恶意扫描器 / 攻击工具 / 高频采集爬虫 (正常搜索引擎不受影响)
-map "$wsm_skip:$http_user_agent" $wsm_bad_ua {
+# 空 User-Agent: 只有 [严格] 强度才拦截 (很多探针/回调/脚本不带 User-Agent, 拦了容易误伤)
+map "$wsm_free:$http_user_agent" $wsm_empty_ua {
     default 0;
-    ~^1:    0;
     "0:"    1;
     "0:-"   1;
+}
+
+# 恶意扫描器 / 攻击工具 / 高频采集爬虫 (正常搜索引擎不受影响)
+map "$wsm_free:$http_user_agent" $wsm_bad_ua {
+    default 0;
+    ~^1:    0;
     ~*^0:.*(sqlmap|nikto|nmap|masscan|zgrab|zmap|nuclei|acunetix|netsparker|wpscan|dirbuster|gobuster|feroxbuster|ffuf|wfuzz|hydra|jaeles|whatweb|zmeu|morfeus|libwww-perl|python-urllib|scrapy|httrack|ahrefsbot|semrushbot|mj12bot|dotbot|blexbot|dataforseobot|megaindex|serpstatbot|bytespider)  1;
 }
 
@@ -1798,6 +1817,23 @@ limit_conn_status 429;
 limit_req_log_level warn;
 EOF
   } > "$GUARD_CONF.tmp"
+}
+
+guard_pass_lines() {  # 各站点的放行路径 -> map 行: "~*^(域名|别名):/路径" 1;
+  local d
+  while read -r d; do
+    [[ -n $d ]] || continue
+    ( load_meta "$d" 2>/dev/null || exit 0
+      [[ -n ${GUARD_SKIP:-} ]] || exit 0
+      hosts=""
+      for h in $DOMAIN $ALIASES; do valid_domain "$h" && hosts+="${hosts:+|}${h//./\\.}"; done
+      [[ -n $hosts ]] || exit 0
+      for p in $GUARD_SKIP; do
+        [[ $p =~ ^/[A-Za-z0-9._~/-]{0,100}$ ]] || continue
+        printf '    "~*^(%s):%s"   1;\n' "$hosts" "$(printf '%s' "$p" | sed 's/\./\\./g')"
+      done )
+  done < <(list_site_names)
+  return 0
 }
 
 guard_ensure_global() {  # 全局文件不存在就生成并检测, 失败回滚
@@ -1827,29 +1863,62 @@ guard_server_lines() {  # 输出站点配置里的防护指令 (依赖 load_meta
   [[ $lv == 1 || $lv == 3 ]] || lv=2
   echo "    # wsm 防护: 恶意 bot / 敏感文件扫描 / 限速 (模块声明的接口已排除)"
   echo '    if ($wsm_bad_ua) { return 444; }'
+  [[ $lv == 3 ]] && echo '    if ($wsm_empty_ua) { return 444; }'
   echo '    if ($wsm_bad_path) { return 444; }'
   [[ $REWRITE == wordpress ]] || echo '    if ($wsm_wp_path) { return 444; }'
   echo "    limit_req zone=wsm_l$lv burst=$(guard_burst "$lv") nodelay;"
   echo "    limit_conn wsm_conn 60;"
 }
 
-guard_log() {  # guard_log 域名: 最近被拦截的 IP
-  local f="/var/log/nginx/$1.access.log"
+guard_log() {  # guard_log 域名: 最近被拦截的情况 (原因 / 路径 / IP / 程序名), 可以一键放行路径
+  local f="/var/log/nginx/$1.access.log" n n444 n429 p
+  local -a top=()
   [[ -f $f ]] || { warn "还没有访问日志"; return 0; }
-  local n
-  n=$(tail -n 20000 "$f" | awk '$9==444 || $9==429' | wc -l)
-  echo "最近 2 万条访问里, 被拦截 $n 次 (444=恶意请求, 429=请求太快)"
+  n444=$(tail -n 20000 "$f" | awk '$9==444' | wc -l)
+  n429=$(tail -n 20000 "$f" | awk '$9==429' | wc -l)
+  n=$((n444 + n429))
+  echo "最近 2 万条访问里, 被拦截 $n 次:"
+  echo "   ${n444} 次 444 = 恶意程序 / 敏感文件 / 空程序名(严格模式)"
+  echo "   ${n429} 次 429 = 请求太快, 被限速"
   ((n > 0)) || return 0
+  echo; echo "被拦最多的路径:"
+  mapfile -t top < <(tail -n 20000 "$f" | awk '$9==444 || $9==429 {split($7, a, "?"); print $9, a[1]}' \
+    | sort | uniq -c | sort -rn | head -8)
+  printf '%s\n' "${top[@]}" | awk '{printf "  %-8s %s  %s\n", $1"次", ($2==444 ? "拒绝" : "限速"), $3}'
+  echo; echo "被拒绝最多的程序名 (User-Agent):"
+  tail -n 20000 "$f" | awk -F'"' '{split($3, s, " ")} s[1]==444 {print ($6=="" || $6=="-") ? "(空)" : substr($6, 1, 60)}' \
+    | sort | uniq -c | sort -rn | head -5 | sed 's/^/  /'
   echo; echo "拦截最多的 IP:"
-  tail -n 20000 "$f" | awk '$9==444 || $9==429 {print $1}' | sort | uniq -c | sort -rn | head -10 \
+  tail -n 20000 "$f" | awk '$9==444 || $9==429 {print $1}' | sort | uniq -c | sort -rn | head -5 \
     | awk '{printf "  %-8s %s\n", $1"次", $2}'
-  echo; echo "最近 10 条:"
-  tail -n 20000 "$f" | awk '$9==444 || $9==429' | tail -10 | cut -c1-160 | sed 's/^/  /'
+  local -a paths=()
+  mapfile -t paths < <(printf '%s\n' "${top[@]}" | awk '{print $3}' | awk '!seen[$0]++' \
+    | grep -viE '/\.|\.(sql|sqlite|bak|backup|old|orig|swp|env)$|wp-|phpunit|cgi-bin|xmlrpc')
+  ((${#paths[@]})) || return 0
+  echo
+  confirm "有正常程序 (探针/回调) 被误伤? 把它的路径加入放行" n || return 0
+  choose p "放行哪个路径:" "${paths[@]}" || return 0
+  guard_skip_add "$1" "$p"
 }
 
-guard_set() {  # guard_set 域名 on|off
+guard_warn() {  # 开启防护前的提示 (只说一次)
+  echo
+  warn "开启防 CC 前请注意, 它可能误伤这些访问:"
+  echo "   - 机器人探针、Webhook 回调、监控等程序: 请求太频繁会被限速 (返回 429)"
+  echo "   - 程序名在拦截名单里的脚本 (如 python-urllib、scrapy、httrack 等采集工具): 会被直接拒绝 (444)"
+  echo "   - 公司/学校/机房等很多人共用一个出口 IP 时: 可能一起被限速"
+  realip_on || echo "   - ${R}CDN 真实IP 已关闭${N}: 走 CDN 的网站会按 CDN 节点限速, 大面积误封, 建议先开启"
+  echo "   遇到误伤: 在本站点 [放行路径] 里加上被拦的接口路径 (查看拦截记录能看到是哪个), 或者关闭防护"
+  echo
+}
+
+guard_set() {  # guard_set 域名 on|off   (GUARD_NOWARN=1 时不提示)
   load_meta "$1"
   if [[ $2 == on ]]; then
+    if [[ -z ${GUARD_NOWARN:-} && ${GUARD:-0} != 1 ]]; then
+      guard_warn
+      confirm "确认为 $DOMAIN 开启防 CC?" n || return 0
+    fi
     guard_ensure_global || return 1
     [[ -n ${APP:-} ]] && app_call "$APP" guard_on "$1"
     GUARD=1
@@ -1877,8 +1946,9 @@ guard_menu() {  # guard_menu 域名
     echo "   - 拦截扫描 .env / .git / 备份文件 等敏感文件的请求"
     echo "   - 限制同一个 IP 的请求速度, 防 CC 和刷接口 (超出返回 429)"
     echo "   - 静态文件, 以及网站应用模块声明的接口 (如面板节点接口/订阅链接) 不受影响"
+    echo "  放行路径: ${GUARD_SKIP:-无}"
     choose c "操作:" "$([[ ${GUARD:-0} == 1 ]] && echo 关闭防护 || echo 开启防护)" "调整强度" \
-      "查看拦截记录" "返回" || return 0
+      "查看拦截记录" "放行路径 (探针/回调等接口不受防护)" "返回" || return 0
     case $c in
       开启防护) guard_set "$d" on ;;
       关闭防护) guard_set "$d" off ;;
@@ -1889,6 +1959,46 @@ guard_menu() {  # guard_menu 域名
         apply_site && info "强度已改为: $(guard_level_name "$GUARD_LEVEL")"
         ;;
       查看拦截记录) guard_log "$d"; pause ;;
+      放行路径*) guard_skip_menu "$d" ;;
+      *) return 0 ;;
+    esac
+  done
+}
+
+guard_skip_set() {  # guard_skip_set 域名 "路径 路径..." : 保存放行路径并更新规则
+  ( load_meta "$1"; GUARD_SKIP=$2; save_meta )
+  guard_refresh_global
+}
+
+guard_skip_add() {  # guard_skip_add 域名 路径
+  local p=$2 cur
+  [[ $p == /* ]] || p="/$p"
+  [[ $p =~ ^/[A-Za-z0-9._~/-]{0,100}$ ]] || { err "路径格式不正确 (如 /probe.php 或 /api/)"; return 1; }
+  cur=$( load_meta "$1"; echo "${GUARD_SKIP:-}" )
+  [[ " $cur " == *" $p "* ]] && { info "已经在放行列表里"; return 0; }
+  guard_skip_set "$1" "${cur:+$cur }$p" && info "已放行: $p (以 $p 开头的地址都不限速、不检查程序名)"
+}
+
+guard_skip_menu() {  # guard_skip_menu 域名
+  local d=$1 c p cur
+  local -a arr=()
+  while true; do
+    cur=$( load_meta "$d"; echo "${GUARD_SKIP:-}" )
+    title "放行路径 · $d"
+    echo "  这些路径不限速、不检查程序名 (敏感文件拦截照样生效)。"
+    echo "  适合: 机器人探针上报、Webhook 回调、支付通知等程序调用的接口。"
+    echo "  请确认这些接口自己有密钥校验。"
+    echo
+    if [[ -n $cur ]]; then for p in $cur; do echo "   - $p"; done; else echo "   (无)"; fi
+    choose c "操作:" "添加" "删除" "返回" || return 0
+    case $c in
+      添加) read -r -p "路径 (如 /probe.php、/api/): " p || continue; [[ -n $p ]] && guard_skip_add "$d" "$p"; pause ;;
+      删除)
+        read -r -a arr <<<"$cur"
+        ((${#arr[@]})) || { warn "没有可删的"; continue; }
+        choose p "删除哪个:" "${arr[@]}" || continue
+        cur=" $cur "; cur=${cur// $p / }; cur=$(echo $cur)
+        guard_skip_set "$d" "$cur" && info "已删除: $p"; pause ;;
       *) return 0 ;;
     esac
   done
@@ -1932,7 +2042,12 @@ guard_overview() {  # 安全防护 → 防 CC / 恶意 bot: 所有站点一览
     opts+=("全部开启" "全部关闭" "返回")
     choose c "选择站点进入设置, 或批量操作:" "${opts[@]}" || return 0
     case $c in
-      全部开启) for d in "${sites[@]}"; do (guard_set "$d" on); done; pause ;;
+      全部开启)
+        guard_warn
+        if confirm "确认为全部 ${#sites[@]} 个站点开启防 CC?" n; then
+          for d in "${sites[@]}"; do (GUARD_NOWARN=1 guard_set "$d" on); done
+        fi
+        pause ;;
       全部关闭) confirm "关闭所有站点的防护?" n && for d in "${sites[@]}"; do (guard_set "$d" off); done; pause ;;
       返回) return 0 ;;
       *) (guard_menu "$c") ;;
