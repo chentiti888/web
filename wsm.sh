@@ -19,7 +19,7 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="2.11.4"
+WSM_VER="2.11.5"
 # CHANGELOG-BEGIN  (更新时会显示比当前版本新的条目, 新的写在最上面)
 # v2.11.2 修复: 从旧版本更新后防 CC 规则没有自动升级 (空 User-Agent 仍被拦截)
 # v2.11.1 防 CC 不再拦截空 User-Agent (只有 [严格] 才拦), 避免误伤机器人探针/回调; 每个站点可设 [放行路径]; 拦截记录显示原因/路径/程序名并可一键放行; 开启防 CC 前提示可能误伤哪些访问; 部署 Xboard 不再默认开防 CC
@@ -5325,6 +5325,22 @@ fb_pick_remote_file() {  # -> PICKED_FILE (从异地目标下载)
   fi
   read -r -a arr <<<"$FB_TARGETS"
   if ((${#arr[@]} == 1)); then t=${arr[0]}; else choose t "从哪里下载?" "${arr[@]}" || return 1; fi
+  # 网盘里按服务器名分文件夹 (存储桶/服务器名); 新服务器名字不一样时, 让你选旧服务器的文件夹
+  local parent d n
+  local -a dirs=()
+  if [[ ${t#*:} == */* ]]; then
+    parent=${t%/*}
+    info "查找 $parent 下的备份 ..."
+    while IFS= read -r d; do
+      d=${d%/}; [[ -n $d ]] || continue
+      n=$(rclone lsf "$parent/$d" --files-only 2>/dev/null | grep -c '^wsm-full-')
+      ((n > 0)) && dirs+=("$d ($n 份)")
+    done < <(rclone lsf "$parent" --dirs-only 2>/dev/null)
+    if ((${#dirs[@]} > 1)) || { ((${#dirs[@]} == 1)) && [[ ${dirs[0]%% *} != "${t##*/}" ]]; }; then
+      choose d "选择要还原的服务器 (文件夹名 = 备份时的服务器名):" "${dirs[@]}" || return 1
+      t="$parent/${d%% *}"
+    fi
+  fi
   mapfile -t files < <(rclone lsf "$t" --files-only 2>/dev/null | grep '^wsm-full-' | sort -r | head -15)
   ((${#files[@]})) || { err "$t 里没有找到备份"; return 1; }
   choose f "选择备份 (新→旧):" "${files[@]}" || return 1
