@@ -4091,7 +4091,8 @@ SELF_LAST_BAK=""
 update_changes() {  # update_changes 新脚本 : 显示比当前版本新的更新内容
   local v rest n=0
   while read -r v rest; do
-    [[ $v == "$WSM_VER" ]] && break
+    # 只显示比当前版本新的; 当前版本没写更新说明时 (如 2.11.5), 遇到更旧的条目也停下
+    [[ $(printf '%s\n%s\n' "$v" "$WSM_VER" | sort -V | tail -1) == "$WSM_VER" ]] && break
     echo "  ${G}v$v${N}"
     printf '%s\n' "$rest" | tr ';' '\n' | sed 's/^ *//; /^$/d; s/^/    - /'
     n=$((n + 1)); ((n >= 8)) && break
