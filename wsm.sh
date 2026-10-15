@@ -19,8 +19,9 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="2.11.5"
+WSM_VER="2.12"
 # CHANGELOG-BEGIN  (更新时会显示比当前版本新的条目, 新的写在最上面)
+# v2.12 访问统计区分 真人/爬虫/可疑, 列出疑似恶意 IP (原因) 和被扫描路径, 可核实搜索引擎真假, 概览加 [真人] 列; 系统与服务新增 CPU 性能测试 (单核/多核)
 # v2.11.2 修复: 从旧版本更新后防 CC 规则没有自动升级 (空 User-Agent 仍被拦截)
 # v2.11.1 防 CC 不再拦截空 User-Agent (只有 [严格] 才拦), 避免误伤机器人探针/回调; 每个站点可设 [放行路径]; 拦截记录显示原因/路径/程序名并可一键放行; 开启防 CC 前提示可能误伤哪些访问; 部署 Xboard 不再默认开防 CC
 # v2.11 全量备份分开打包 (系统/网站/数据库/额外/机器人), 还原可选 全部/只网站/只机器人; Python 机器人自动识别并单独备份, 还原时自动装依赖、确认旧服务器已停才启动; root 定时任务一起备份; CDN 真实IP 可开关, 支持添加其他 CDN (IP 段 + 请求头, 源站保护同步放行); 安全防护里新增 [防 CC / 恶意 bot] 一览; 菜单默认 Nerd 图标, 去掉图标设置和多余说明
@@ -6594,6 +6595,109 @@ EOF
   done
 }
 
+# ================================================================ CPU 性能测试
+# 优先用 sysbench (很多 VPS 测评脚本用的同一种测法, 得分可以直接对比); 装不上就用 openssl 粗测
+cpu_steal_read() {  # 输出: 总时间 steal时间
+  local _ u n s i w q sq st _r
+  read -r _ u n s i w q sq st _r < /proc/stat
+  echo "$((u + n + s + i + w + q + sq + ${st:-0})) ${st:-0}"
+}
+
+bench_ensure_sysbench() {
+  command -v sysbench >/dev/null 2>&1 && return 0
+  confirm "需要安装测试工具 sysbench (很小, 只在测试时运行), 现在安装?" y || return 1
+  info "正在安装 sysbench ..."
+  if [[ $PM == apt ]]; then
+    pkg_install sysbench >/dev/null 2>&1 || { apt-get update -qq >/dev/null 2>&1; pkg_install sysbench >/dev/null 2>&1; }
+  else
+    pkg_install sysbench >/dev/null 2>&1 || { dnf install -y epel-release >/dev/null 2>&1; pkg_install sysbench >/dev/null 2>&1; }
+  fi
+  command -v sysbench >/dev/null 2>&1 && { info "sysbench 已安装"; return 0; }
+  warn "sysbench 安装失败"
+  return 1
+}
+
+bench_sysbench() {  # bench_sysbench 线程数 秒数 -> 每秒事件数
+  sysbench cpu --cpu-max-prime=10000 --threads="$1" --time="$2" run 2>/dev/null |
+    awk '/events per second/{print $NF; exit}'
+}
+
+bench_openssl() {  # bench_openssl 进程数 秒数 -> SHA256 速度 MB/s
+  local out v
+  if (($1 > 1)); then out=$(openssl speed -seconds "$2" -bytes 16384 -multi "$1" sha256 2>/dev/null)
+  else out=$(openssl speed -seconds "$2" -bytes 16384 sha256 2>/dev/null); fi
+  v=$(awk '$1=="sha256"{v=$NF} END{print v}' <<< "$out")
+  if [[ -z $v ]]; then  # 老版本 openssl 不认 -bytes
+    if (($1 > 1)); then out=$(openssl speed -seconds "$2" -multi "$1" sha256 2>/dev/null)
+    else out=$(openssl speed -seconds "$2" sha256 2>/dev/null); fi
+    v=$(awk '$1=="sha256"{v=$NF} END{print v}' <<< "$out")
+  fi
+  v=${v%k}
+  [[ -n $v ]] && awk -v k="$v" 'BEGIN{printf "%.0f", k / 1024}'
+}
+
+cpu_bench() {
+  local c mode tool cores model load s1="" sm="" a b st0 tt0 st1 tt1 steal unit
+  cores=$(nproc 2>/dev/null || echo 1)
+  model=$(awk -F: '/^(model name|Model Name|Hardware|cpu model)/{print $2; exit}' /proc/cpuinfo 2>/dev/null | tr -s ' ' | sed 's/^ //')
+  [[ -z $model ]] && model=$(lscpu 2>/dev/null | awk -F: '/^Model name/{print $2; exit}' | tr -s ' ' | sed 's/^ //')
+  read -r load _ < /proc/loadavg
+  title "CPU 性能测试"
+  echo "  型号: ${model:-未知}"
+  echo "  核心: ${cores} 个    当前负载: ${load}"
+  if awk -v l="$load" -v c="$cores" 'BEGIN{exit !(l > c * 0.5)}'; then
+    warn "服务器现在比较忙, 测出来会偏低"
+  fi
+  echo
+  choose c "测试内容:" "单核 + 多核 (约 25 秒)" "只测单核 (10 秒)" "只测多核 (10 秒)" "返回" || return 0
+  case $c in 单核*) mode=both ;; 只测单核*) mode=single ;; 只测多核*) mode=multi ;; *) return 0 ;; esac
+  if bench_ensure_sysbench; then
+    tool=sysbench; unit="分"
+  elif command -v openssl >/dev/null 2>&1; then
+    tool=openssl; unit="MB/s"
+    warn "改用 openssl 粗测 (SHA256 计算速度), 得分和 sysbench 不能直接比"
+  else
+    warn "没有可用的测试工具"; return 1
+  fi
+  warn "测试期间 CPU 会跑满, 网站和机器人可能短暂变慢"
+  confirm "开始测试?" y || return 0
+  echo
+  if [[ $mode != multi ]]; then
+    printf '  测试单核 ...'
+    if [[ $tool == sysbench ]]; then s1=$(bench_sysbench 1 10); else s1=$(bench_openssl 1 5); fi
+    printf '\r\e[K'
+  fi
+  if [[ $mode != single ]]; then
+    printf '  测试多核 (%s 线程) ...' "$cores"
+    read -r tt0 st0 < <(cpu_steal_read)
+    if [[ $tool == sysbench ]]; then sm=$(bench_sysbench "$cores" 10); else sm=$(bench_openssl "$cores" 5); fi
+    read -r tt1 st1 < <(cpu_steal_read)
+    printf '\r\e[K'
+    steal=$(awk -v a=$((st1 - st0)) -v b=$((tt1 - tt0)) 'BEGIN{if (b > 0) printf "%.1f", a * 100 / b; else print 0}')
+  fi
+  if [[ -z $s1$sm ]]; then warn "测试没有输出结果"; return 1; fi
+  echo "${B}测试结果${N} ${D}($tool)${N}"
+  [[ -n $s1 ]] && { printf '  '; pad_w "单核得分" 12; printf '%s %s\n' "${G}${s1}${N}" "$unit"; }
+  [[ -n $sm ]] && { printf '  '; pad_w "多核得分" 12; printf '%s %s %s\n' "${G}${sm}${N}" "$unit" "${D}(${cores} 线程)${N}"; }
+  if [[ -n $s1 && -n $sm ]] && ((cores > 1)); then
+    a=$(awk -v m="$sm" -v s="$s1" 'BEGIN{if (s > 0) printf "%.1f", m / s; else print 0}')
+    printf '  '; pad_w "多核/单核" 12; printf '%s 倍 %s\n' "$a" "${D}(理想是 ${cores} 倍)${N}"
+  fi
+  if [[ -n $sm ]]; then
+    printf '  '; pad_w "被宿主占用" 12; printf '%s%%' "$steal"
+    if awk -v s="$steal" 'BEGIN{exit !(s >= 10)}'; then printf ' %s\n' "${Y}(偏高, 这台 VPS 可能超售)${N}"; else echo; fi
+  fi
+  echo
+  if [[ $tool == sysbench ]]; then
+    echo "  ${D}得分 = sysbench 每秒计算次数, 越高越好${N}"
+  else
+    echo "  ${D}得分 = 每秒 SHA256 计算量, 越高越好${N}"
+  fi
+  if [[ -n $s1 && -n $sm ]] && ((cores > 1)) && awk -v a="$a" -v c="$cores" 'BEGIN{exit !(a < c * 0.6)}'; then
+    echo "  ${D}多核倍数明显低于核心数: 可能是超线程, 或核心被限速/超售${N}"
+  fi
+}
+
 menu_system() {
   local c
   while true; do
@@ -6607,6 +6711,7 @@ menu_system() {
    6) 清理日志
    7) Swap 虚拟内存
    8) 服务器时区 (定时任务按它执行)
+   9) CPU 性能测试 (单核/多核)
 EOF
     echo "   0) ${G}返回${N}"
     read -r -p "请选择: " c || return 0
@@ -6619,6 +6724,7 @@ EOF
       6) (logs_clean); pause ;;
       7) swap_menu ;;
       8) (tz_menu); pause ;;
+      9) (cpu_bench); pause ;;
       0|q) return 0 ;;
       *) warn "无效选择" ;;
     esac
@@ -6687,6 +6793,7 @@ wsm v$WSM_VER - Web Server Manager
   wsm update [-y]                   从 Git 仓库更新脚本 (-y 不确认)
   wsm rollback                      回滚到上一个版本
   wsm stats [域名] [1|y|7|30|all]   访问统计 (不写域名=全站概览)
+  wsm cpu-bench                     CPU 性能测试 (单核/多核)
   wsm add-redirect [域名] [目标]    新建域名重定向
   wsm ssl [域名]                    申请/更换证书
   wsm list                          站点列表
@@ -6734,6 +6841,7 @@ case ${1:-menu} in
   update)       update_run "${2:-}" ;;
   rollback)     update_rollback ;;
   stats)        stats_cli "${2:-}" "${3:-1}" ;;
+  cpu-bench)    cpu_bench ;;
   guard)        guard_cli "${2:-}" "${3:-}" ;;
   cf-firewall)  cfw_cli "${2:-}" ;;
   cf-refresh)   cf_refresh_all ;;
