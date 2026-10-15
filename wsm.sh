@@ -1696,7 +1696,7 @@ site_logs() {
     case $c in
       最近*访问*) tail -n 50 "/var/log/nginx/$d.access.log" 2>/dev/null || warn "暂无日志" ;;
       最近*错误*) tail -n 50 "/var/log/nginx/$d.error.log" 2>/dev/null || warn "暂无日志" ;;
-      访问统计*) stat_range_pick && stat_show "$d" "$STAT_RANGE" "$STAT_RANGE_NAME" ;;
+      访问统计*) stat_range_pick && STAT_ASK=1 stat_show "$d" "$STAT_RANGE" "$STAT_RANGE_NAME" ;;
       清空日志*)
         : > "/var/log/nginx/$d.access.log" 2>/dev/null; : > "/var/log/nginx/$d.error.log" 2>/dev/null
         info "已清空" ;;
@@ -3787,6 +3787,7 @@ app_wait_port() {  # app_wait_port 端口 [秒] : 等程序启动监听
 
 # ================================================================ 访问统计
 # 只在你打开时临时分析 nginx 日志, 不常驻、不占资源
+# 真人 / 爬虫 / 可疑 是按日志推测的: 看 User-Agent 和访问行为, 仅供参考
 declare -A ST=()
 STAT_TMP=""
 STAT_AWK=$(cat <<'AWK'
@@ -3795,6 +3796,8 @@ BEGIN {
   n = split(dates, dl, "|")
   for (i = 1; i <= n; i++) ok[dl[i]] = 1
   filt = (dates != "")
+  # 常见漏洞扫描路径 (只在返回 4xx/5xx 时才算, 正常网站自己的页面不会误判)
+  SCAN = "(/\\.(env|git|svn|hg|ds_store|htpasswd|aws)|wp-login\\.php|xmlrpc\\.php|/wp-(admin|content|includes)|phpmyadmin|/pma/|myadmin|/vendor/phpunit|eval-stdin|/cgi-bin/|/boaform|/hnap1|/actuator|/solr/|/owa/|/autodiscover|/shell|\\.(sql|bak|old|swp|tar|tgz|rar|7z)$|/config\\.(php|json|ya?ml)$)"
 }
 {
   split($1, a, " ")
@@ -3809,22 +3812,33 @@ BEGIN {
   tot++; bytes += by; ips[ip]++
   cls[int(st / 100)]++
   hr[substr(ts, 14, 2)]++
+  ua = $6; ual = tolower(ua)
+  eng = ""
+  if (ual ~ /googlebot|google-inspectiontool|googleother/) eng = "Google"
+  else if (ual ~ /baiduspider/) eng = "Baidu"
+  else if (ual ~ /bingbot/) eng = "Bing"
+  else if (ual ~ /yandex/) eng = "Yandex"
+  else if (ual ~ /sogou/) eng = "Sogou"
+  else if (ual ~ /360spider|haosouspider/) eng = "360"
+  else if (ual ~ /bytespider/) eng = "Byte"
+  noua = (ua == "" || ua == "-")
+  isbot = (eng != "" || noua || ual ~ /bot|spider|crawl|slurp|python|go-http|wget|curl|scrapy|httpclient|okhttp|java\/|libwww|axios|node-fetch|headless|phantomjs|masscan|zgrab|nmap|nikto|sqlmap/)
+  if (eng != "") { sp[eng]++; claim[ip] = eng }
+  else if (noua) sp["无UA"]++
+  else if (isbot) sp["Other"]++
+  if (isbot) hasb[ip] = 1; else hash[ip] = 1
   if (url ~ /\.(css|js|png|jpe?g|gif|svg|ico|webp|avif|woff2?|ttf|map|mp4|mp3)$/) {
-    nstatic++
+    nstatic++; ist[ip]++
   } else {
     pv++
+    if (isbot) pvb[ip]++; else pvh[ip]++
     if (st < 400) page[url]++
+    m = substr(ts, 2, 17)                      # 精确到分钟, 算每分钟页面请求数
+    if (lm[ip] == m) mc[ip]++; else { lm[ip] = m; mc[ip] = 1 }
+    if (mc[ip] > mx[ip]) mx[ip] = mc[ip]
   }
-  if (st == 404) nf[url]++
-  ual = tolower($6)
-  if (ual ~ /googlebot/) sp["Google"]++
-  else if (ual ~ /baiduspider/) sp["Baidu"]++
-  else if (ual ~ /bingbot/) sp["Bing"]++
-  else if (ual ~ /yandex/) sp["Yandex"]++
-  else if (ual ~ /sogou/) sp["Sogou"]++
-  else if (ual ~ /360spider|haosouspider/) sp["360"]++
-  else if (ual ~ /bytespider/) sp["Byte"]++
-  else if (ual ~ /bot|spider|crawl|slurp|python-requests|go-http|wget|curl/) sp["Other"]++
+  if (st == 404) { nf[url]++; n4[ip]++ }
+  if (st >= 400 && tolower(url) ~ SCAN) { sc[ip]++; scu[url]++ }
   rf = $4
   if (rf != "-" && rf != "") {
     sub(/^https?:\/\//, "", rf); sub(/[\/?].*/, "", rf)
@@ -3833,13 +3847,36 @@ BEGIN {
 }
 END {
   uv = 0; for (k in ips) uv++
+  # 网站自己有静态资源请求 (没被 CDN 全部缓存) 时, 才用 "只看页面不加载资源" 这条判断
+  sitest = (tot > 0 && nstatic * 100 >= tot * 15)
+  for (k in ips) {
+    why = ""
+    if (sc[k]) why = why "扫描漏洞" sc[k] "次 "
+    if (!(k in claim)) {
+      if (n4[k] >= 20 && n4[k] * 2 >= ips[k]) why = why "404过多(" n4[k] ") "
+      if (mx[k] >= 60) why = why "频率高(" mx[k] "页/分) "
+      if (sitest && pvh[k] >= 30 && !ist[k]) why = why "不加载资源 "
+    }
+    if (why != "") {
+      sub(/ $/, "", why)
+      sip++; spv += pvh[k] + pvb[k]; t = " [可疑]"
+      printf "bad\t%d\t%s\t%s\n", ips[k], k, why
+    } else if (hash[k]) {
+      hip++; hpv += pvh[k]; rpv += pvb[k]; t = ""
+    } else {
+      rip++; rpv += pvb[k]; t = " [爬虫]"
+    }
+    printf "ip\t%d\t%s%s\n", ips[k], k, t
+  }
   printf "S\ttot\t%d\nS\tpv\t%d\nS\tuv\t%d\nS\tbytes\t%.0f\n", tot, pv, uv, bytes
+  printf "S\thpv\t%d\nS\trpv\t%d\nS\tspv\t%d\nS\thip\t%d\nS\trip\t%d\nS\tsip\t%d\n", hpv, rpv, spv, hip, rip, sip
   for (c = 2; c <= 5; c++) printf "S\tc%d\t%d\n", c, cls[c] + 0
-  for (k in ips) printf "ip\t%d\t%s\n", ips[k], k
   for (k in page) printf "url\t%d\t%s\n", page[k], k
   for (k in nf) printf "nf\t%d\t%s\n", nf[k], k
+  for (k in scu) printf "scu\t%d\t%s\n", scu[k], k
   for (k in ref) printf "ref\t%d\t%s\n", ref[k], k
   for (k in sp) printf "sp\t%d\t%s\n", sp[k], k
+  for (k in claim) printf "cl\t%d\t%s\t%s\n", ips[k], k, claim[k]
   for (k in hr) printf "hr\t%d\t%s\n", hr[k], k
 }
 AWK
@@ -3899,7 +3936,49 @@ stat_range_pick() {  # -> STAT_RANGE STAT_RANGE_NAME
   STAT_RANGE_NAME=$r
 }
 
-stat_show() {  # stat_show 域名 范围 范围名
+stat_bad() {  # 疑似恶意 IP: 一行 IP, 一行原因 (手机上不换行)
+  local c ip why
+  awk -F'\t' '$1=="bad"{print $2"\t"$3"\t"$4}' "$STAT_TMP" | sort -t$'\t' -k1,1nr | head -n "$1" |
+  while IFS=$'\t' read -r c ip why; do
+    printf '  %7s  %s\n           %s\n' "$c" "$ip" "${D}${why}${N}"
+  done
+}
+
+stat_verify() {  # 核实自称搜索引擎的 IP: 反向 DNS 查域名, 再正向查回 IP, 两边对得上才是真的
+  local c ip eng host re res
+  command -v getent >/dev/null 2>&1 || { warn "缺少 getent, 无法核实"; return 0; }
+  # 先用公共 DNS 的地址试一下反向解析, 不通就别核实了, 免得把真爬虫误判成假冒
+  if [[ -z $(timeout 4 getent hosts 8.8.8.8 2>/dev/null; timeout 4 getent hosts 1.1.1.1 2>/dev/null) ]]; then
+    warn "这台服务器暂时查不了反向 DNS, 无法核实"; return 0
+  fi
+  echo; echo "${B}搜索引擎核实 (访问最多的 8 个)${N}"
+  while IFS=$'\t' read -r c ip eng; do
+    case $eng in
+      Google) re='\.(googlebot|google)\.com$' ;;
+      Baidu)  re='\.baidu\.(com|jp)$' ;;
+      Bing)   re='\.search\.msn\.com$' ;;
+      Yandex) re='\.yandex\.(ru|net|com)$' ;;
+      Sogou)  re='\.sogou\.com$' ;;
+      *)      re='' ;;
+    esac
+    if [[ -z $re ]]; then
+      res="${D}不支持核实${N}"
+    else
+      host=$(timeout 4 getent hosts "$ip" 2>/dev/null | awk '{print $2; exit}')
+      if [[ -z $host ]]; then
+        res="${R}查不到域名, 多半假冒${N}"
+      elif [[ $host =~ $re ]] &&
+         timeout 4 getent ahosts "$host" 2>/dev/null | awk '{print $1}' | grep -qxF "$ip"; then
+        res="${G}真${N}"
+      else
+        res="${R}假冒${N} ${D}($host)${N}"
+      fi
+    fi
+    printf '  %-6s %-15s %s\n' "$eng" "$ip" "$res"
+  done < <(awk -F'\t' '$1=="cl"{print $2"\t"$3"\t"$4}' "$STAT_TMP" | sort -t$'\t' -k1,1nr | head -n 8)
+}
+
+stat_show() {  # stat_show 域名 范围 范围名   (STAT_ASK=1 时最后询问是否核实搜索引擎)
   local d=$1 range=$2 rname=${3:-} max=0 c h t bar n
   [[ -e /var/log/nginx/$d.access.log ]] || { warn "暂无访问日志"; return 1; }
   stat_collect "$d" "$range"
@@ -3908,12 +3987,20 @@ stat_show() {  # stat_show 域名 范围 范围名
   if ((${ST[tot]:-0} == 0)); then echo "  (这个时间段没有访问记录)"; rm -f "$STAT_TMP"; return 0; fi
   printf '  '; pad_w "总请求" 12; printf '%s\n' "${ST[tot]}"
   printf '  '; pad_w "页面访问 PV" 12; printf '%s\n' "${ST[pv]}"
+  echo "    ${G}真人 ${ST[hpv]:-0}${N} / 爬虫 ${ST[rpv]:-0} / ${Y}可疑 ${ST[spv]:-0}${N}"
   printf '  '; pad_w "独立 IP" 12; printf '%s\n' "${ST[uv]}"
+  echo "    ${G}真人 ${ST[hip]:-0}${N} / 爬虫 ${ST[rip]:-0} / ${Y}可疑 ${ST[sip]:-0}${N}"
   printf '  '; pad_w "流量" 12; printf '%s\n' "$(hb "${ST[bytes]}")"
   echo "  状态码  2xx:${ST[c2]}  3xx:${ST[c3]}"
   echo "          4xx:${ST[c4]}  5xx:${ST[c5]}"
   if [[ -n $(awk -F'\t' '$1=="sp"' "$STAT_TMP") ]]; then
-    echo; echo "${B}爬虫 / 脚本${N}"; stat_top sp 8
+    echo; echo "${B}爬虫 / 脚本 (请求数)${N}"; stat_top sp 8
+  fi
+  if [[ -n $(awk -F'\t' '$1=="bad"' "$STAT_TMP") ]]; then
+    echo; echo "${B}疑似恶意 IP TOP10${N}"; stat_bad 10
+  fi
+  if [[ -n $(awk -F'\t' '$1=="scu"' "$STAT_TMP") ]]; then
+    echo; echo "${B}被扫描的路径 TOP5${N}"; stat_top scu 5
   fi
   echo; echo "${B}访问 IP TOP10${N}"; stat_top ip 10
   echo; echo "${B}热门页面 TOP10${N}"; stat_top url 10
@@ -3934,6 +4021,11 @@ stat_show() {  # stat_show 域名 范围 范围名
     bar=$(printf '%*s' "$n" '' | tr ' ' '#')
     printf '  %s %-20s %s\n' "$h" "$bar" "$c"
   done
+  echo
+  echo "  ${D}真人/爬虫/可疑 按日志推测, 仅供参考${N}"
+  if [[ ${STAT_ASK:-0} == 1 ]] && grep -q '^cl' "$STAT_TMP"; then
+    confirm "核实搜索引擎真假? (需联网, 几秒)" n && stat_verify
+  fi
   rm -f "$STAT_TMP"
 }
 
@@ -3958,7 +4050,7 @@ stats_menu() {
   case $c in
     单个*) pick_site "" || return 0
            stat_range_pick || return 0
-           stat_show "$SITE" "$STAT_RANGE" "$STAT_RANGE_NAME" ;;
+           STAT_ASK=1 stat_show "$SITE" "$STAT_RANGE" "$STAT_RANGE_NAME" ;;
     全部*) stat_range_pick || return 0
            stat_overview "$STAT_RANGE" "$STAT_RANGE_NAME" ;;
   esac
