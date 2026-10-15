@@ -4033,15 +4033,16 @@ stat_overview() {  # stat_overview 范围 范围名
   local d name
   title "全部站点 · 访问概览"
   echo "  范围: $2"
-  printf '  '; pad_w "站点" 16; pad_w "PV" 8; pad_w "IP" 6; echo "流量"
+  printf '  '; pad_w "站点" 15; pad_w "PV" 7; pad_w "真人" 7; pad_w "IP" 5; echo "流量"
   while read -r d; do
     [[ -n $d ]] || continue
     if [[ ! -e /var/log/nginx/$d.access.log ]]; then continue; fi
     stat_collect "$d" "$1"
-    name=$d; ((${#name} > 15)) && name="${name:0:14}~"
-    printf '  '; pad_w "$name" 16; pad_w "${ST[pv]:-0}" 8; pad_w "${ST[uv]:-0}" 6; hb "${ST[bytes]:-0}"; echo
+    name=$d; ((${#name} > 14)) && name="${name:0:13}~"
+    printf '  '; pad_w "$name" 15; pad_w "${ST[pv]:-0}" 7; pad_w "${ST[hpv]:-0}" 7; pad_w "${ST[uv]:-0}" 5; hb "${ST[bytes]:-0}"; echo
     rm -f "$STAT_TMP"
   done < <(list_site_names)
+  echo "  ${D}真人为推测值, 明细看单个站点统计${N}"
 }
 
 stats_menu() {
