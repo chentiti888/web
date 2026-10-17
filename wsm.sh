@@ -24,36 +24,10 @@
 set -uo pipefail
 
 WSM_VER="3.0.0"
-# CHANGELOG-BEGIN  (更新时会显示比当前版本新的条目, 新的写在最上面)
-# v3.0.0 主菜单新增 [9 TG机器人], 更新/卸载 改为 10 (独立脚本 tggl 的入口); 合并 SSH 小工具 (ssb): 系统信息/BBR/禁Ping/端口转发/回程线路/流媒体与AI解锁/CPU内存硬盘测试/导入公钥/下载私钥; 启动不再安装任何软件, 网站环境改为菜单里一键安装; 新菜单 (服务器 / 网站 两区) 和配色; 新增 [已安装组件] 统一卸载, 可卸载网站环境和 wsm 本身; ssb 命令保留为别名
+# CHANGELOG-BEGIN  (更新时显示比当前版本新的条目, 新的写在最上面; 只留最近几条, 完整记录见仓库 CHANGELOG.md)
+# v3.0.0 主菜单新增 [9 TG机器人], 更新/卸载 改为 10 (独立脚本 tggl 的入口); 合并 SSH 小工具 (ssb): 系统信息/BBR/禁Ping/端口转发/回程线路/流媒体与AI解锁/CPU内存硬盘测试/导入公钥/下载私钥; 启动不再安装任何软件, 网站环境改为菜单里一键安装; 新菜单 (服务器 / 网站与应用 两区) 和配色; wsm install 先确认再安装; 新增 [已安装组件] 统一卸载, 可卸载网站环境和 wsm 本身; ssb 命令保留为别名
 # v2.12.1 修复: 更新时把已经装过的旧版本说明也显示出来
 # v2.12 访问统计区分 真人/爬虫/可疑, 列出疑似恶意 IP (原因) 和被扫描路径, 可核实搜索引擎真假, 概览加 [真人] 列; 系统与服务新增 CPU 性能测试 (单核/多核)
-# v2.11.2 修复: 从旧版本更新后防 CC 规则没有自动升级 (空 User-Agent 仍被拦截)
-# v2.11.1 防 CC 不再拦截空 User-Agent (只有 [严格] 才拦), 避免误伤机器人探针/回调; 每个站点可设 [放行路径]; 拦截记录显示原因/路径/程序名并可一键放行; 开启防 CC 前提示可能误伤哪些访问; 部署 Xboard 不再默认开防 CC
-# v2.11 全量备份分开打包 (系统/网站/数据库/额外/机器人), 还原可选 全部/只网站/只机器人; Python 机器人自动识别并单独备份, 还原时自动装依赖、确认旧服务器已停才启动; root 定时任务一起备份; CDN 真实IP 可开关, 支持添加其他 CDN (IP 段 + 请求头, 源站保护同步放行); 安全防护里新增 [防 CC / 恶意 bot] 一览; 菜单默认 Nerd 图标, 去掉图标设置和多余说明
-# v2.10.1 每个扩展程序菜单里都有 [卸载]: 一次清理站点、证书、服务、定时任务、程序文件, 数据库和用户数据单独确认; 普通删除站点也会询问是否删除对应数据库
-# v2.10 新增扩展程序: Typecho / Nextcloud / 哪吒监控 / Uptime Kuma / OpenList; 部署时自动检测最新版本, 各程序菜单里可检查更新并升级 (含 Xboard 仓库新提交)
-# v2.9.1 3x-ui 也改为模块 (独立软件类); 程序下载里第三方程序统一放在 [扩展程序], 可随时添加删除
-# v2.9 网站应用改为模块: Xboard / WordPress 从脚本本体拆出来, 在 [程序下载] 里随时添加/删除; 已部署的站点自动归入对应模块
-# v2.8.7 服务管理: 显示开机自启状态, 每个操作都有结果提示, 去掉重复的 redis, 加入 Xboard 队列和告警里的服务
-# v2.8.6 wsm 日志自动轮转; 还原后的提示更准确; 静态检查清理
-# v2.8.5 异地备份新增 Cloudflare R2 / Backblaze B2 (用密钥, 不会过期, 不用浏览器授权)
-# v2.8.4 谷歌网盘支持用自己的 client_id (rclone 共用授权将停用); 已添加的网盘可一键更换授权
-# v2.8.3 新增服务器时区设置 (系统与服务 → 8); 设置定时任务时显示服务器时间; 安装环境时 UTC 服务器提示改为北京时间
-# v2.8.2 所有输入框都可以输入 0 返回 (自动提示); 取消输入不会再继续往下执行
-# v2.8.1 所有"返回"改为绿色, "退出"改为红色; 网站管理去掉多余提示
-# v2.8 菜单图标可切换: Nerd 字体图标 (系统与服务 → 8, 或 wsm icons nerd) / 普通符号
-# v2.7.4 图标恢复为原来那套 (保留按列对齐和绿色退出)
-# v2.7.2 主菜单说明文字严格对齐, 退出改为绿色
-# v2.7.1 主菜单和程序下载分类加上单色图标
-# v2.7 菜单重新整理 (9 项); 软件商店改为程序下载, 按 面板/网站环境/开发运行/系统工具 分类; Xboard 移到程序下载, 新增 3x-ui; 删除文件工具和 SFTP 账号; Swap 移到系统与服务, 防篡改移到安全防护
-# v2.6.3 所有选择列表都有 0) 返回, 不会再误删; 输入名字/路径时可输入 0 返回; 远程名称必须字母开头
-# v2.6.2 添加异地目标失败时自动清理残留配置; 同名旧配置可直接覆盖
-# v2.6.1 异地备份添加服务器时检测密钥登录, 对方关闭了密钥登录可一键帮忙开启; SSH 安全菜单会自动打开被关闭的密钥登录
-# v2.6 全量备份/一键搬家/定时异地备份(谷歌网盘、其他服务器); Telegram 告警; Swap 管理; CF 真实IP对所有站点生效; 防CC不再限速 Xboard 后台; 自动修复旧版 Debian 软件源; 更新时显示更新内容, 更新失败自动回滚; 日志过大提醒
-# v2.5.1 生成的 SSH 私钥保存到 /root/ssh-key/ 方便下载
-# v2.5 SSH 安全: 密钥登录 / 关闭密码登录 / 改端口; 移除 Fail2ban
-# v2.4 源站保护: 80/443 只允许 Cloudflare
 # CHANGELOG-END
 WSM_DIR=/etc/wsm
 META_DIR=$WSM_DIR/sites
@@ -76,17 +50,14 @@ else
   R=$'\e[31m'; G=$'\e[32m'; Y=$'\e[33m'; B=$'\e[36m'; D=$'\e[2m'; T=$'\e[0m'; L=$'\e[2m'; S=$'\e[34m'
 fi
 N=$'\e[0m'; BD=$'\e[1m'
-# 原 SSH 小工具 (ssb) 部分用的颜色名
 RED=$R; GREEN=$G; YELLOW=$Y; CYAN=$B; NC=$N
 info() { echo "  ${G}✔${N} $*"; }
 warn() { echo "  ${Y}!${N} $*"; }
 err()  { echo "  ${R}✘${N} $*" >&2; }
 die()  { err "$*"; exit 1; }
-# disp_w 文本 : 显示宽度 (中文占 2 格; 文本里不要带颜色码)
 disp_w() { local s=$1 t LC_ALL=C; t=${s//[! -~]/}; echo $(( ${#t} + (${#s} - ${#t}) / 3 * 2 )); }
 rep() { local i o=""; for ((i = 0; i < $2; i++)); do o+=$1; done; printf '%s' "$o"; }
 title() { local n=$((46 - $(disp_w "$*"))); ((n < 4)) && n=4; printf '\n  %s%s%s%s %s%s%s\n' "$BD" "$B" "$*" "$N" "$L" "$(rep ─ "$n")" "$N"; }
-# 菜单项统一样式: 序号(主色) 名称(亮白) 说明(灰)
 # mitem 序号 名称 [说明]     mback : 0 返回      mlist : 把 "   1) 名称 (说明)" 这种行转成统一样式
 mitem() { printf '  %s%3s%s  %s%s%s\e[24G%s%s%s\n' "$BD$B" "$1" "$N" "$T" "$2" "$N" "$D" "${3:-}" "$N"; }
 mback() { printf '  %s%3s%s  %s%s%s\n' "$BD$G" 0 "$N" "$G" "${1:-返回}" "$N"; }
@@ -102,7 +73,6 @@ mlist() {
     fi
   done
 }
-# pad_w 文本 宽度 : 按显示宽度补空格 (中文占 2 格), 文本里不要带颜色码
 pad_w() {
   local s=$1 w=$2 t n LC_ALL=C
   t=${s//[! -~]/}
@@ -120,13 +90,12 @@ tz_get() {
 
 tz_now() { date '+%F %T %Z'; }
 
-tz_set() {  # tz_set 时区名
+tz_set() {
   local z=$1
   [[ $z =~ ^[A-Za-z0-9_+/-]+$ && -f /usr/share/zoneinfo/$z ]] || { err "没有这个时区: $z"; return 1; }
   if ! timedatectl set-timezone "$z" 2>/dev/null; then
     ln -sf "/usr/share/zoneinfo/$z" /etc/localtime && echo "$z" > /etc/timezone || { err "设置失败"; return 1; }
   fi
-  # 让定时任务按新时区执行
   systemctl restart cron >/dev/null 2>&1 || systemctl restart crond >/dev/null 2>&1 || true
   info "时区已改为 $z, 现在时间: $(tz_now)"
 }
@@ -145,7 +114,7 @@ tz_menu() {
   tz_set "$z"
 }
 
-tz_suggest() {  # 时区是 UTC 时建议改成北京时间 (安装环境时调用)
+tz_suggest() {
   case $(tz_get) in
     UTC|Etc/UTC|Etc/Universal|Universal|GMT|Etc/GMT)
       echo "  服务器现在是 UTC 时间 ($(tz_now)), 比北京时间慢 8 小时。"
@@ -161,7 +130,7 @@ declare -A ICO_PLAIN=([web]="⌂" [ssl]="◈" [php]="◇" [db]="▤" [bak]="⇅"
 declare -A ICO_NERD=([web]="" [ssl]="" [php]="" [db]="" [bak]="" [sys]="" [app]="" [sec]="" [upd]="" [exit]="" [c_panel]="" [c_web]="" [c_dev]="" [c_tool]="")
 ui_load() { ICON_STYLE=plain; [[ -f $UI_CONF ]] && source "$UI_CONF"; [[ $ICON_STYLE == nerd ]] || ICON_STYLE=plain; return 0; }
 ico() { if [[ $ICON_STYLE == nerd ]]; then printf '%s' "${ICO_NERD[$1]:-}"; else printf '%s' "${ICO_PLAIN[$1]:-}"; fi; }
-ui_icon_set() {  # ui_icon_set plain|nerd
+ui_icon_set() {
   [[ $1 == nerd || $1 == plain ]] || { err "只能是 nerd 或 plain"; return 1; }
   mkdir -p "$WSM_DIR"; printf 'ICON_STYLE=%s\n' "$1" > "$UI_CONF"; ICON_STYLE=$1
   info "菜单图标: $([[ $1 == nerd ]] && echo "Nerd 字体图标" || echo "普通符号")"
@@ -190,7 +159,7 @@ read() {
 
 pause() { echo; read -r -p "${D}按回车键继续...${N}" _ || true; }
 
-confirm() {  # confirm "问题" [y|n]
+confirm() {
   local d=${2:-y} a hint
   [[ $d == y ]] && hint="Y/n" || hint="y/N"
   read -r -p "$1 [$hint] " a || return 1
@@ -198,7 +167,7 @@ confirm() {  # confirm "问题" [y|n]
   [[ $a =~ ^[Yy] ]]
 }
 
-ask() {  # ask 变量名 "提示" "默认值"  (变量已有值则跳过)
+ask() {  # 变量名 "提示" "默认值"  (变量已有值则跳过)
   local __v=$1 __p=$2 __d=${3:-} __in
   if [[ -n ${!__v:-} ]]; then return 0; fi
   if [[ -n $__d ]]; then
@@ -210,14 +179,13 @@ ask() {  # ask 变量名 "提示" "默认值"  (变量已有值则跳过)
   printf -v "$__v" '%s' "$__in"
 }
 
-choose() {  # choose 结果变量 "标题" 选项1 选项2 ...   (数字选择, 默认第1项; 0 = 返回, 返回值 1)
+choose() {  # 结果变量 "标题" 选项1 选项2 ...   (数字选择, 默认第1项; 0 = 返回, 返回值 1)
   local __var=$1 __title=$2; shift 2
   local -a __items=("$@")
   local __i __c __last
   __last=${__items[${#__items[@]}-1]}
   echo "  ${D}$__title${N}"
   for __i in "${!__items[@]}"; do
-    # 最后一项是 "返回" 时显示成 0 (原来的序号也照样能用)
     if [[ ${__items[__i]} == 返回* ]] && ((__i == ${#__items[@]} - 1)); then continue; fi
     printf '  %s%3d%s  %s%s%s\n' "$BD$B" $((__i + 1)) "$N" "$T" "${__items[__i]}" "$N"
   done
@@ -234,7 +202,7 @@ choose() {  # choose 结果变量 "标题" 选项1 选项2 ...   (数字选择, 
   done
 }
 
-read_secret() {  # read_secret 变量 "提示"
+read_secret() {
   local __v=$1 __in
   read -rs -p "$2: " __in || { echo; return 1; }
   echo
@@ -265,12 +233,12 @@ detect_os() {
 LEDGER=$WSM_DIR/installed.list
 PKG_FOR=""
 
-pkg_has() {  # pkg_has 包名 : 这个包是否已安装
+pkg_has() {  # 包名 : 这个包是否已安装
   if [[ $PM == apt ]]; then [[ $(dpkg-query -W -f='${Status}' "$1" 2>/dev/null) == *'install ok installed'* ]]
   else rpm -q "$1" >/dev/null 2>&1; fi
 }
 
-ledger_add() {  # ledger_add 包名 [用途]
+ledger_add() {
   mkdir -p "$WSM_DIR"
   ledger_has "$1" && return 0
   printf '%s\t%s\t%s\n' "$1" "${2:-}" "$(date +%F)" >> "$LEDGER"
@@ -296,7 +264,7 @@ pkg_install() {
   return $rc
 }
 
-ensure_pkg() {  # ensure_pkg 命令 包名 "用途说明" : 没有这个命令就询问并安装 (安装会记录, 可在 已安装组件 里卸载)
+ensure_pkg() {  # 命令 包名 "用途说明" : 没有这个命令就询问并安装 (安装会记录, 可在 已安装组件 里卸载)
   local cmd=$1 pkg=$2 why=${3:-}
   command -v "$cmd" >/dev/null 2>&1 && return 0
   confirm "需要安装 $pkg${why:+ ($why)}, 现在安装?" y || return 1
@@ -310,7 +278,7 @@ ensure_pkg() {  # ensure_pkg 命令 包名 "用途说明" : 没有这个命令�
 
 web_installed() { command -v nginx >/dev/null 2>&1 && [[ -f $NGX_CONF/00-wsm.conf ]]; }
 
-need_web() {  # 网站相关功能的入口检查: 没有网站环境就提示一键安装
+need_web() {
   web_installed && return 0
   echo
   warn "这个功能需要网站环境 (Nginx + PHP + MariaDB + certbot)"
@@ -325,7 +293,7 @@ public_ip() {
 
 unit_exists() { systemctl list-unit-files "$1.service" 2>/dev/null | grep -q "^$1.service"; }
 
-svc_state() {  # 彩色状态
+svc_state() {
   if systemctl is-active --quiet "$1" 2>/dev/null; then echo "${G}运行中${N}"; else echo "${R}未运行${N}"; fi
 }
 
@@ -369,7 +337,7 @@ php_installed() {
   return 0
 }
 
-ini_set_kv() {  # ini_set_kv 文件 键 值
+ini_set_kv() {
   local f=$1 k=$2 v=$3
   touch "$f"
   if grep -qE "^${k}[[:space:]]*=" "$f"; then
@@ -593,7 +561,7 @@ type_name() {
   esac
 }
 
-pick_site() {  # pick_site [指定域名]  ->  SITE
+pick_site() {  # [指定域名]  ->  SITE
   SITE=""
   local arg=${1:-} d i=0 c
   local -a names=()
@@ -621,7 +589,6 @@ valid_domain() { [[ $1 =~ ^([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z0-9
 valid_url()    { local re='^https?://[]A-Za-z0-9._:/[-]+$'; [[ $1 =~ $re ]]; }
 valid_path()   { [[ $1 =~ ^/[A-Za-z0-9._/~-]*$ ]]; }
 valid_ip()     { [[ $1 =~ ^[0-9a-fA-F:.]+(/[0-9]{1,3})?$ ]]; }
-# 网站目录必须至少两级, 且不能落在系统目录下 (防止 chown/rm 误伤)
 safe_root() {
   [[ $1 =~ ^/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+/?$ ]] || return 1
   case $1 in
@@ -630,7 +597,7 @@ safe_root() {
   return 0
 }
 
-domain_used() {  # domain_used 域名 [排除的站点]  -> 输出占用它的站点
+domain_used() {  # 域名 [排除的站点]  -> 输出占用它的站点
   local x=$1 f d
   for f in "$META_DIR"/*.conf; do
     [[ -e $f ]] || continue
@@ -670,7 +637,7 @@ ngx_ge() {  # nginx 版本 >= $1 ?
   [[ -n $cur && $(printf '%s\n%s\n' "$1" "$cur" | sort -V | head -1) == "$1" ]]
 }
 
-listen_lines() {  # listen_lines 端口 [ssl]
+listen_lines() {
   local port=$1 ssl=${2:-}
   if [[ -n $ssl ]]; then
     if ngx_ge 1.25.1; then
@@ -698,7 +665,7 @@ server_common() {
 EOF
 }
 
-proxy_block() {  # proxy_block location 后端
+proxy_block() {
   cat <<EOF
     location $1 {
         proxy_pass $2;
@@ -870,7 +837,6 @@ EOF
   systemctl reload nginx
 }
 
-# 保存并应用; 失败时恢复旧元数据
 apply_site() {  # 依赖当前全局元数据变量
   local f bak=""
   f=$(meta_file "$DOMAIN")
@@ -903,7 +869,7 @@ check_dns() {  # 依赖已 load_meta; 返回 0=OK 或用户确认继续
   fi
 }
 
-finish_ssl() {  # finish_ssl 模式(le|custom|self)
+finish_ssl() {  # 模式(le|custom|self)
   CERT_MODE=$1
   SSL=1
   if confirm "是否强制 HTTP 自动跳转到 HTTPS?" y; then FORCE_HTTPS=1; else FORCE_HTTPS=0; fi
@@ -1022,7 +988,7 @@ ssl_self() {
   finish_ssl self
 }
 
-ssl_pick_method() {  # ssl_pick_method 域名
+ssl_pick_method() {
   local m
   choose m "选择证书类型:" \
     "Let's Encrypt 免费证书 (HTTP 验证, 最常用)" \
@@ -1350,13 +1316,13 @@ default_page_static() {
 WSMPAGE
 }
 
-write_default_page() {  # write_default_page 网站目录 类型(php|static) 域名
+write_default_page() {  # 网站目录 类型(php|static) 域名
   local root=$1 type=$2 domain=$3
   if [[ $type == php ]]; then default_page_php > "$root/index.php"
   else default_page_static | sed "s/__DOMAIN__/$domain/g" > "$root/index.html"; fi
 }
 
-add_site() {  # add_site 类型 [域名] [后端/跳转目标]
+add_site() {
   local type=$1 domain=${2:-} extra=${3:-} aliases="" root=${PRESET_ROOT:-} a u
   command -v nginx >/dev/null 2>&1 || die "还没有安装环境, 请先执行: wsm install"
   title "新建$(type_name "$type")"
@@ -1431,7 +1397,7 @@ fix_perms_dir() {
   command -v chcon >/dev/null 2>&1 && chcon -R -t httpd_sys_rw_content_t "$1" >/dev/null 2>&1 || true
 }
 
-rm_path_safe() {  # rm_path_safe 路径 : 只删至少两级的普通目录/文件, 系统目录和顶层目录一律不删
+rm_path_safe() {  # 路径 : 只删至少两级的普通目录/文件, 系统目录和顶层目录一律不删
   local p=${1%/}
   [[ -n $p && -e $p ]] || return 0
   safe_root "$p" || { warn "跳过不安全的路径: $p"; return 1; }
@@ -1439,7 +1405,7 @@ rm_path_safe() {  # rm_path_safe 路径 : 只删至少两级的普通目录/文�
   rm -rf -- "$p"
 }
 
-del_site() {  # del_site [域名]   (DEL_MODE=uninstall 时: 程序文件直接删, 只问数据库和用户数据)
+del_site() {  # [域名]   (DEL_MODE=uninstall 时: 程序文件直接删, 只问数据库和用户数据)
   use_site "${1:-}" || return 1
   local d=$DOMAIN app=${APP:-} mode=${DEL_MODE:-} x db="" dbu="" del_files=0 del_data=0 del_db=0
   local -a files=() data=()
@@ -1502,7 +1468,7 @@ del_site() {  # del_site [域名]   (DEL_MODE=uninstall 时: 程序文件直接�
   info "已$([[ $mode == uninstall ]] && echo 卸载 || echo 删除) $d"
 }
 
-app_site_uninstall() {  # app_site_uninstall 域名 : 程序菜单里的 [卸载]
+app_site_uninstall() {  # 域名 : 程序菜单里的 [卸载]
   local d=$1
   title "卸载 ${APP_NAMES[$(app_of_site "$d")]:-程序} · $d"
   DEL_MODE=uninstall del_site "$d"
@@ -1548,7 +1514,7 @@ site_summary() {
   echo "  防CC/bot: $([[ ${GUARD:-0} == 1 ]] && echo "${G}已开启${N} ($(guard_level_name "${GUARD_LEVEL:-2}"))" || echo 未开启)"
 }
 
-need_type() {  # need_type 类型...  (当前 TYPE 不在其中则提示)
+need_type() {  # 类型...  (当前 TYPE 不在其中则提示)
   local t
   for t in "$@"; do [[ $TYPE == "$t" ]] && return 0; done
   warn "该选项不适用于「$(type_name "$TYPE")」"
@@ -1774,7 +1740,7 @@ site_ip_rules() {
   done
 }
 
-site_toggle() {  # 停用/启用
+site_toggle() {
   load_meta "$1"
   if [[ $DISABLED == 1 ]]; then DISABLED=0; apply_site && info "站点已启用"
   else confirm "停用 $DOMAIN? (访问将失效, 数据保留)" y && { DISABLED=1; apply_site && info "站点已停用"; }; fi
@@ -1972,7 +1938,7 @@ guard_server_lines() {  # 输出站点配置里的防护指令 (依赖 load_meta
   echo "    limit_conn wsm_conn 60;"
 }
 
-guard_log() {  # guard_log 域名: 最近被拦截的情况 (原因 / 路径 / IP / 程序名), 可以一键放行路径
+guard_log() {  # 域名: 最近被拦截的情况 (原因 / 路径 / IP / 程序名), 可以一键放行路径
   local f="/var/log/nginx/$1.access.log" n n444 n429 p
   local -a top=()
   [[ -f $f ]] || { warn "还没有访问日志"; return 0; }
@@ -2014,7 +1980,7 @@ guard_warn() {  # 开启防护前的提示 (只说一次)
   echo
 }
 
-guard_set() {  # guard_set 域名 on|off   (GUARD_NOWARN=1 时不提示)
+guard_set() {  # 域名 on|off   (GUARD_NOWARN=1 时不提示)
   load_meta "$1"
   if [[ $2 == on ]]; then
     if [[ -z ${GUARD_NOWARN:-} && ${GUARD:-0} != 1 ]]; then
@@ -2035,7 +2001,7 @@ guard_set() {  # guard_set 域名 on|off   (GUARD_NOWARN=1 时不提示)
   fi
 }
 
-guard_menu() {  # guard_menu 域名
+guard_menu() {
   local d=$1 c lv
   while true; do
     load_meta "$d"
@@ -2067,12 +2033,12 @@ guard_menu() {  # guard_menu 域名
   done
 }
 
-guard_skip_set() {  # guard_skip_set 域名 "路径 路径..." : 保存放行路径并更新规则
+guard_skip_set() {  # 域名 "路径 路径..." : 保存放行路径并更新规则
   ( load_meta "$1"; GUARD_SKIP=$2; save_meta )
   guard_refresh_global
 }
 
-guard_skip_add() {  # guard_skip_add 域名 路径
+guard_skip_add() {
   local p=$2 cur
   [[ $p == /* ]] || p="/$p"
   [[ $p =~ ^/[A-Za-z0-9._~/-]{0,100}$ ]] || { err "路径格式不正确 (如 /probe.php 或 /api/)"; return 1; }
@@ -2081,7 +2047,7 @@ guard_skip_add() {  # guard_skip_add 域名 路径
   guard_skip_set "$1" "${cur:+$cur }$p" && info "已放行: $p (以 $p 开头的地址都不限速、不检查程序名)"
 }
 
-guard_skip_menu() {  # guard_skip_menu 域名
+guard_skip_menu() {
   local d=$1 c p cur
   local -a arr=()
   while true; do
@@ -2125,7 +2091,7 @@ guard_summary() {
   if ((n)); then echo "${G}$n${N}/$t 个站点已开启"; else echo "0/$t 个站点已开启"; fi
 }
 
-guard_overview() {  # 安全防护 → 防 CC / 恶意 bot: 所有站点一览
+guard_overview() {
   local c d st
   local -a sites=() opts=()
   while true; do
@@ -2157,7 +2123,7 @@ guard_overview() {  # 安全防护 → 防 CC / 恶意 bot: 所有站点一览
   done
 }
 
-guard_cli() {  # wsm guard [站点] [on|off]
+guard_cli() {
   use_site "${1:-}" || return 1
   case ${2:-} in
     on|off) guard_set "$SITE" "$2" ;;
@@ -2223,7 +2189,7 @@ chattr_ok() {  # 测试目录所在文件系统是否支持 chattr +i
   chattr -i "$t" 2>/dev/null; rm -f "$t"; return 1
 }
 
-tamper_prune_args() {  # tamper_prune_args 基准目录 -> TP_ARGS (find 的排除参数)
+tamper_prune_args() {  # 基准目录 -> TP_ARGS (find 的排除参数)
   TP_ARGS=()
   local ex first=1
   for ex in $TAMPER_EXCLUDE; do
@@ -2322,7 +2288,7 @@ tamper_unlock() {
   info "已解锁, 现在可以更新网站文件。改完后请回到这里重新锁定 (会自动刷新基线)"
 }
 
-tamper_check() {  # tamper_check [域名] [ask|report|restore]
+tamper_check() {
   use_site "${1:-}" || return 1
   local mode=${2:-ask} bd bl changed new nc nn f
   bd=$(baseline_dir); bl=$bd/$DOMAIN.sha256
@@ -2440,7 +2406,6 @@ php_uninstall() {
   systemctl disable --now "$(php_svc "$v")" >/dev/null 2>&1 || true
   if [[ $PM == apt ]]; then apt-get purge -y "php$v-*" && apt-get autoremove -y
   else dnf remove -y "php$(php_pkgver "$v")-php-*"; fi
-  # 清理残留的配置目录, 避免列表里还显示
   if [[ $PM == apt ]]; then rm -rf "/etc/php/$v"
   else rm -rf "/etc/opt/remi/php$(php_pkgver "$v")"; fi
   info "PHP $v 已卸载"
@@ -2637,7 +2602,7 @@ install_pma() {
 }
 
 # ================================================================ 备份 / 还原
-backup_site() {  # backup_site [域名] [保留份数]
+backup_site() {
   use_site "${1:-}" || return 1
   local keep=${2:-7} f
   [[ -n $ROOT && -d $ROOT ]] || { warn "该站点没有网站目录可备份"; return 1; }
@@ -2649,7 +2614,7 @@ backup_site() {  # backup_site [域名] [保留份数]
   info "已备份: $f ($(du -h "$f" | cut -f1)), 保留最近 $keep 份"
 }
 
-backup_db() {  # backup_db 库名|--all [保留份数]
+backup_db() {
   need_mysql || return 1
   local target=${1:-} keep=${2:-7} n f
   if [[ -z $target ]]; then pick_db || return 1; target=$DBNAME; fi
@@ -2674,7 +2639,7 @@ list_backups() {
   echo "数据库备份 ($BACKUP_DIR/db):"; ls -lh "$BACKUP_DIR/db" 2>/dev/null | awk 'NR>1{print "   " $9 "  " $5}'
 }
 
-pick_file() {  # pick_file 目录 通配 -> PICKED_FILE
+pick_file() {  # 目录 通配 -> PICKED_FILE
   PICKED_FILE=""
   local i=0 f c
   local -a arr=()
@@ -2854,7 +2819,7 @@ toggle_block_ip() {
   else err "配置冲突, 已回滚:"; cat /tmp/wsm_nginx_err >&2; rm -f "$f"; fi
 }
 
-svc_list() {  # 需要管理的服务 (去掉别名重复, 如 redis 和 redis-server 是同一个)
+svc_list() {
   local x u id
   local -A seen=()
   {
@@ -2874,7 +2839,7 @@ svc_list() {  # 需要管理的服务 (去掉别名重复, 如 redis 和 redis-s
 
 svc_boot() { systemctl is-enabled --quiet "$1" 2>/dev/null && echo "${G}开${N}" || echo "${Y}关${N}"; }
 
-svc_table() {  # svc_table 服务...
+svc_table() {
   local x
   printf '   '; pad_w "服务" 26; pad_w "状态" 10; echo "开机自启"
   for x in "$@"; do
@@ -2937,7 +2902,6 @@ self_install() {
   if [[ -f $me && $me != "$WSM_BIN" && $me != /proc/* && $me != /dev/* ]]; then
     install -m755 "$me" "$WSM_BIN" && info "已安装命令: ${G}wsm${N} (之后直接输入 wsm 即可, ssb 也可以)"
   elif [[ ! -f $WSM_BIN ]]; then
-    # 通过 bash <(curl ...) 运行: 从仓库下载一份
     update_load 2>/dev/null
     tmp=$(mktemp)
     if curl -fsSL --retry 2 --max-time 60 "${UPDATE_URL:-$UPDATE_DEFAULT_URL}" -o "$tmp" 2>/dev/null \
@@ -3132,7 +3096,7 @@ app_version() {
     monitor) htop --version 2>/dev/null | head -1 ;;
   esac
 }
-app_service() {  # 输出该软件对应的 systemd 服务名(没有则为空)
+app_service() {
   case $1 in
     webbase) echo nginx ;;
     mariadb) echo mariadb ;; postgresql) echo postgresql ;; memcached) echo memcached ;;
@@ -3439,7 +3403,7 @@ APPS_LOADED=()
 
 app_id_ok() { [[ $1 =~ ^[a-z][a-z0-9_]{1,30}$ ]]; }
 
-app_file_check() {  # app_file_check 文件 [期望的id] -> APP_CHECK_ID ; 检查模块文件是否合格
+app_file_check() {  # 文件 [期望的id] -> APP_CHECK_ID ; 检查模块文件是否合格
   local f=$1 want=${2:-} id
   APP_CHECK_ID=""
   [[ -s $f ]] || { err "模块文件是空的"; return 1; }
@@ -3451,7 +3415,7 @@ app_file_check() {  # app_file_check 文件 [期望的id] -> APP_CHECK_ID ; 检�
   APP_CHECK_ID=$id
 }
 
-apps_load() {  # 载入全部已添加的模块 (语法错误的跳过)
+apps_load() {
   local f id APP_ID APP_NAME APP_DESC APP_VER APP_TYPE
   APPS_LOADED=()
   [[ -d $APPS_DIR ]] || return 0
@@ -3478,18 +3442,18 @@ app_soft() { [[ ${APP_TYPES[$1]:-site} == soft ]]; }
 app_soft_installed() { app_has "$1" installed && "app_${1}_installed"; }
 
 app_of_site() { ( load_meta "$1" 2>/dev/null; echo "${APP:-}" ); }
-app_site_call() {  # app_site_call 域名 钩子 参数... : 调用该站点所属模块的钩子
+app_site_call() {  # 域名 钩子 参数... : 调用该站点所属模块的钩子
   local d=$1 fn=$2 id; shift 2
   id=$(app_of_site "$d")
   [[ -n $id ]] && app_call "$id" "$fn" "$@"
   return 0
 }
 
-app_mark_site() {  # app_mark_site 域名 模块id : 记录站点属于哪个程序
+app_mark_site() {  # 域名 模块id : 记录站点属于哪个程序
   ( load_meta "$1" || exit 1; APP=$2; save_meta )
 }
 
-app_sites() {  # app_sites 模块id : 列出属于该模块的站点
+app_sites() {  # 模块id : 列出属于该模块的站点
   local d
   while read -r d; do
     [[ -n $d ]] || continue
@@ -3498,7 +3462,7 @@ app_sites() {  # app_sites 模块id : 列出属于该模块的站点
   return 0
 }
 
-app_status() {  # 菜单里显示的状态
+app_status() {
   local n
   if app_soft "$1"; then
     if app_soft_installed "$1"; then echo "${G}已装${N}"; else echo "${D}未装${N}"; fi
@@ -3508,7 +3472,7 @@ app_status() {  # 菜单里显示的状态
   fi
 }
 
-apps_units() {  # 所有模块的后台服务 (去重)
+apps_units() {
   local d id
   {
     for id in "${APPS_LOADED[@]}"; do app_soft "$id" && app_call "$id" units; done
@@ -3540,7 +3504,7 @@ app_repo_base() {  # 模块仓库地址 (和脚本更新地址同一个仓库的
   echo "${WSM_APPS_URL:-${UPDATE_URL%/*}/apps}"
 }
 
-app_fetch() {  # app_fetch 来源(id/网址/本地文件) -> APP_FETCHED (临时文件)
+app_fetch() {  # 来源(id/网址/本地文件) -> APP_FETCHED (临时文件)
   local src=$1 tmp
   APP_FETCHED=""
   tmp=$(mktemp)
@@ -3554,7 +3518,7 @@ app_fetch() {  # app_fetch 来源(id/网址/本地文件) -> APP_FETCHED (临时
   APP_FETCHED=$tmp
 }
 
-app_install_file() {  # app_install_file 临时文件 : 检查并放进模块目录
+app_install_file() {  # 临时文件 : 检查并放进模块目录
   app_file_check "$1" || { rm -f "$1"; return 1; }
   mkdir -p "$APPS_DIR" "$APPS_DATA"
   install -m 644 "$1" "$APPS_DIR/$APP_CHECK_ID.sh"; rm -f "$1"
@@ -3565,7 +3529,7 @@ app_install_file() {  # app_install_file 临时文件 : 检查并放进模块目
   info "已添加模块: ${APP_NAMES[$APP_CHECK_ID]} ($APP_CHECK_ID${APP_VERS[$APP_CHECK_ID]:+ v${APP_VERS[$APP_CHECK_ID]}})"
 }
 
-app_add() {  # app_add [来源]
+app_add() {
   local src=${1:-} idx line id c
   local -a ids=() names=()
   if [[ -z $src ]]; then
@@ -3595,7 +3559,7 @@ app_add() {  # app_add [来源]
   app_install_file "$APP_FETCHED"
 }
 
-app_update_module() {  # app_update_module id : 从仓库重新下载模块
+app_update_module() {  # id : 从仓库重新下载模块
   local id=$1
   app_fetch "$id" || return 1
   if cmp -s "$APP_FETCHED" "$APPS_DIR/$id.sh"; then rm -f "$APP_FETCHED"; info "模块已是最新"; return 0; fi
@@ -3603,7 +3567,7 @@ app_update_module() {  # app_update_module id : 从仓库重新下载模块
   app_install_file "$APP_FETCHED"
 }
 
-app_remove() {  # app_remove id
+app_remove() {
   local id=$1 d c=""
   local -a sites=()
   [[ -f $APPS_DIR/$id.sh ]] || { err "没有这个模块: $id"; return 1; }
@@ -3666,7 +3630,7 @@ apps_migrate_once() {  # 老版本升级上来时: 自动找回已在用的程�
   return 0
 }
 
-app_deploy_menu() {  # 网站管理 → 部署网站应用 (只列网站类模块)
+app_deploy_menu() {
   local c id
   local -a opts=() ids=()
   for id in "${APPS_LOADED[@]}"; do
@@ -3680,7 +3644,7 @@ app_deploy_menu() {  # 网站管理 → 部署网站应用 (只列网站类模�
   done
 }
 
-app_module_menu() {  # 单个模块的菜单
+app_module_menu() {
   local id=$1 c d
   local -a sites=() opts=()
   while true; do
@@ -3722,7 +3686,7 @@ app_module_menu() {  # 单个模块的菜单
   done
 }
 
-app_cli() {  # wsm app ...
+app_cli() {
   local a=${1:-list} id
   case $a in
     list)
@@ -3751,7 +3715,7 @@ app_cli() {  # wsm app ...
 
 # ---------------------------------------------------------------- 给模块用的公共函数
 # 版本检测: 先查 GitHub Releases 接口 (带发布日期), 查不到 (限流/网络) 再用 git 读标签
-ver_gh_latest() {  # ver_gh_latest owner/repo -> 输出 "版本|日期" (日期可能为空)
+ver_gh_latest() {
   local r=$1 j tag="" date=""
   j=$(curl -fsSL --max-time 15 -H 'Accept: application/vnd.github+json' \
       "https://api.github.com/repos/$r/releases/latest" 2>/dev/null)
@@ -3765,12 +3729,12 @@ ver_gh_latest() {  # ver_gh_latest owner/repo -> 输出 "版本|日期" (日期�
   echo "$tag|$date"
 }
 
-ver_newer() {  # ver_newer 当前 最新 : 最新 比 当前 新则返回 0
+ver_newer() {  # 当前 最新 : 最新 比 当前 新则返回 0
   local a=${1#v} b=${2#v}
   [[ -n $b && $a != "$b" && $(printf '%s\n%s\n' "$a" "$b" | sort -V | tail -1) == "$b" ]]
 }
 
-ver_pick() {  # ver_pick 程序名 owner/repo -> PICK_VER (空 = 用 latest 链接)
+ver_pick() {  # 程序名 owner/repo -> PICK_VER (空 = 用 latest 链接)
   local x tag="" date="" v
   PICK_VER=""
   info "检查 $1 最新版本 ..."
@@ -3786,19 +3750,19 @@ ver_pick() {  # ver_pick 程序名 owner/repo -> PICK_VER (空 = 用 latest 链�
   return 0
 }
 
-gh_asset_url() {  # gh_asset_url owner/repo 版本(可空) 文件名
+gh_asset_url() {  # owner/repo 版本(可空) 文件名
   if [[ -n $2 ]]; then echo "https://github.com/$1/releases/download/$2/$3"
   else echo "https://github.com/$1/releases/latest/download/$3"; fi
 }
 
-arch_go() {  # Go 程序常用的架构名
+arch_go() {
   case $(uname -m) in
     x86_64|amd64) echo amd64 ;; aarch64|arm64) echo arm64 ;; armv7*) echo arm-7 ;; s390x) echo s390x ;;
     *) uname -m ;;
   esac
 }
 
-app_new_domain() {  # app_new_domain 变量名 提示 : 输入新站点的域名并检查可用
+app_new_domain() {  # 变量名 提示 : 输入新站点的域名并检查可用
   local _nd=${!1:-} _nu
   ask _nd "$2" || return 1
   valid_domain "$_nd" || { err "域名格式不正确: $_nd"; return 1; }
@@ -3807,13 +3771,13 @@ app_new_domain() {  # app_new_domain 变量名 提示 : 输入新站点的域名
   printf -v "$1" "%s" "$_nd"
 }
 
-app_need_db() {  # app_need_db 程序名 : 没有数据库就先装
+app_need_db() {  # 程序名 : 没有数据库就先装
   command -v mysql >/dev/null 2>&1 && return 0
   confirm "$1 需要数据库, 现在安装 MariaDB 吗?" y || return 1
   install_db
 }
 
-app_db_new() {  # app_db_new 前缀 域名 -> ADB_NAME ADB_USER ADB_PASS
+app_db_new() {  # 前缀 域名 -> ADB_NAME ADB_USER ADB_PASS
   local k; k=$(printf '%s' "$2" | tr -c 'A-Za-z0-9' '_' | cut -c1-12)
   ADB_NAME="${1}_${k}_$(openssl rand -hex 2)"; ADB_USER=$ADB_NAME
   ADB_PASS=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 20)
@@ -3822,14 +3786,14 @@ CREATE USER '$ADB_USER'@'localhost' IDENTIFIED BY '$ADB_PASS'; \
 GRANT ALL PRIVILEGES ON \`$ADB_NAME\`.* TO '$ADB_USER'@'localhost'; FLUSH PRIVILEGES;"
 }
 
-app_db_drop() {  # app_db_drop 库名 [账号] : 删除数据库和它的账号 (账号默认和库同名)
+app_db_drop() {  # 库名 [账号] : 删除数据库和它的账号 (账号默认和库同名)
   [[ $1 =~ ^[A-Za-z0-9_]+$ ]] || return 0
   local u=${2:-$1}
   [[ $u =~ ^[A-Za-z0-9_]+$ && $u != root ]] || u=$1
   mysql -e "DROP DATABASE IF EXISTS \`$1\`; DROP USER IF EXISTS '$u'@'localhost';" 2>/dev/null
 }
 
-php_exts_ensure() {  # php_exts_ensure PHP版本 扩展...  (尽力安装, 装不上的跳过)
+php_exts_ensure() {  # PHP版本 扩展...  (尽力安装, 装不上的跳过)
   local v=$1 pv e; shift
   pv=$(php_pkgver "$v")
   for e in "$@"; do
@@ -3843,7 +3807,7 @@ php_exts_ensure() {  # php_exts_ensure PHP版本 扩展...  (尽力安装, 装�
 }
 
 # shellcheck disable=SC2034  # PICK_PHP 给模块用
-php_pick_min() {  # php_pick_min 最低版本 程序名 -> PICK_PHP (没有合适的就装 8.3)
+php_pick_min() {  # 最低版本 程序名 -> PICK_PHP (没有合适的就装 8.3)
   local x; local -a list=()
   PICK_PHP=""
   for x in $(php_installed | sort -V); do
@@ -3858,12 +3822,12 @@ php_pick_min() {  # php_pick_min 最低版本 程序名 -> PICK_PHP (没有合�
   fi
 }
 
-app_site_conf() {  # app_site_conf 域名 : 从标准输入写入站点的程序专用 Nginx 规则
+app_site_conf() {  # 域名 : 从标准输入写入站点的程序专用 Nginx 规则
   # 规则会放进站点 server 块里; __PHP_SOCK__ 会替换成站点当前 PHP 版本的 sock (切换 PHP 后自动跟着变)
   cat > "$META_DIR/$1.app.nginx"
 }
 
-app_systemd() {  # app_systemd 服务名 说明 工作目录 启动命令 [用户] [Environment...]
+app_systemd() {
   local name=$1 desc=$2 wd=$3 exec=$4 user=${5:-root} e; shift 5 2>/dev/null || shift $#
   {
     echo "[Unit]"
@@ -3886,18 +3850,18 @@ app_systemd() {  # app_systemd 服务名 说明 工作目录 启动命令 [用�
   systemctl enable --now "$name" >/dev/null 2>&1
 }
 
-app_proxy_site() {  # app_proxy_site 域名 本机端口 : 建反向代理站点 (会问绑定域名和 HTTPS)
+app_proxy_site() {  # 域名 本机端口 : 建反向代理站点 (会问绑定域名和 HTTPS)
   add_site proxy "$1" "http://127.0.0.1:$2"
 }
 
 app_ver_set() { mkdir -p "$APPS_DATA/$1"; echo "$2" > "$APPS_DATA/$1/version"; }  # 记录已装版本
 app_ver_get() { head -1 "$APPS_DATA/$1/version" 2>/dev/null; }
 
-app_port_free() {  # app_port_free 端口 : 端口没被占用返回 0
+app_port_free() {  # 端口 : 端口没被占用返回 0
   ! ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$1\$"
 }
 
-app_check_update() {  # app_check_update 程序名 owner/repo 当前版本 : 有新版返回 0, 新版本放在 PICK_VER
+app_check_update() {  # 程序名 owner/repo 当前版本 : 有新版返回 0, 新版本放在 PICK_VER
   local x tag date
   PICK_VER=""
   info "检查 $1 最新版本 ..."
@@ -3911,7 +3875,7 @@ app_check_update() {  # app_check_update 程序名 owner/repo 当前版本 : 有
   return 0
 }
 
-app_wait_port() {  # app_wait_port 端口 [秒] : 等程序启动监听
+app_wait_port() {  # 端口 [秒] : 等程序启动监听
   local i
   for ((i = 0; i < ${2:-30}; i++)); do
     ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$1\$" && return 0
@@ -4017,7 +3981,7 @@ END {
 AWK
 )
 
-hb() {  # 字节数 -> 易读
+hb() {
   awk -v b="${1:-0}" 'BEGIN{split("B KB MB GB TB",u," ");i=1;while(b>=1024&&i<5){b/=1024;i++}; if(i==1)printf "%d%s",b,u[i]; else printf "%.1f%s",b,u[i]}'
 }
 
@@ -4031,7 +3995,7 @@ stat_dates() {  # 1=今天 y=昨天 N=最近N天 all=不限
   echo "${out%|}"
 }
 
-stat_stream() {  # stat_stream 域名 范围
+stat_stream() {
   local f=/var/log/nginx/$1.access.log x
   if [[ $2 != 1 ]]; then
     for x in "$f".[0-9]*; do
@@ -4043,7 +4007,7 @@ stat_stream() {  # stat_stream 域名 范围
   return 0
 }
 
-stat_collect() {  # stat_collect 域名 范围 -> 填充 ST[] 和 $STAT_TMP
+stat_collect() {  # 域名 范围 -> 填充 ST[] 和 $STAT_TMP
   local d=$1 range=$2 dates t k v
   dates=$(stat_dates "$range")
   STAT_TMP=$(mktemp)
@@ -4052,7 +4016,7 @@ stat_collect() {  # stat_collect 域名 范围 -> 填充 ST[] 和 $STAT_TMP
   while IFS=$'\t' read -r t k v; do [[ $t == S ]] && ST[$k]=$v; done < "$STAT_TMP"
 }
 
-stat_top() {  # stat_top 标签 条数
+stat_top() {
   local c k
   awk -F'\t' -v t="$1" '$1==t{print $2"\t"$3}' "$STAT_TMP" | sort -t$'\t' -k1,1nr | head -n "$2" |
   while IFS=$'\t' read -r c k; do
@@ -4113,7 +4077,7 @@ stat_verify() {  # 核实自称搜索引擎的 IP: 反向 DNS 查域名, 再正�
   done < <(awk -F'\t' '$1=="cl"{print $2"\t"$3"\t"$4}' "$STAT_TMP" | sort -t$'\t' -k1,1nr | head -n 8)
 }
 
-stat_show() {  # stat_show 域名 范围 范围名   (STAT_ASK=1 时最后询问是否核实搜索引擎)
+stat_show() {  # 域名 范围 范围名   (STAT_ASK=1 时最后询问是否核实搜索引擎)
   local d=$1 range=$2 rname=${3:-} max=0 c h t bar n
   [[ -e /var/log/nginx/$d.access.log ]] || { warn "暂无访问日志"; return 1; }
   stat_collect "$d" "$range"
@@ -4164,7 +4128,7 @@ stat_show() {  # stat_show 域名 范围 范围名   (STAT_ASK=1 时最后询问
   rm -f "$STAT_TMP"
 }
 
-stat_overview() {  # stat_overview 范围 范围名
+stat_overview() {
   local d name
   title "全部站点 · 访问概览"
   echo "  范围: $2"
@@ -4192,7 +4156,7 @@ stats_menu() {
   esac
 }
 
-stats_cli() {  # wsm stats [域名] [1|y|7|30|all]
+stats_cli() {
   local d=${1:-} r=${2:-1}
   case $r in 1|y|7|30|all) ;; *) die "范围只能是 1(今天) y(昨天) 7 30 all" ;; esac
   if [[ -z $d ]]; then stat_overview "$r" "$r"; else pick_site "$d" || return 1; stat_show "$d" "$r" "$r"; fi
@@ -4201,13 +4165,13 @@ stats_cli() {  # wsm stats [域名] [1|y|7|30|all]
 # ================================================================ 通用小工具
 sshd_service() { if unit_exists ssh; then echo ssh; else echo sshd; fi; }
 
-ssh_port_now() {  # 当前 SSH 端口
+ssh_port_now() {
   local p
   p=$(sshd -T 2>/dev/null | awk '$1=="port"{print $2; exit}')
   echo "${p:-22}"
 }
 
-files_trunc() {  # files_trunc 文本 [最大宽度]  (太长时保留结尾)
+files_trunc() {  # 文本 [最大宽度]  (太长时保留结尾)
   local s=$1 n=${2:-30}
   if ((${#s} > n)); then s="~${s: -$((n - 1))}"; fi
   printf '%s' "$s"
@@ -4222,7 +4186,7 @@ UPDATED=0
 UPD_TMP=""
 SELF_LAST_BAK=""
 
-update_changes() {  # update_changes 新脚本 : 显示比当前版本新的更新内容
+update_changes() {  # 新脚本 : 显示比当前版本新的更新内容
   local v rest n=0
   while read -r v rest; do
     # 只显示比当前版本新的; 当前版本没写更新说明时 (如 2.11.5), 遇到更旧的条目也停下
@@ -4285,7 +4249,7 @@ update_fetch() {  # -> UPD_TMP
   fi
 }
 
-update_install_file() {  # update_install_file 新文件 : 备份当前版本并替换 (-> SELF_LAST_BAK)
+update_install_file() {  # 新文件 : 备份当前版本并替换 (-> SELF_LAST_BAK)
   mkdir -p "$SELF_BAK"
   SELF_LAST_BAK=""
   if [[ -f $WSM_BIN ]]; then
@@ -4297,7 +4261,7 @@ update_install_file() {  # update_install_file 新文件 : 备份当前版本并
   install -m 755 "$1" "$WSM_BIN.new" && mv -f "$WSM_BIN.new" "$WSM_BIN"
 }
 
-update_run() {  # update_run [-y]
+update_run() {
   local yes=${1:-} vnew
   UPDATED=0
   update_load
@@ -4361,7 +4325,6 @@ update_menu() {
   done
 }
 
-# ================================================================ 菜单
 # ================================================================ Telegram 告警
 # 每 5 分钟检查一次 (cron, 跑完就退出, 不常驻):
 #   服务挂了先自动重启, 重启好了/没好/恢复 都发消息; 磁盘快满; 证书快到期 (每天最多一次); 全量备份结果
@@ -4391,7 +4354,7 @@ tg_save() {
 
 tg_ready() { tg_load; [[ -n $TG_TOKEN && -n $TG_CHAT ]]; }
 
-tg_send() {  # tg_send 文本
+tg_send() {
   tg_ready || return 1
   local ip=${SERVER_IP:-}
   [[ -n $ip ]] || ip=$(public_ip)
@@ -4401,7 +4364,7 @@ tg_send() {  # tg_send 文本
 $1"
 }
 
-tg_event() {  # tg_event 类型 文本 (backup 类型受开关控制)
+tg_event() {  # 类型 文本 (backup 类型受开关控制)
   tg_ready || return 0
   [[ $1 == backup && $TG_ON_BACKUP != 1 ]] && return 0
   tg_send "$2" || true
@@ -4434,7 +4397,7 @@ mon_units() {  # 需要监控的服务 (只看开机自启的)
   return 0
 }
 
-mon_check() {  # 定时任务: wsm monitor
+mon_check() {
   tg_ready || return 0
   exec 8>/run/wsm-monitor.lock
   flock -n 8 || return 0
@@ -4718,7 +4681,7 @@ for d in sorted(dists, key=lambda x: norm(x.metadata["Name"])):
 PY
 }
 
-fb_bots_backup() {  # fb_bots_backup 暂存目录 : 每个机器人一个子目录
+fb_bots_backup() {  # 暂存目录 : 每个机器人一个子目录
   local st=$1 u wd ef n=0
   local -a paths=()
   while IFS='|' read -r u wd ef; do
@@ -4749,7 +4712,7 @@ fb_bots_backup() {  # fb_bots_backup 暂存目录 : 每个机器人一个子目�
   return 0
 }
 
-fb_pip_install() {  # fb_pip_install 依赖清单文件 : 装到系统 Python (只装不删)
+fb_pip_install() {  # 依赖清单文件 : 装到系统 Python (只装不删)
   local f=$1 flag="" out
   [[ -s $f ]] || return 0
   command -v pip3 >/dev/null 2>&1 || pkg_install python3-pip >/dev/null 2>&1 || { warn "pip 安装失败, 依赖没装"; return 1; }
@@ -4768,7 +4731,7 @@ fb_pip_install() {  # fb_pip_install 依赖清单文件 : 装到系统 Python (�
   [[ -z $fails ]] || { warn "  这些依赖没装上:$fails"; return 1; }
 }
 
-fb_bot_restore() {  # fb_bot_restore 备份里的机器人目录
+fb_bot_restore() {
   # shellcheck disable=SC2034  # BOT_ENV / BOT_ACTIVE 来自 info.env, 留着给以后用
   local d=$1 BOT_UNIT="" BOT_DIR="" BOT_ENV="" BOT_PY="" BOT_ACTIVE="" req
   # shellcheck disable=SC1091
@@ -4859,7 +4822,7 @@ php_ext_pkg() {  # php -m 里的扩展名 -> 软件包里的扩展名 (空 = 跟
   esac
 }
 
-fb_php_exts_restore() {  # fb_php_exts_restore 清单文件 : 补装新服务器上缺少的 PHP 扩展
+fb_php_exts_restore() {  # 清单文件 : 补装新服务器上缺少的 PHP 扩展
   local f=$1 v e pkg b miss fails=""
   [[ -s $f ]] || return 0
   for v in $(awk '{print $1}' "$f" | sort -u); do
@@ -4886,7 +4849,7 @@ fb_php_exts_restore() {  # fb_php_exts_restore 清单文件 : 补装新服务器
   return 0
 }
 
-fb_soft_restore() {  # fb_soft_restore "软件..." Node大版本 : 补装旧服务器上有、本机没有的软件
+fb_soft_restore() {  # "软件..." Node大版本 : 补装旧服务器上有、本机没有的软件
   local a fails=""
   for a in $1; do
     app_valid "$a" 2>/dev/null || continue
@@ -4915,7 +4878,7 @@ fb_cmd_list() {  # /usr/local/bin 下自己装的命令 (如 tgbot): shell 脚�
   done
 }
 
-fb_cmd_restore() {  # fb_cmd_restore 备份目录 : 还原自定义命令 (本机已有同名的不覆盖)
+fb_cmd_restore() {  # 备份目录 : 还原自定义命令 (本机已有同名的不覆盖)
   local b=$1 tmp f n=0
   [[ -f $b/cmds.tar.gz ]] || return 0
   tmp=$(mktemp -d)
@@ -4929,7 +4892,7 @@ fb_cmd_restore() {  # fb_cmd_restore 备份目录 : 还原自定义命令 (本�
   return 0
 }
 
-fb_ssh_restore() {  # fb_ssh_restore 端口 关密码(0|1) : 把旧服务器的 SSH 设置套用到本机
+fb_ssh_restore() {  # 端口 关密码(0|1) : 把旧服务器的 SSH 设置套用到本机
   local port=${1:-22} nopass=${2:-0} cur
   [[ $port =~ ^[0-9]+$ ]] || port=22
   cur=$(ssh_port_now)
@@ -4960,7 +4923,7 @@ fb_ssh_restore() {  # fb_ssh_restore 端口 关密码(0|1) : 把旧服务器的 
   return 0
 }
 
-fb_bot_syspkgs() {  # fb_bot_syspkgs 程序目录 : 机器人代码里调用的系统命令 -> 所属软件包名 (一行一个)
+fb_bot_syspkgs() {  # 程序目录 : 机器人代码里调用的系统命令 -> 所属软件包名 (一行一个)
   local wd=$1 c p real pkg
   [[ -n $wd && -d $wd ]] || return 0
   command -v python3 >/dev/null 2>&1 || return 0
@@ -5005,7 +4968,7 @@ PY
 ) | sort -u
 }
 
-fb_tar_part() {  # fb_tar_part 输出文件 路径... (相对 /; 没有路径就不生成)
+fb_tar_part() {  # 输出文件 路径... (相对 /; 没有路径就不生成)
   local out=$1; shift
   (($#)) || return 0
   tar -czpf "$out" -C / --ignore-failed-read --warning=no-file-changed \
@@ -5022,7 +4985,7 @@ fb_dump_users() {  # 导出数据库账号和权限 (MariaDB 10.2+)
     done
 }
 
-fb_create() {  # fb_create [auto] : 生成全量备份 -> FB_LAST
+fb_create() {  # [auto] : 生成全量备份 -> FB_LAST
   # 包里分开放: system / sites / extra / db / bots/<每个机器人>, 还原时可以分开选
   fb_load
   local mode=${1:-} ts host name stage p d need avail rc bots="" u wd ef
@@ -5105,7 +5068,7 @@ fb_create() {  # fb_create [auto] : 生成全量备份 -> FB_LAST
   echo "  网站 $(list_site_names | grep -c .) 个 · 数据库 $(db_names 2>/dev/null | grep -c .) 个 · 机器人: ${bots:-无}"
 }
 
-fb_upload() {  # fb_upload 文件 : 上传到全部异地目标, 并清理多余的旧备份; 返回失败个数
+fb_upload() {  # 文件 : 上传到全部异地目标, 并清理多余的旧备份; 返回失败个数
   fb_load
   local f=$1 t old host fails=0
   [[ -n $FB_TARGETS ]] || return 0
@@ -5124,7 +5087,7 @@ fb_upload() {  # fb_upload 文件 : 上传到全部异地目标, 并清理多余
   return "$fails"
 }
 
-fb_run() {  # fb_run [auto] : 备份 + 上传 + 通知 (定时任务调用 wsm backup-all auto)
+fb_run() {  # [auto] : 备份 + 上传 + 通知 (定时任务调用 wsm backup-all auto)
   local mode=${1:-} rc=0 size=""
   exec 9>/run/wsm-fullbak.lock
   flock -n 9 || { err "已经有一个全量备份正在运行"; return 1; }
@@ -5160,7 +5123,7 @@ fb_rclone_ensure() {
 
 fb_rclone_conf() { rclone config file 2>/dev/null | tail -1; }
 
-fb_rclone_add() {  # fb_rclone_add 名称 < 配置内容 (key = value 行)
+fb_rclone_add() {  # 名称 < 配置内容 (key = value 行)
   local f; f=$(fb_rclone_conf)
   [[ -n $f ]] || { err "找不到 rclone 配置文件位置"; return 1; }
   mkdir -p "$(dirname "$f")"
@@ -5177,7 +5140,7 @@ fb_name_ok() {  # 远程名称: 字母数字横线; 同名的旧配置没在用�
   rclone config delete "$1" >/dev/null 2>&1
 }
 
-fb_target_set() {  # fb_target_set 远程名 目录 : 测试并加入异地目标
+fb_target_set() {  # 远程名 目录 : 测试并加入异地目标
   local t="$1:$2"
   info "测试连接 ..."
   # 对象存储的令牌通常只能读写指定的桶, 不能建桶, 所以 mkdir 失败不算失败, 能列出目录才算连通
@@ -5210,7 +5173,7 @@ fb_gdrive_ask_client() {  # -> GD_CID GD_SEC (自己的 client_id, 可留空用 
   fi
 }
 
-fb_gdrive_auth() {  # fb_gdrive_auth [client_id] [secret] -> GD_TOKEN (手机浏览器授权)
+fb_gdrive_auth() {  # [client_id] [secret] -> GD_TOKEN (手机浏览器授权)
   local cid=${1:-} sec=${2:-} log pid i url gurl cb m
   local -a args=(authorize drive)
   [[ -n $cid ]] && args+=("$cid" "$sec")
@@ -5258,7 +5221,7 @@ fb_gdrive_auth() {  # fb_gdrive_auth [client_id] [secret] -> GD_TOKEN (手机浏
   rm -f "$log"
 }
 
-fb_gdrive_conf() {  # fb_gdrive_conf client_id secret token : 输出 rclone 配置内容
+fb_gdrive_conf() {  # client_id secret token : 输出 rclone 配置内容
   printf 'type = drive\nscope = drive\n'
   [[ -n $1 ]] && printf 'client_id = %s\nclient_secret = %s\n' "$1" "$2"
   printf 'token = %s\n' "$3"
@@ -5310,7 +5273,7 @@ fb_gdrive_reauth() {  # 已有的谷歌网盘换成自己的 client_id 并重新
 
 FB_REMOTE_PUBKEY_FIX='f=/etc/ssh/sshd_config; if grep -qE "^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config.d/" $f; then mkdir -p /etc/ssh/sshd_config.d; echo "PubkeyAuthentication yes" > /etc/ssh/sshd_config.d/00-wsm-pubkey.conf; else cp -a $f $f.wsm-bak; sed -i "1i PubkeyAuthentication yes" $f; fi; if sshd -t; then systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || service ssh reload; echo WSM_FIX_OK; fi'
 
-fb_ssh_keytest() {  # fb_ssh_keytest 主机 端口 用户 : 能否用备份密钥免密登录
+fb_ssh_keytest() {  # 主机 端口 用户 : 能否用备份密钥免密登录
   ssh -p "$2" -i "$FB_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o PreferredAuthentications=publickey \
       -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "$3@$1" true 2>/dev/null
 }
@@ -5604,7 +5567,7 @@ fb_pick_scp_file() {  # -> PICKED_FILE (从旧服务器直接拉取)
   PICKED_FILE=$FB_DIR/${f##*/}
 }
 
-fb_restore() {  # fb_restore [备份文件]
+fb_restore() {
   local file=${1:-} src tarf stage pass u v d okdb=0 bad=0 what b
   local do_site=1 do_bots=1
   local -a bots=() pick=()
@@ -5973,7 +5936,7 @@ cfw_toggle() { if cfw_active || [[ -f $CFW_UNIT ]]; then confirm "关闭源站�
 
 cfw_refresh() { cf_refresh_all; }
 
-cfw_cli() {  # wsm cf-firewall [on|off|apply|remove|refresh|status]
+cfw_cli() {
   case ${1:-status} in
     on) cfw_enable ;;
     off) cfw_disable ;;
@@ -6007,7 +5970,7 @@ cdn_all_ips() {  # Cloudflare + 自定义 CDN 的全部 IP 段 (去重)
     | grep -E '^[0-9a-fA-F:.]+/[0-9]+$' | sort -u
 }
 
-cdn_header() {  # 实际使用的真实 IP 请求头
+cdn_header() {
   local h=""
   [[ -s $CDN_HEADER_CONF ]] && h=$(head -1 "$CDN_HEADER_CONF")
   if [[ $h =~ ^[A-Za-z0-9-]{2,40}$ ]]; then echo "$h"
@@ -6075,7 +6038,7 @@ realip_write() {  # 生成/更新真实 IP 配置, nginx 检测不通过就恢�
   return 1
 }
 
-realip_set() {  # realip_set on|off
+realip_set() {
   if [[ $1 == off ]]; then
     local n=0 d
     while read -r d; do [[ -n $d ]] && [[ $( load_meta "$d" 2>/dev/null; echo "${GUARD:-0}" ) == 1 ]] && n=$((n + 1)); done < <(list_site_names)
@@ -6096,7 +6059,7 @@ cdn_apply() {  # CDN 列表变了: 更新真实 IP 配置和源站保护规则
   return 0
 }
 
-cdn_fetch_one() {  # cdn_fetch_one id : 从网址更新某个自定义 CDN 的 IP 段 (失败保留旧的)
+cdn_fetch_one() {  # id : 从网址更新某个自定义 CDN 的 IP 段 (失败保留旧的)
   local u tmp
   u=$(cdn_url "$1"); [[ -n $u ]] || return 0
   tmp=$(mktemp)
@@ -6215,7 +6178,7 @@ cdn_menu() {
   done
 }
 
-wsm_logrotate() {  # wsm 自己的日志按周轮转, 保留 4 份
+wsm_logrotate() {
   [[ -d /etc/logrotate.d ]] || return 0
   [[ -f /etc/logrotate.d/wsm ]] && return 0
   cat > /etc/logrotate.d/wsm <<'EOF'
@@ -6259,7 +6222,7 @@ SSH_AK=/root/.ssh/authorized_keys
 ssh_use_dropin() { grep -qE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/' "$SSH_MAIN" 2>/dev/null; }
 ssh_eff() { sshd -T 2>/dev/null | awk -v k="$1" '$1==k{print $2; exit}'; }
 
-ssh_wsm_get() {  # 读取 wsm 写入的某项设置
+ssh_wsm_get() {
   local src=""
   if [[ -f $SSH_DROPIN ]]; then src=$(cat "$SSH_DROPIN")
   else src=$(sed -n '/^# wsm-ssh begin/,/^# wsm-ssh end/p' "$SSH_MAIN" 2>/dev/null); fi
@@ -6289,7 +6252,7 @@ ssh_pass_mode() {  # wsm 当前写入的密码登录设置 -> ssh_apply 的第�
   case $(ssh_wsm_get PasswordAuthentication) in no) echo 1 ;; yes) echo 2 ;; *) echo 0 ;; esac
 }
 
-ssh_apply() {  # ssh_apply 密码登录(0=不管 1=关闭 2=强制开启) 端口(空或22=默认)
+ssh_apply() {  # 密码登录(0=不管 1=关闭 2=强制开启) 端口(空或22=默认)
   local nopass=$1 port=${2:-} bak dbak f tmp
   local -a body=()
   [[ -f $SSH_MAIN ]] || { err "找不到 $SSH_MAIN"; return 1; }
@@ -6375,7 +6338,7 @@ ssh_key_gen() {
   return 0
 }
 
-ssh_key_files_del() {  # 删除服务器上留存的私钥文件 (公钥不受影响)
+ssh_key_files_del() {
   local -a fs=()
   local f
   for f in "$SSH_KEYDIR"/*.key /root/.ssh/wsm-* "$OLD_KEYDIR"/*; do [[ -f $f && $f != *.pub ]] && fs+=("$f"); done
@@ -6455,7 +6418,7 @@ ssh_nopass_off() {
   return 0
 }
 
-ssh_fw_open() {  # 防火墙放行新端口
+ssh_fw_open() {
   local p=$1
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
     ufw allow "$p/tcp" >/dev/null && info "ufw 已放行 $p"
@@ -6741,12 +6704,10 @@ if [[ -f $SSH_TOOL_CONF ]]; then
   unset _u
 fi
 
-# 兼容原脚本的几个名字
 current_port() { ssh_port_now; }
 get_ip() { local ip; ip=$(public_ip); echo "${ip:-服务器IP}"; }
 pass_state() { ssh_nopass_now && echo "已禁用" || echo "允许"; }
 
-# 临时放行 / 关闭一个端口 (只给临时下载用, 不改 SELinux)
 tmp_port_open() {
     local port=$1
     if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
@@ -6886,7 +6847,7 @@ PY
     esac
 }
 
-# ---------------- 6. 端口转发 ----------------
+# ---------------- 端口转发 (TCP/UDP DNAT)
 # TCP/UDP DNAT 端口转发（来自 udp-f.sh，规则和独立脚本完全通用，两边都能看到、删除）
 #   - 支持 TCP+UDP / 仅 UDP / 仅 TCP，中转端口和落地端口可以不同
 #   - 重复添加相同转发不会重复写入；只处理 IPv4，不修改 SSH 等其他规则
@@ -6898,7 +6859,6 @@ LEGACY_ACCEPT_CHAIN="UDP_FORWARD_ACCEPT"
 
 FWD_RULES=()
 
-# ---------------------------------------------------------------- 通用函数
 
 fwd_install_iptables() {
     ensure_pkg iptables iptables "端口转发"
@@ -6908,8 +6868,6 @@ fwd_need_iptables() {
     command -v iptables >/dev/null 2>&1 || { err "未安装 iptables，没有可操作的规则。"; return 1; }
 }
 
-# 幂等添加规则：已存在则跳过
-# 用法：fwd_ensure [-t table] CHAIN rule...
 fwd_ensure() {
     local tbl=()
     if [[ "$1" == "-t" ]]; then
@@ -6922,8 +6880,7 @@ fwd_ensure() {
         iptables ${tbl[@]+"${tbl[@]}"} -A "$chain" "$@"
 }
 
-# 按正则筛选并删除规则
-# 用法：fwd_purge TABLE CHAIN REGEX...   （REGEX 以 ! 开头表示"不匹配"）
+# 用法: fwd_purge 表 链 正则...  (正则以 ! 开头表示不匹配)
 fwd_purge() {
     local table="$1" chain="$2"
     shift 2
@@ -6973,8 +6930,7 @@ fwd_save() {
     fi
 }
 
-# 读取当前所有转发规则到 FWD_RULES 数组
-# 每项格式：chain|proto|前端端口|落地IP|落地端口
+# FWD_RULES 每项: chain|proto|前端端口|落地IP|落地端口
 fwd_collect() {
     FWD_RULES=()
     local chain line proto front dest i
@@ -6998,7 +6954,6 @@ fwd_collect() {
     done
 }
 
-# 统计匹配的规则数，参数可用 * 作通配：fwd_count proto front ip port
 fwd_count() {
     local n=0 r chain proto front ip port
     for r in ${FWD_RULES[@]+"${FWD_RULES[@]}"}; do
@@ -7011,7 +6966,6 @@ fwd_count() {
     echo "$n"
 }
 
-# 打印规则列表，返回规则数量到 FWD_COUNT
 fwd_print() {
     fwd_collect
     FWD_COUNT=${#FWD_RULES[@]}
@@ -7030,7 +6984,6 @@ fwd_print() {
     done
 }
 
-# ---------------------------------------------------------------- 添加转发
 
 fwd_add() {
     local BACKEND_IP BACKEND_PORT FRONT_PORT PROTO_CHOICE CONFIRM
@@ -7139,9 +7092,7 @@ EOF
     info "重复添加相同配置不会重复写入相同规则。"
 }
 
-# ---------------------------------------------------------------- 删除转发
 
-# 删除单条转发（参数：chain|proto|前端端口|落地IP|落地端口）
 fwd_delete_one() {
     local entry="$1"
     local chain proto front ip port acc_chain ip_re
@@ -7151,7 +7102,6 @@ fwd_delete_one() {
     acc_chain="$ACCEPT_CHAIN"
     [[ "$chain" == "$LEGACY_DNAT_CHAIN" ]] && acc_chain="$LEGACY_ACCEPT_CHAIN"
 
-    # 1. 删除 DNAT 规则
     iptables -t nat -D "$chain" -p "$proto" --dport "$front" \
         -j DNAT --to-destination "${ip}:${port}" 2>/dev/null || true
 
@@ -7296,9 +7246,9 @@ forward_menu() {
     done
 }
 
-# ---------------- 导入公钥 ----------------
+# ---------------- 导入公钥
 # 从 GitHub 拉文件时先查最新提交, 按提交编号下载, 避开 raw 链接几分钟的缓存
-gh_fresh_url() {  # gh_fresh_url raw地址 -> 能拿到最新内容的地址
+gh_fresh_url() {  # raw地址 -> 能拿到最新内容的地址
     local u=$1 repo branch path sha
     if [[ "$u" =~ ^https://raw\.githubusercontent\.com/([^/]+/[^/]+)/([^/]+)/(.+)$ ]]; then
         repo=${BASH_REMATCH[1]}; branch=${BASH_REMATCH[2]}; path=${BASH_REMATCH[3]}
@@ -7432,7 +7382,7 @@ import_keys() {
     warn "确认能登录后，再到 SSH 安全 → 关闭密码登录"
 }
 
-# ---------------- 系统信息 ----------------
+# ---------------- 系统信息
 sys_info() {
     local os kern virt model cores load mem swap disk upt ip4 ip6 cc
     os=$( (. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME") || uname -s )
@@ -7468,8 +7418,8 @@ sys_info() {
     echo " IPv6：  ${ip6:-无}"
 }
 
-# ---------------- 内存性能测试 ----------------
-bench_sysbench_mem() {  # bench_sysbench_mem read|write 线程数 秒数 -> MB/s
+# ---------------- 内存性能测试
+bench_sysbench_mem() {  # read|write 线程数 秒数 -> MB/s
     sysbench memory --memory-block-size=1M --memory-total-size=100T --memory-oper="$1" \
         --threads="$2" --time="$3" run 2>/dev/null |
         sed -n 's/.*(\([0-9.]*\) MiB\/sec).*/\1/p' | head -1 | awk '{printf "%.0f", $1}'
@@ -7532,9 +7482,9 @@ mem_bench() {
     fi
 }
 
-# ---------------- CPU 占用状态 ----------------
+# ---------------- CPU 占用状态
 # 读 /proc 两次 (间隔几秒) 算出这段时间的真实占用; 不装任何工具, 看完就结束
-cpu_snap() {  # cpu_snap 文件 : 记录 各核 和 各进程 的累计 CPU 时间
+cpu_snap() {  # 文件 : 记录 各核 和 各进程 的累计 CPU 时间
     local f line rest pid
     local -a a
     grep '^cpu' /proc/stat > "$1.stat"
@@ -7548,14 +7498,14 @@ cpu_snap() {  # cpu_snap 文件 : 记录 各核 和 各进程 的累计 CPU 时�
     done
 }
 
-cpu_bar() {  # cpu_bar 百分比 -> 10 格进度条
+cpu_bar() {  # 百分比 -> 10 格进度条
     local n=$(( ($1 + 5) / 10 )) b="" i
     ((n > 10)) && n=10
     for ((i = 0; i < 10; i++)); do if ((i < n)); then b+="█"; else b+="░"; fi; done
     printf '%s' "$b"
 }
 
-cpu_usage_show() {  # cpu_usage_show 采样秒数
+cpu_usage_show() {
     local sec=$1 t hz cores load1 load5 load15 x us=0 ni=0 sy=0 id=100 wa=0 hi=0 si=0 st=0 tot=0 pid p
     t=$(mktemp)
     hz=$(getconf CLK_TCK 2>/dev/null || echo 100)
@@ -7603,7 +7553,6 @@ cpu_usage_show() {  # cpu_usage_show 采样秒数
     else
         echo " （这段时间没有程序明显占用 CPU）"
     fi
-    # 简单结论
     echo
     x=""
     awk -v v="$used" 'BEGIN{exit !(v >= 90)}' && x+=" CPU 基本跑满，网站/程序可能变慢；"
@@ -7645,8 +7594,8 @@ cpu_usage() {
     esac
 }
 
-# ---------------- 硬盘 IO 测试 ----------------
-io_dd() {  # io_dd 写|读 文件 MB数 -> 速度 (如 "512 MB/s")
+# ---------------- 硬盘 IO 测试
+io_dd() {  # 写|读 文件 MB数 -> 速度 (如 "512 MB/s")
     local out
     if [[ "$1" == 写 ]]; then
         out=$(LC_ALL=C dd if=/dev/zero of="$2" bs=1M count="$3" oflag=direct conv=fdatasync 2>&1) ||
@@ -7685,7 +7634,7 @@ io_bench() {
     echo " 参考：机械硬盘约 100 MB/s，普通 SSD 300 MB/s 以上，NVMe 可达 1 GB/s 以上"
 }
 
-# ---------------- BBR ----------------
+# ---------------- BBR
 BBR_CONF="/etc/sysctl.d/99-bbr.conf"
 
 bbr_menu() {
@@ -7728,7 +7677,7 @@ bbr_menu() {
     fi
 }
 
-# ---------------- 禁 Ping ----------------
+# ---------------- 禁 Ping
 # 用内核参数只关掉"回应 ping", 其他 ICMP (如探测网络 MTU 用的) 照常, 不影响正常上网和代理
 PING_CONF="/etc/sysctl.d/99-disable-ping.conf"
 
@@ -7771,7 +7720,7 @@ ping_menu() {
     fi
 }
 
-# ---------------- 回程线路检测 ----------------
+# ---------------- 回程线路检测
 # 从本机 traceroute 到国内 4 个城市的电信/联通/移动, 按经过的骨干网 IP 段判断线路类型
 # 判断规则参考开源项目 oneclickvirt/backtrace (IP 段 + 经过顺序), 结果是推测, 仅供参考
 # 每个目标: 名称 首选IP 运营商 备用IP...
@@ -7811,13 +7760,13 @@ function asn(ip,  a) {
 }
 '
 
-rt_parse() {  # rt_parse traceroute输出文件 : 每跳一行 "跳数 IP 毫秒 骨干网"
+rt_parse() {  # traceroute输出文件 : 每跳一行 "跳数 IP 毫秒 骨干网"
     awk "$RT_ASN_AWK"'
         $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9.]+$/ { ms = ($3 ~ /^[0-9.]+$/) ? $3 : "-"; print $1, $2, ms, asn($2) }
         $1 ~ /^[0-9]+$/ && $2 == "*"       { print $1, "*", "-", "" }' "$1"
 }
 
-rt_classify() {  # rt_classify 运营商(CT/CU/CM) 解析文件 -> 线路名称
+rt_classify() {  # 运营商(CT/CU/CM) 解析文件 -> 线路名称
     awk -v c="$1" '
         { if ($4 != "") { n[$4]++; if (!($4 in f)) f[$4] = NR } }
         function first(k) { return (k in f) ? f[k] : -1 }
@@ -7852,7 +7801,7 @@ rt_classify() {  # rt_classify 运营商(CT/CU/CM) 解析文件 -> 线路名称
         }' "$2"
 }
 
-rt_one() {  # rt_one 输出前缀 运营商 IP... : 最多试 3 次 (换备用 IP / 换探测方式), 判断出线路就停
+rt_one() {  # 输出前缀 运营商 IP... : 最多试 3 次 (换备用 IP / 换探测方式), 判断出线路就停
     local out=$1 c=$2 ip k=0 label best="" bestn=-1 n
     shift 2
     for ip in "$@"; do
@@ -7924,7 +7873,7 @@ route_check() {
     rm -rf "$t"
 }
 
-# ---------------- 流媒体 / AI 解锁检测 ----------------
+# ---------------- 流媒体 / AI 解锁检测
 # 按各平台网页/接口的返回特征判断; 平台改版后可能不准, 结果仅供参考
 UA_WEB="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 
@@ -8047,7 +7996,7 @@ unlock_check() {
 # ---------------- 服务器工具的菜单
 bbr_state() { [[ $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null) == bbr ]]; }
 
-menu_net() {  # 网络设置
+menu_net() {
     local c
     while true; do
         title "网络设置"
@@ -8068,7 +8017,7 @@ menu_net() {  # 网络设置
     done
 }
 
-menu_check() {  # 网络检测
+menu_check() {
     local c
     while true; do
         title "网络检测"
@@ -8085,7 +8034,7 @@ menu_check() {  # 网络检测
     done
 }
 
-menu_perf() {  # 性能测试
+menu_perf() {
     local c
     while true; do
         title "性能测试"
@@ -8128,12 +8077,12 @@ bench_ensure_sysbench() {
   return 1
 }
 
-bench_sysbench() {  # bench_sysbench 线程数 秒数 -> 每秒事件数
+bench_sysbench() {  # 线程数 秒数 -> 每秒事件数
   sysbench cpu --cpu-max-prime=10000 --threads="$1" --time="$2" run 2>/dev/null |
     awk '/events per second/{print $NF; exit}'
 }
 
-bench_openssl() {  # bench_openssl 进程数 秒数 -> SHA256 速度 MB/s
+bench_openssl() {  # 进程数 秒数 -> SHA256 速度 MB/s
   local out v
   if (($1 > 1)); then out=$(openssl speed -seconds "$2" -bytes 16384 -multi "$1" sha256 2>/dev/null)
   else out=$(openssl speed -seconds "$2" -bytes 16384 sha256 2>/dev/null); fi
@@ -8209,7 +8158,7 @@ cpu_bench() {
   fi
 }
 
-os_short() {  # 系统简称, 如 Debian 12 / Ubuntu 24.04
+os_short() {
   local n v
   n=$( . /etc/os-release 2>/dev/null; echo "${ID:-linux}" ); v=$( . /etc/os-release 2>/dev/null; echo "${VERSION_ID:-}" )
   case $n in
@@ -8218,13 +8167,13 @@ os_short() {  # 系统简称, 如 Debian 12 / Ubuntu 24.04
   echo "$n${v:+ $v}"
 }
 
-pct_color() {  # pct_color 百分比 : >=90 红, >=80 黄, 其他正常
+pct_color() {  # 百分比 : >=90 红, >=80 黄, 其他正常
   if (($1 >= 90)); then printf '%s' "$R"; elif (($1 >= 80)); then printf '%s' "$Y"; else printf '%s' "$T"; fi
 }
 
 kv() { printf '%s%s%s %s' "$D" "$1" "$N" "$2"; }   # kv 标签 值 : 状态栏里的一项
 
-dashboard() {  # 主菜单顶部状态
+dashboard() {
   local disk mem load n=0 f phps w=52
   disk=$(df -P / 2>/dev/null | awk 'NR==2{gsub("%","",$5); print $5+0}')
   mem=$(free -m 2>/dev/null | awk '/^Mem:/{if ($2 > 0) printf "%d", ($2-$7)*100/$2; else print 0}')
@@ -8249,7 +8198,7 @@ dashboard() {  # 主菜单顶部状态
   fi
 }
 
-web_dashboard() {  # 网站面板顶部状态
+web_dashboard() {
   local n=0 f phps logmb
   for f in "$META_DIR"/*.conf; do [[ -e $f ]] && n=$((n + 1)); done
   phps=$(php_installed | sort -V | tr '\n' ' '); phps=${phps% }
@@ -8336,7 +8285,7 @@ tgbot_run() {
   return 0
 }
 
-web_install_flow() {  # 主菜单 [安装网站环境]
+web_install_flow() {
   title "安装网站环境"
   echo "  将安装: ${T}Nginx${N}、${T}certbot${N} (证书)、${T}PHP${N} (可选版本)、${T}MariaDB${N} (可选)"
   echo "  装好后会开机自启; 以后不需要了可以在 网站面板 → 卸载网站环境 里完整卸载"
@@ -8347,7 +8296,7 @@ web_install_flow() {  # 主菜单 [安装网站环境]
   pause
 }
 
-menu_web() {  # 网站面板
+menu_web() {
   local c
   while true; do
     web_installed || return 0
@@ -8398,7 +8347,7 @@ menu_nginx() {
   done
 }
 
-menu_system() {  # 系统维护
+menu_system() {
   local c
   while true; do
     title "系统维护"
@@ -8428,7 +8377,6 @@ menu_system() {  # 系统维护
 # ================================================================ 已安装组件 / 卸载
 # 基础系统工具: 就算是 wsm 装的也不卸载 (很多程序都依赖它们)
 COMP_KEEP=" curl ca-certificates openssl cron cronie unzip tar gzip epel-release dnf-plugins-core software-properties-common apt-transport-https lsb-release python3 iptables e2fsprogs "
-# 测试/检测用的小工具 (可一键清理)
 COMP_TOOLS="sysbench traceroute"
 
 comp_list() {  # 输出: 包名<TAB>用途<TAB>日期  (只列现在还装着的)
@@ -8451,7 +8399,7 @@ comp_list() {  # 输出: 包名<TAB>用途<TAB>日期  (只列现在还装着的
   return 0
 }
 
-comp_remove() {  # comp_remove 包名 用途
+comp_remove() {
   local p=$1 f=${2:-}
   if [[ $f == 网站环境* ]]; then
     warn "$p 属于网站环境, 请到 网站面板 → 卸载网站环境 (或 PHP 管理 → 卸载 PHP 版本)"; return 1
@@ -8586,7 +8534,6 @@ web_uninstall() {
   [[ -f $LEDGER ]] && awk -F'\t' '$2 !~ /^网站环境/' "$LEDGER" > "$LEDGER.tmp" && mv -f "$LEDGER.tmp" "$LEDGER"
   rm -rf /etc/nginx /var/log/nginx "$ACME_ROOT" "$META_DIR" "$CERT_DIR" "$AUTH_DIR" 2>/dev/null
   rm -f "$CFW_IPS" "$CDN_ALLOW" 2>/dev/null
-  # 4. 数据库
   if unit_exists mariadb; then
     echo
     dbs=$(mysql -N -e 'SHOW DATABASES' 2>/dev/null | grep -vxE 'information_schema|performance_schema|mysql|sys' | paste -sd' ' -)
@@ -8601,7 +8548,6 @@ web_uninstall() {
     fi
   fi
   [[ $PM == apt ]] && DEBIAN_FRONTEND=noninteractive apt-get autoremove --purge -y >/dev/null 2>&1
-  # 5. 网站文件
   if [[ -d $WWW_ROOT ]]; then
     echo
     echo "  网站文件在 $WWW_ROOT ($(du -sh "$WWW_ROOT" 2>/dev/null | cut -f1)), 备份在 $BACKUP_DIR"
