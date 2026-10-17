@@ -23,12 +23,12 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="3.1.7"
+WSM_VER="3.1.8"
 # CHANGELOG-BEGIN  (更新时显示比当前版本新的条目, 新的写在最上面; 只留最近几条, 完整记录见仓库 CHANGELOG.md)
+# v3.1.8 网速测试改回 curl 自己测 (不再用 speedtest-cli): 从官方 Speedtest 服务器列表按距离由近到远试, 每个先试测 2 秒, 下载和上传都正常才用; Speedtest 都不行再用 Cloudflare / Linode
 # v3.1.7 修复 Gemini 检测: 网页里的可用标记改版失效, 支持的地区 (如日本) 也显示不支持; 改为按 Google 识别的地区对照支持列表判断
 # v3.1.6 流媒体/AI 解锁检测对照 RegionRestrictionCheck 重新核对: Disney+ 改用官方接口判断 (以前只看首页, 不支持的地区也显示可访问); Netflix/YouTube/ChatGPT 补上浏览器请求头和 cookie, 避免拿到不同页面误判
 # v3.1.5 网速测试改用 speedtest-cli (官方 Speedtest 服务器, 自动选最近最快的节点; speedtest.py 放在 wsm 仓库里, 核对 sha256 后临时运行, 测完就删); 不能用时自动改用 Cloudflare / Linode 备用测试
-# v3.1.4 网速测试去掉多节点, 只测本地; 备用节点不再依赖 speedtest.net 查询 (机房 IP 会被拒绝): Cloudflare → 同国家的 Speedtest 服务器 (日本/香港/新加坡/台湾) → 附近的 Linode 机房
 # CHANGELOG-END
 WSM_DIR=/etc/wsm
 META_DIR=$WSM_DIR/sites
@@ -8049,16 +8049,16 @@ unlock_check() {
     echo
     echo " 说明：判断方法参考 RegionRestrictionCheck，平台改版后可能不准，仅供参考"
 }
-# ---------------- 网速测试 (优先用 speedtest-cli; 不能用时用下面的 curl 方式)
+# ---------------- 网速测试 (只用 curl, 不跑第三方测速脚本)
 # 多线程同时下载 / 上传若干秒, 用总流量 ÷ 实际用时算出带宽
-# 节点按顺序试, 前一个不通就换下一个 (默认 1 个 + 备用 2 个):
-#   1. Cloudflare 最近机房 (下载 + 上传)
-#   2. 同一国家/地区的 Speedtest 服务器 (日本 / 香港 / 新加坡 / 台湾 有, 用 spiritLHLS/speedtest.net-CN-ID 每天更新的列表; 下载 + 上传)
-#   3. 附近的 Linode 机房官方测速文件 (只能测下载)
+# 节点: 官方 Speedtest 服务器列表 (和 speedtest-cli 用的同一个接口, 按本机 IP 给出附近的服务器),
+#       按距离从近到远排: 同城 → 临近城市 → 更远; 每个先试测 2 秒, 下载和上传都正常才用它, 不行就换下一个
+#       Speedtest 都不行时用 Cloudflare 最近机房, 再不行用附近的 Linode 机房 (只能测下载)
 # Cloudflare 单次最多给 1 亿字节 (超过直接拒绝), 这里每次取 2500 万, 循环下载
 ST_CF_DOWN="https://speed.cloudflare.com/__down?bytes=25000000"
 ST_CF_UP="https://speed.cloudflare.com/__up"
-ST_OOKLA_LIST="https://raw.githubusercontent.com/spiritLHLS/speedtest.net-CN-ID/main"
+ST_UA_CLI="Mozilla/5.0 (Linux-x86_64; U; 64bit; en-us) Python/3.11 (KHTML, like Gecko) speedtest-cli/2.1.3"
+ST_MAX_TRY=10      # Speedtest 服务器最多试几个
 ST_IPV="-4"
 
 st_now() { date +%s.%N; }
@@ -8100,7 +8100,7 @@ st_down() {  # 网址 秒数 线程数 -> Mbps (空 = 失败)
 st_up() {  # 上传地址 秒数 线程数 -> Mbps
   local url=$1 sec=$2 n=$3 t i start end deadline
   t=$(mktemp -d)
-  head -c 10485760 /dev/urandom > "$t/blob" 2>/dev/null   # 随机数据, 防止被压缩
+  head -c 5242880 /dev/urandom > "$t/blob" 2>/dev/null   # 5MB 随机数据 (防止被压缩; Speedtest 服务器单次上传上限约 7MB)
   deadline=$(( $(date +%s) + sec )); start=$(st_now)
   for ((i = 0; i < n; i++)); do
     (
@@ -8136,13 +8136,6 @@ st_cf_cand() {
   printf 'Cloudflare %s|https://speed.cloudflare.com/__down?bytes=0|%s|%s\n' "${colo:-最近机房}" "$ST_CF_DOWN" "$ST_CF_UP"
 }
 
-st_ookla_cands() {  # 国家代码 -> 这个国家的 Speedtest 服务器 (最多 2 个)
-  case $1 in JP|HK|SG|TW) ;; *) return 0 ;; esac
-  curl $ST_IPV -fsL --max-time 10 "$ST_OOKLA_LIST/$1.csv" 2>/dev/null | awk -F',' -v c="$1" '
-    NR > 1 && $2 == c && $6 != "" { p = ($7 ? $7 : 8080); h = $6 ":" p
-      printf "%s|http://%s/|http://%s/download?size=25000000|http://%s/upload\n", $8, h, h, h; if (++n >= 2) exit }'
-}
-
 st_linode_cands() {  # 国家代码 -> 附近的 Linode 机房 (只能测下载, 上传地址留空)
   local r
   case $1 in
@@ -8162,99 +8155,87 @@ st_linode_cands() {  # 国家代码 -> 附近的 Linode 机房 (只能测下载,
   done
 }
 
-st_local_cands() {  # 国家代码 -> 候选节点 (默认 1 个 + 备用 2 个): 名称|测延迟地址|下载地址|上传地址
-  { st_cf_cand; st_ookla_cands "$1"; st_linode_cands "$1"; } | head -3
+st_client() {  # -> 本机 IP|纬度|经度|运营商  (speedtest.net 识别的)
+  local x
+  x=$(curl $ST_IPV -s --max-time 10 -A "$ST_UA_CLI" "https://www.speedtest.net/speedtest-config.php" 2>/dev/null \
+      || curl $ST_IPV -s --max-time 10 -A "$ST_UA_CLI" "http://www.speedtest.net/speedtest-config.php" 2>/dev/null)
+  x=$(grep -o '<client [^>]*>' <<< "$x" | head -1)
+  [[ -n $x ]] || return 1
+  printf '%s|%s|%s|%s\n' "$(sed -n 's/.* ip="\([^"]*\)".*/\1/p' <<< "$x")" "$(sed -n 's/.* lat="\([^"]*\)".*/\1/p' <<< "$x")" \
+    "$(sed -n 's/.* lon="\([^"]*\)".*/\1/p' <<< "$x")" "$(sed -n 's/.* isp="\([^"]*\)".*/\1/p' <<< "$x")"
 }
 
-# st_try 秒数 线程 候选... : 依次试, 第一个能连上并且下载成功的就用它
-# 结果: ST_NAME ST_LAT ST_D ST_U (- = 这个节点不能测上传) ST_TRIED (试了几个)
+st_ookla_near() {  # 纬度 经度 -> 附近的 Speedtest 服务器, 按距离从近到远: 距离km|名称|测延迟地址|下载地址|上传地址
+  local lat=$1 lon=$2 u xml=""
+  for u in "https://www.speedtest.net/speedtest-servers-static.php" "http://c.speedtest.net/speedtest-servers-static.php" \
+           "https://www.speedtest.net/speedtest-servers.php" "http://c.speedtest.net/speedtest-servers.php"; do
+    xml=$(curl $ST_IPV -s --max-time 15 -A "$ST_UA_CLI" "$u?threads=4" 2>/dev/null)
+    [[ $xml == *'<server '* ]] && break
+  done
+  [[ $xml == *'<server '* ]] || return 0
+  printf '%s\n' "$xml" | sed 's/<server /\n<server /g' | grep '^<server ' | awk -v la="$lat" -v lo="$lon" '
+    function attr(k,  m) { if (match($0, " " k "=\"[^\"]*\"")) { m = substr($0, RSTART, RLENGTH); sub(/^[^"]*"/, "", m); sub(/"$/, "", m); return m } return "" }
+    function rad(d) { return d * 3.14159265358979 / 180 }
+    { u = attr("url"); sla = attr("lat"); slo = attr("lon"); if (u == "" || sla == "") next
+      d = 0
+      if (la != "" && lo != "") {
+        a = sin(rad(sla - la) / 2) ^ 2 + cos(rad(la)) * cos(rad(sla)) * sin(rad(slo - lo) / 2) ^ 2
+        d = 6371 * 2 * atan2(sqrt(a), sqrt(1 - a))
+      }
+      base = u; sub(/\/[^\/]*$/, "", base)                 # .../speedtest/upload.php -> .../speedtest
+      host = u; sub(/^https?:\/\//, "", host); sub(/\/.*$/, "", host)
+      printf "%d|%s (%s, %s)|http://%s/|%s/random4000x4000.jpg|%s\n", d, attr("sponsor"), attr("name"), attr("cc"), host, base, u
+    }' | sort -t'|' -k1,1n | awk -F'|' '!seen[$3]++' | head -"$ST_MAX_TRY"
+}
+
+# st_try 秒数 线程 候选... : 依次试, 先各测 2 秒确认下载和上传都正常, 正常的才正式测
+# 候选格式: 距离km|名称|测延迟地址|下载地址|上传地址 (上传地址空 = 只能测下载, 只在最后兜底时用)
+# 结果: ST_NAME ST_KM ST_LAT ST_D ST_U (- = 不能测上传) ST_TRIED
 st_try() {
-  local sec=$1 n=$2 c name lu du uu
+  local sec=$1 n=$2 c km name lu du uu
   shift 2
-  ST_NAME=""; ST_LAT=""; ST_D=""; ST_U=""; ST_TRIED=0
+  ST_NAME=""; ST_KM=""; ST_LAT=""; ST_D=""; ST_U=""; ST_TRIED=0
   for c in "$@"; do
-    IFS='|' read -r name lu du uu <<< "$c"
+    IFS='|' read -r km name lu du uu <<< "$c"
     ST_TRIED=$((ST_TRIED + 1))
+    printf '\r\033[K  试第 %d 个节点: %s ...' "$ST_TRIED" "${name:0:40}"
     ST_LAT=$(st_latency "$lu"); [[ -n $ST_LAT ]] || continue
+    [[ -n $(st_down "$du" 2 2) ]] || continue
+    if [[ -n $uu ]]; then [[ -n $(st_up "$uu" 2 2) ]] || continue; fi
+    printf '\r\033[K  测试中: %s (下载 / 上传各 %s 秒) ...' "${name:0:40}" "$sec"
     ST_D=$(st_down "$du" "$sec" "$n"); [[ -n $ST_D ]] || continue
-    if [[ -n $uu ]]; then ST_U=$(st_up "$uu" "$sec" "$n"); else ST_U="-"; fi
-    ST_NAME=$name
+    if [[ -n $uu ]]; then ST_U=$(st_up "$uu" "$sec" "$n"); [[ -n $ST_U ]] || continue; else ST_U="-"; fi
+    ST_NAME=$name; ST_KM=$km
+    printf '\r\033[K'
     return 0
   done
-  ST_LAT=""; return 1
-}
-
-# speedtest-cli (sivel/speedtest-cli 2.1.4b1, Apache-2.0, 官方 Speedtest 服务器): 按本机 IP 拿附近的服务器列表,
-# 测延迟挑最快的一个, 再多线程下载 / 上传。每次运行时下载到临时目录, 测完就删, 不留在系统里
-# 优先从 wsm 自己的仓库下载 (和 wsm.sh 同一个目录的 speedtest.py), 拿不到再用原作者仓库
-# 下载后核对 sha256, 和下面记录的不一样就不运行 (防止文件被替换); 换新版 speedtest.py 时要同时改这里
-ST_CLI_SHA256="519d5938d78b8f911e8ac2843b61bf95c6351b6b5bb8c933c103f22274509d55"
-ST_CLI_ORIGIN="https://raw.githubusercontent.com/sivel/speedtest-cli/master/speedtest.py"
-
-st_cli_run() {  # -> 成功时输出: 延迟|下载bps|上传bps|节点|节点城市|国家|距离km|本机IP|运营商
-  local t py out
-  command -v python3 >/dev/null 2>&1 || return 1
-  local u ok=0
-  t=$(mktemp -d); py=$t/speedtest.py
-  update_load 2>/dev/null
-  for u in "${UPDATE_URL:-$UPDATE_DEFAULT_URL}" "$ST_CLI_ORIGIN"; do
-    [[ $u == */wsm.sh ]] && u=${u%/*}/speedtest.py
-    curl -fsSL --retry 2 --max-time 30 "$u" -o "$py" 2>/dev/null || continue
-    [[ $(sha256sum "$py" 2>/dev/null | awk '{print $1}') == "$ST_CLI_SHA256" ]] && { ok=1; break; }
-  done
-  ((ok)) || { rm -rf "$t"; return 1; }
-  out=$(timeout 180 python3 "$py" --json 2>/dev/null) || out=$(timeout 180 python3 "$py" --json --secure 2>/dev/null)
-  rm -rf "$t"
-  [[ -n $out ]] || return 1
-  printf '%s' "$out" | python3 -c '
-import json, sys
-d = json.load(sys.stdin); s = d.get("server", {}); c = d.get("client", {})
-print("|".join(str(x) for x in (round(d.get("ping", 0)), d.get("download", 0), d.get("upload", 0),
-      s.get("sponsor", ""), s.get("name", ""), s.get("country", ""), round(float(s.get("d", 0))),
-      c.get("ip", ""), c.get("isp", ""))))' 2>/dev/null
+  printf '\r\033[K'; ST_LAT=""; return 1
 }
 
 speed_quick() {  # 本地最近节点: 延迟 + 下载 + 上传
-  local r lat dl ul sp ct co km ip isp n tr loc
+  local cl ip lat lon isp loc n tr c
   local -a cands=()
   title "网速测试"
   echo "  ${D}测这台服务器自己的带宽, 测试期间会占满带宽; 按千兆带宽算约用 2.5GB 流量${N}"
-  if ! command -v python3 >/dev/null 2>&1; then
-    ensure_pkg python3 python3 "网速测试要用" || warn "没有 python3, 改用备用方式测试"
-  fi
-  if command -v python3 >/dev/null 2>&1; then
-    printf '  测试中 (自动选最近的 Speedtest 服务器, 约 30 秒) ...'
-    r=$(st_cli_run); printf '\r\033[K'
-    if [[ -n $r ]]; then
-      IFS='|' read -r lat dl ul sp ct co km ip isp <<< "$r"
-      dl=$(awk -v b="$dl" 'BEGIN{ if (b > 0) printf "%.1f", b / 1000000 }')
-      ul=$(awk -v b="$ul" 'BEGIN{ if (b > 0) printf "%.1f", b / 1000000 }')
-      echo "  $(kv 出口 "$T${ip:-未知}${isp:+ ($isp)}$N")"
-      echo "  $(kv 测速节点 "$T$sp${ct:+ ($ct${co:+, $co})}$N")   ${D}距离约 ${km} km${N}"
-      echo
-      echo "  $(kv 延迟 "$T$lat ms$N")"
-      echo "  $(kv 下载 "$(st_fmt "$dl")")"
-      echo "  $(kv 上传 "$(st_fmt "$ul")")"
-      return 0
-    fi
-    warn "Speedtest 测试没有成功, 改用备用方式 (Cloudflare / Linode)"
-  fi
-  # 备用: curl 直接测, 节点不通自动换下一个
   st_pick_ip || return 1
   n=$(st_threads)
+  printf '  查找附近的测速节点 ...'
+  cl=$(st_client); IFS='|' read -r ip lat lon isp <<< "$cl"
   tr=$(curl $ST_IPV -s --max-time 6 https://speed.cloudflare.com/cdn-cgi/trace 2>/dev/null)
-  ip=$(sed -n 's/^ip=//p' <<< "$tr"); loc=$(sed -n 's/^loc=//p' <<< "$tr")
-  [[ -n $ip ]] || ip=$(public_ip)
-  echo "  $(kv 出口 "$T${ip:-未知}${loc:+ ($loc)}$N")   $(kv 线程 "$T$n$N")"
-  mapfile -t cands < <(st_local_cands "${loc:-US}")
-  printf '  测试中 (下载 / 上传各 10 秒, 约 25 秒) ...'
-  st_try 10 "$n" "${cands[@]}"; printf '\r\033[K'
-  if [[ -z $ST_NAME ]]; then err "试了 $ST_TRIED 个节点都连不上, 请稍后再试"; return 1; fi
-  echo "  $(kv 测速节点 "$T$ST_NAME$N")$( ((ST_TRIED > 1)) && echo "   ${D}(前 $((ST_TRIED - 1)) 个不通, 已自动换备用)${N}")"
+  loc=$(sed -n 's/^loc=//p' <<< "$tr")
+  [[ -n $ip ]] || ip=$(sed -n 's/^ip=//p' <<< "$tr")
+  [[ -n $lat ]] && mapfile -t cands < <(st_ookla_near "$lat" "$lon")
+  while IFS= read -r c; do cands+=("0|$c"); done < <(st_cf_cand; st_linode_cands "${loc:-US}")
+  printf '\r\033[K'
+  echo "  $(kv 出口 "$T${ip:-未知}${isp:+ ($isp)}${loc:+ $loc}$N")   $(kv 线程 "$T$n$N")"
+  st_try 10 "$n" "${cands[@]}"
+  if [[ -z $ST_NAME ]]; then err "试了 $ST_TRIED 个节点都不能正常测, 请稍后再试"; return 1; fi
+  echo "  $(kv 测速节点 "$T$ST_NAME$N")$( ((ST_KM > 0)) && echo "   ${D}距离约 $ST_KM km${N}")"
+  ((ST_TRIED > 1)) && echo "  ${D}(前 $((ST_TRIED - 1)) 个节点不能正常测下载/上传, 已自动换到这个)${N}"
   echo
   echo "  $(kv 延迟 "$T$ST_LAT ms$N")"
   echo "  $(kv 下载 "$(st_fmt "$ST_D")")"
-  if [[ $ST_U == - ]]; then echo "  $(kv 上传 "${D}这个节点只能测下载${N}")"
+  if [[ $ST_U == - ]]; then echo "  $(kv 上传 "${D}所有节点都测不了上传, 这个节点只能测下载${N}")"
   else echo "  $(kv 上传 "$(st_fmt "$ST_U")")"; fi
 }
 
