@@ -33,7 +33,7 @@ wsm install      # 一键安装 Nginx + PHP + MariaDB + certbot (会先确认)
     1  系统信息       配置 / 负载 / IP / 虚拟化
     2  SSH 安全       端口 / 密钥 / 密码登录
     3  网络设置       BBR / 禁 Ping / 端口转发
-    4  网络检测       回程线路 / 流媒体 / AI 解锁
+    4  网络检测       网速 / 回程线路 / 解锁检测
     5  性能测试       CPU / 内存 / 硬盘 IO
     6  系统维护       服务 / Swap / 时区 / 告警 / 组件
 
@@ -54,7 +54,7 @@ wsm install      # 一键安装 Nginx + PHP + MariaDB + certbot (会先确认)
 - **系统信息**：系统 / 内核 / 虚拟化 / CPU / 内存 / 硬盘 / 运行时间 / 公网 IPv4 和 IPv6
 - **SSH 安全**：生成密钥、导入公钥（从 GitHub 仓库拉取或粘贴）、下载私钥（屏幕显示 / 临时链接 / scp）、关闭或恢复密码登录、修改 SSH 端口；每次修改都先检测配置，不通过自动恢复
 - **网络设置**：BBR 加速、禁 Ping、TCP / UDP 端口转发（重启后自动恢复）
-- **网络检测**：回程线路（北京 / 上海 / 广州 / 成都 的电信 / 联通 / 移动）、流媒体和 AI 解锁（Netflix / Disney+ / YouTube / Prime Video / ChatGPT / Claude / Gemini）
+- **网络检测**：网速测试（最近机房的延迟 / 下载 / 上传，东京 / 新加坡 / 美西 / 法兰克福 / 伦敦 多节点下载，只用 curl，不跑第三方测速脚本）、回程线路（北京 / 上海 / 广州 / 成都 的电信 / 联通 / 移动）、流媒体和 AI 解锁（Netflix / Disney+ / YouTube / Prime Video / ChatGPT / Claude / Gemini）
 - **性能测试**：CPU 占用（各核 / 最耗 CPU 的程序）、CPU 单核 / 多核、内存读写、硬盘 IO
 - **系统维护**：服务管理、Swap、服务器时区、Telegram 告警、已安装组件（查看 / 卸载 wsm 装过的软件）
 
@@ -92,6 +92,7 @@ wsm keys                     # 导入公钥
 wsm bbr                      # BBR 开关
 wsm noping                   # 禁 Ping 开关
 wsm fwd                      # 端口转发
+wsm speedtest                # 网速测试
 wsm route                    # 回程线路检测
 wsm unlock                   # 流媒体 / AI 解锁检测
 wsm bench                    # 性能测试

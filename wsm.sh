@@ -23,8 +23,9 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="3.0.0"
+WSM_VER="3.1.0"
 # CHANGELOG-BEGIN  (更新时显示比当前版本新的条目, 新的写在最上面; 只留最近几条, 完整记录见仓库 CHANGELOG.md)
+# v3.1.0 新增网速测试 (网络检测 → 1): 最近机房的 延迟/下载/上传, 东京/新加坡/美西/法兰克福/伦敦 多节点下载; 只用 curl, 不跑第三方测速脚本; 新命令 wsm speedtest
 # v3.0.0 主菜单新增 [9 TG机器人], 更新/卸载 改为 10 (独立脚本 tggl 的入口); 合并 SSH 小工具 (ssb): 系统信息/BBR/禁Ping/端口转发/回程线路/流媒体与AI解锁/CPU内存硬盘测试/导入公钥/下载私钥; 启动不再安装任何软件, 网站环境改为菜单里一键安装; 新菜单 (服务器 / 网站与应用 两区) 和配色; wsm install 先确认再安装; 新增 [已安装组件] 统一卸载, 可卸载网站环境和 wsm 本身; ssb 命令保留为别名
 # v2.12.1 修复: 更新时把已经装过的旧版本说明也显示出来
 # v2.12 访问统计区分 真人/爬虫/可疑, 列出疑似恶意 IP (原因) 和被扫描路径, 可核实搜索引擎真假, 概览加 [真人] 列; 系统与服务新增 CPU 性能测试 (单核/多核)
@@ -7993,6 +7994,140 @@ unlock_check() {
     echo
     echo " 说明：结果按各平台网页的特征判断，平台改版后可能不准；Disney+ 只做了简易判断"
 }
+# ---------------- 网速测试 (只用 curl, 不跑第三方测速脚本)
+# 多线程同时下载 / 上传若干秒, 用总流量 ÷ 实际用时算出带宽
+# 节点: Cloudflare 官方测速接口 (自动连最近的机房, 能测上传) + Linode 各机房的官方测速文件 (只测下载)
+ST_CF_DOWN="https://speed.cloudflare.com/__down?bytes=104857600"
+ST_CF_UP="https://speed.cloudflare.com/__up"
+ST_NODES=(
+  "东京|http://speedtest.tokyo2.linode.com/100MB-tokyo2.bin"
+  "新加坡|http://speedtest.singapore.linode.com/100MB-singapore.bin"
+  "美西 弗里蒙特|http://speedtest.fremont.linode.com/100MB-fremont.bin"
+  "德国 法兰克福|http://speedtest.frankfurt.linode.com/100MB-frankfurt.bin"
+  "英国 伦敦|http://speedtest.london.linode.com/100MB-london.bin"
+)
+ST_IPV="-4"
+
+st_now() { date +%s.%N; }
+st_mbps() { awk -v b="$1" -v d="$2" 'BEGIN{ if (d <= 0 || b < 100000) print ""; else printf "%.1f", b * 8 / d / 1000000 }'; }
+st_fmt() {  # Mbps -> "123.4 Mbps (15.4 MB/s)"
+  [[ -n $1 ]] || { echo "${R}失败${N}"; return 0; }
+  awk -v m="$1" -v g="$G" -v n="$N" 'BEGIN{ printf "%s%s Mbps%s (%.1f MB/s)", g, m, n, m / 8 }'
+}
+
+st_latency() {  # 网址 -> 平均延迟毫秒 (取 5 次 TCP 连接时间)
+  local i v out=""
+  for i in 1 2 3 4 5; do
+    v=$(curl $ST_IPV -s -o /dev/null --connect-timeout 5 --max-time 8 -w '%{time_connect}' "$1" 2>/dev/null) || continue
+    [[ $v =~ ^[0-9.]+$ ]] && out+="$v "
+  done
+  [[ -n $out ]] || return 0
+  printf '%s\n' $out | awk '$1 > 0 {s += $1; n++} END{ if (n) printf "%.0f", s / n * 1000 }'
+}
+
+st_down() {  # 网址 秒数 线程数 -> Mbps (空 = 失败)
+  local url=$1 sec=$2 n=$3 t i start end deadline
+  t=$(mktemp -d)
+  deadline=$(( $(date +%s) + sec )); start=$(st_now)
+  for ((i = 0; i < n; i++)); do
+    (
+      local r rc
+      while :; do
+        r=$(( deadline - $(date +%s) )); ((r < 1)) && break
+        curl $ST_IPV -fs -o /dev/null --connect-timeout 5 --max-time "$r" -w '%{size_download}\n' "$url" >> "$t/$i" 2>/dev/null
+        rc=$?; [[ $rc == 0 || $rc == 28 ]] || break   # 28 = 到时间了; 其他错误不再重试
+      done
+    ) &
+  done
+  wait; end=$(st_now)
+  st_mbps "$(cat "$t"/* 2>/dev/null | awk '{s += $1} END{print s + 0}')" "$(awk -v a="$start" -v b="$end" 'BEGIN{print b - a}')"
+  rm -rf "$t"
+}
+
+st_up() {  # 秒数 线程数 -> Mbps (上传到 Cloudflare)
+  local sec=$1 n=$2 t i start end deadline
+  t=$(mktemp -d)
+  head -c 10485760 /dev/urandom > "$t/blob" 2>/dev/null   # 随机数据, 防止被压缩
+  deadline=$(( $(date +%s) + sec )); start=$(st_now)
+  for ((i = 0; i < n; i++)); do
+    (
+      local r rc
+      while :; do
+        r=$(( deadline - $(date +%s) )); ((r < 1)) && break
+        curl $ST_IPV -s -o /dev/null --connect-timeout 5 --max-time "$r" -w '%{size_upload}\n' \
+          -f -H 'Content-Type: application/octet-stream' --data-binary @"$t/blob" "$ST_CF_UP" >> "$t/u$i" 2>/dev/null
+        rc=$?; [[ $rc == 0 || $rc == 28 ]] || break
+      done
+    ) &
+  done
+  wait; end=$(st_now)
+  st_mbps "$(cat "$t"/u* 2>/dev/null | awk '{s += $1} END{print s + 0}')" "$(awk -v a="$start" -v b="$end" 'BEGIN{print b - a}')"
+  rm -rf "$t"
+}
+
+st_pick_ip() {  # 优先 IPv4, 没有 IPv4 的机器用 IPv6
+  ST_IPV="-4"
+  curl -4 -s -o /dev/null --max-time 5 https://speed.cloudflare.com/cdn-cgi/trace 2>/dev/null && return 0
+  if curl -6 -s -o /dev/null --max-time 5 https://speed.cloudflare.com/cdn-cgi/trace 2>/dev/null; then
+    ST_IPV="-6"; warn "这台服务器没有可用的 IPv4, 改用 IPv6 测试"; return 0
+  fi
+  err "连不上测速服务器, 请检查网络"; return 1
+}
+
+st_threads() { local c; c=$(nproc 2>/dev/null || echo 1); ((c >= 4)) && echo 8 || echo 4; }
+
+speed_quick() {  # 最近的 Cloudflare 机房: 延迟 + 下载 + 上传
+  local tr colo loc ip lat d u n
+  st_pick_ip || return 1
+  n=$(st_threads)
+  tr=$(curl $ST_IPV -s --max-time 8 https://speed.cloudflare.com/cdn-cgi/trace 2>/dev/null)
+  colo=$(sed -n 's/^colo=//p' <<< "$tr"); loc=$(sed -n 's/^loc=//p' <<< "$tr"); ip=$(sed -n 's/^ip=//p' <<< "$tr")
+  echo "  $(kv 出口 "$T${ip:-未知}${loc:+ ($loc)}$N")   $(kv 测速机房 "${T}Cloudflare ${colo:-?}$N")   $(kv 线程 "$T$n$N")"
+  echo
+  printf '  测延迟 ...'; lat=$(st_latency "https://speed.cloudflare.com/__down?bytes=0"); printf '\r\033[K'
+  printf '  测下载 (10 秒) ...'; d=$(st_down "$ST_CF_DOWN" 10 "$n"); printf '\r\033[K'
+  printf '  测上传 (10 秒) ...'; u=$(st_up 10 "$n"); printf '\r\033[K'
+  echo "  $(kv 延迟 "$T${lat:-?} ms$N")"
+  echo "  $(kv 下载 "$(st_fmt "$d")")"
+  echo "  $(kv 上传 "$(st_fmt "$u")")"
+}
+
+speed_nodes() {  # 各地机房的下载速度
+  local x name url lat d n
+  st_pick_ip || return 1
+  [[ $ST_IPV == -6 ]] && { warn "Linode 测速节点只测 IPv4, 这台机器测不了多节点"; return 1; }
+  n=$(st_threads)
+  echo "  ${D}每个节点下载 8 秒 ($n 线程), 约 1 分钟${N}"
+  echo
+  printf '  %s' "$D"; pad_w "节点" 22; pad_w "延迟" 10; printf '下载%s\n' "$N"
+  for x in "Cloudflare 最近机房|$ST_CF_DOWN" "${ST_NODES[@]}"; do
+    name=${x%%|*}; url=${x#*|}
+    printf '  %s' "$T"; pad_w "$name" 22; printf '%s测试中 ...' "$N"
+    lat=$(st_latency "$url"); d=$(st_down "$url" 8 "$n")
+    printf '\r\033[K  %s' "$T"; pad_w "$name" 22; printf '%s' "$N"; pad_w "${lat:-?} ms" 10; echo "$(st_fmt "$d")"
+  done
+}
+
+speed_menu() {
+  local c
+  while true; do
+    title "网速测试"
+    echo "  ${D}测这台服务器自己的带宽, 测试期间会占满带宽${N}"
+    echo "  ${D}按千兆带宽算: 快速测试约用 2.5GB 流量, 多节点约 6GB; 按流量计费的机器请注意${N}"
+    echo
+    mitem 1 "快速测试" "最近机房的 延迟 / 下载 / 上传, 约 25 秒"
+    mitem 2 "多节点下载" "东京 / 新加坡 / 美西 / 法兰克福 / 伦敦"
+    mback
+    read -r -p "请选择: " c || return 0
+    case "$c" in
+      1) (speed_quick); pause ;;
+      2) (speed_nodes); pause ;;
+      0|q|Q) return 0 ;;
+      *) warn "无效选择" ;;
+    esac
+  done
+}
+
 # ---------------- 服务器工具的菜单
 bbr_state() { [[ $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null) == bbr ]]; }
 
@@ -8021,13 +8156,15 @@ menu_check() {
     local c
     while true; do
         title "网络检测"
-        mitem 1 "回程线路检测" "电信 / 联通 / 移动"
-        mitem 2 "流媒体 / AI 解锁" "Netflix / YouTube / ChatGPT ..."
+        mitem 1 "网速测试" "下载 / 上传 / 延迟"
+        mitem 2 "回程线路检测" "电信 / 联通 / 移动"
+        mitem 3 "流媒体 / AI 解锁" "Netflix / YouTube / ChatGPT ..."
         mback
         read -r -p "请选择: " c || return 0
         case "$c" in
-            1) (route_check); pause ;;
-            2) (unlock_check); pause ;;
+            1) speed_menu ;;
+            2) (route_check); pause ;;
+            3) (unlock_check); pause ;;
             0|q|Q) return 0 ;;
             *) warn "无效选择" ;;
         esac
@@ -8228,7 +8365,7 @@ main_menu() {
     mitem 1 "系统信息" "配置 / 负载 / IP / 虚拟化"
     mitem 2 "SSH 安全" "端口 / 密钥 / 密码登录"
     mitem 3 "网络设置" "BBR / 禁 Ping / 端口转发"
-    mitem 4 "网络检测" "回程线路 / 流媒体 / AI 解锁"
+    mitem 4 "网络检测" "网速 / 回程线路 / 解锁检测"
     mitem 5 "性能测试" "CPU / 内存 / 硬盘 IO"
     mitem 6 "系统维护" "服务 / Swap / 时区 / 告警 / 组件"
     sec 网站与应用
@@ -8600,6 +8737,7 @@ wsm v$WSM_VER - Server Manager   (ssb 是同一个命令)
   wsm key-download [私钥文件]       下载服务器上的私钥
   wsm bbr | noping                  BBR 加速 / 禁 Ping (开关)
   wsm fwd                           端口转发 (TCP/UDP)
+  wsm speedtest                     网速测试 (下载/上传/延迟, 多节点)
   wsm route | unlock                回程线路检测 / 流媒体与 AI 解锁检测
   wsm bench                         性能测试 (CPU 占用/CPU/内存/硬盘)
   wsm components                    已安装组件 (查看/卸载 wsm 装过的软件)
@@ -8668,6 +8806,7 @@ esac
 case ${1:-menu} in
   menu)         [[ -d $APPS_DIR || -d $META_DIR ]] && apps_migrate_once; main_menu ;;
   sysinfo)      sys_info ;;
+  speedtest)    speed_menu ;;
   tgbot)        shift; tgbot_run "$@" ;;
   bbr)          bbr_menu ;;
   noping)       ping_menu ;;
