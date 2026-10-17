@@ -25,7 +25,7 @@ set -uo pipefail
 
 WSM_VER="3.0.0"
 # CHANGELOG-BEGIN  (更新时会显示比当前版本新的条目, 新的写在最上面)
-# v3.0.0 主菜单新增 [9 TG 机器人], 更新/卸载 改为 10 (独立脚本 tggl 的入口); 合并 SSH 小工具 (ssb): 系统信息/BBR/禁Ping/端口转发/回程线路/流媒体与AI解锁/CPU内存硬盘测试/导入公钥/下载私钥; 启动不再安装任何软件, 网站环境改为菜单里一键安装; 新菜单 (服务器 / 网站 两区) 和配色; 新增 [已安装组件] 统一卸载, 可卸载网站环境和 wsm 本身; ssb 命令保留为别名
+# v3.0.0 主菜单新增 [9 TG机器人], 更新/卸载 改为 10 (独立脚本 tggl 的入口); 合并 SSH 小工具 (ssb): 系统信息/BBR/禁Ping/端口转发/回程线路/流媒体与AI解锁/CPU内存硬盘测试/导入公钥/下载私钥; 启动不再安装任何软件, 网站环境改为菜单里一键安装; 新菜单 (服务器 / 网站 两区) 和配色; 新增 [已安装组件] 统一卸载, 可卸载网站环境和 wsm 本身; ssb 命令保留为别名
 # v2.12.1 修复: 更新时把已经装过的旧版本说明也显示出来
 # v2.12 访问统计区分 真人/爬虫/可疑, 列出疑似恶意 IP (原因) 和被扫描路径, 可核实搜索引擎真假, 概览加 [真人] 列; 系统与服务新增 CPU 性能测试 (单核/多核)
 # v2.11.2 修复: 从旧版本更新后防 CC 规则没有自动升级 (空 User-Agent 仍被拦截)
@@ -8286,7 +8286,7 @@ main_menu() {
     if web_installed; then mitem 7 "网站面板 ›" "站点 / SSL / PHP / 数据库 / 备份"
     else mitem 7 "安装网站环境" "Nginx + PHP + MariaDB 一键安装"; fi
     mitem 8 "程序下载" "3x-ui / 哪吒 / WordPress …"
-    mitem 9 "TG 机器人" "添加 / 管理 Telegram 机器人"
+    mitem 9 "TG机器人" "添加 / 管理 Telegram 机器人"
     printf '\n  %s%s%s\n' "$L" "$(rep ─ 50)" "$N"
     printf '  %s%3s%s  %s%s%s\e[24G%s%s0%s  %s退出%s\n' "$BD$B" 10 "$N" "$T" "更新 / 卸载" "$N" "$BD$R" "" "$N" "$R" "$N"
     echo
@@ -8308,7 +8308,7 @@ main_menu() {
   done
 }
 
-# ================================================================ TG 机器人 (独立脚本 tggl, 这里只是入口)
+# ================================================================ TG机器人 (独立脚本 tggl, 这里只是入口)
 # 机器人的安装管理在另一个仓库的 tg-bot-gl.sh 里, 它自带 tgbot 命令 (每次运行都拉最新版)
 # wsm 只负责打开它, 两边互不依赖: 卸载 wsm 不影响机器人, 单独输入 tgbot 也能用
 TGBOT_BIN=/usr/local/bin/tgbot
@@ -8320,7 +8320,7 @@ tgbot_run() {
     TGBOT_FROM_WSM=1 bash "$TGBOT_BIN" "$@"
     return 0
   fi
-  title "TG 机器人"
+  title "TG机器人"
   echo "  Telegram 机器人管理工具: 从仓库拉取机器人 → 装依赖 → 写入 Token/ID → 启动并开机自启"
   echo "  ${D}独立的脚本 (chentiti888/tggl), 打开时不安装任何软件; 以后也可以直接输入 tgbot 打开${N}"
   echo
@@ -8657,7 +8657,7 @@ wsm v$WSM_VER - Server Manager   (ssb 是同一个命令)
   wsm route | unlock                回程线路检测 / 流媒体与 AI 解锁检测
   wsm bench                         性能测试 (CPU 占用/CPU/内存/硬盘)
   wsm components                    已安装组件 (查看/卸载 wsm 装过的软件)
-  wsm tgbot                         TG 机器人管理 (独立脚本, 也可以直接输入 tgbot)
+  wsm tgbot                         TG机器人管理 (独立脚本, 也可以直接输入 tgbot)
   wsm uninstall                     卸载 wsm
   ── 网站 ──
   wsm install                       一键安装网站环境 (Nginx/PHP/MariaDB/certbot)
