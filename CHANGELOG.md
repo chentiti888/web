@@ -2,6 +2,12 @@
 
 wsm 每个版本的改动，新的在最上面。服务器上执行 `wsm update` 时，会显示比当前版本新的条目。
 
+## v3.1.9
+
+- 修复网速测试的本机 IP 显示错误: speedtest.net 配置接口返回的是固定的美国 Comcast 地址和坐标, 按它算距离会选到很远的节点
+- 本机 IP、运营商和坐标改从 ipinfo.io 获取 (拿不到用 ip-api.com), 节点按本机真实位置由近到远排序
+- 坐标都拿不到时, 按 speedtest.net 返回的服务器顺序试 (它是按本机 IP 排的)
+
 ## v3.1.8
 
 - 网速测试改回用 curl 自己测, 不再下载运行 speedtest-cli (仓库里的 speedtest.py 可以删掉)

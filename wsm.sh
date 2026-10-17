@@ -23,12 +23,12 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="3.1.8"
+WSM_VER="3.1.9"
 # CHANGELOG-BEGIN  (更新时显示比当前版本新的条目, 新的写在最上面; 只留最近几条, 完整记录见仓库 CHANGELOG.md)
+# v3.1.9 修复网速测试显示的本机 IP 不对 (speedtest.net 返回的是固定的美国 Comcast 地址), 按它算距离会选到很远的节点; 改为按本机真实位置排序
 # v3.1.8 网速测试改回 curl 自己测 (不再用 speedtest-cli): 从官方 Speedtest 服务器列表按距离由近到远试, 每个先试测 2 秒, 下载和上传都正常才用; Speedtest 都不行再用 Cloudflare / Linode
 # v3.1.7 修复 Gemini 检测: 网页里的可用标记改版失效, 支持的地区 (如日本) 也显示不支持; 改为按 Google 识别的地区对照支持列表判断
 # v3.1.6 流媒体/AI 解锁检测对照 RegionRestrictionCheck 重新核对: Disney+ 改用官方接口判断 (以前只看首页, 不支持的地区也显示可访问); Netflix/YouTube/ChatGPT 补上浏览器请求头和 cookie, 避免拿到不同页面误判
-# v3.1.5 网速测试改用 speedtest-cli (官方 Speedtest 服务器, 自动选最近最快的节点; speedtest.py 放在 wsm 仓库里, 核对 sha256 后临时运行, 测完就删); 不能用时自动改用 Cloudflare / Linode 备用测试
 # CHANGELOG-END
 WSM_DIR=/etc/wsm
 META_DIR=$WSM_DIR/sites
@@ -8155,14 +8155,22 @@ st_linode_cands() {  # 国家代码 -> 附近的 Linode 机房 (只能测下载,
   done
 }
 
-st_client() {  # -> 本机 IP|纬度|经度|运营商  (speedtest.net 识别的)
-  local x
-  x=$(curl $ST_IPV -s --max-time 10 -A "$ST_UA_CLI" "https://www.speedtest.net/speedtest-config.php" 2>/dev/null \
-      || curl $ST_IPV -s --max-time 10 -A "$ST_UA_CLI" "http://www.speedtest.net/speedtest-config.php" 2>/dev/null)
-  x=$(grep -o '<client [^>]*>' <<< "$x" | head -1)
-  [[ -n $x ]] || return 1
-  printf '%s|%s|%s|%s\n' "$(sed -n 's/.* ip="\([^"]*\)".*/\1/p' <<< "$x")" "$(sed -n 's/.* lat="\([^"]*\)".*/\1/p' <<< "$x")" \
-    "$(sed -n 's/.* lon="\([^"]*\)".*/\1/p' <<< "$x")" "$(sed -n 's/.* isp="\([^"]*\)".*/\1/p' <<< "$x")"
+st_client() {  # -> 本机公网IP|纬度|经度|运营商|国家代码
+  # 不用 speedtest-config.php 返回的本机信息: 它现在对很多机器都返回同一个美国 Comcast 的 IP 和坐标, 按它算距离会选错节点
+  local j ip ll isp cc
+  j=$(curl $ST_IPV -s --max-time 8 https://ipinfo.io/json 2>/dev/null)
+  ip=$(sed -n 's/.*"ip": *"\([^"]*\)".*/\1/p' <<< "$j" | head -1)
+  ll=$(sed -n 's/.*"loc": *"\([^"]*\)".*/\1/p' <<< "$j" | head -1)
+  isp=$(sed -n 's/.*"org": *"\([^"]*\)".*/\1/p' <<< "$j" | head -1); isp=${isp#AS* }
+  cc=$(sed -n 's/.*"country": *"\([^"]*\)".*/\1/p' <<< "$j" | head -1)
+  if [[ -z $ll ]]; then   # 备用: ip-api.com
+    j=$(curl $ST_IPV -s --max-time 8 'http://ip-api.com/json/?fields=query,lat,lon,isp,countryCode' 2>/dev/null)
+    ip=$(sed -n 's/.*"query":"\([^"]*\)".*/\1/p' <<< "$j")
+    ll="$(sed -n 's/.*"lat":\([-0-9.]*\).*/\1/p' <<< "$j"),$(sed -n 's/.*"lon":\([-0-9.]*\).*/\1/p' <<< "$j")"
+    [[ $ll == , ]] && ll=""
+    isp=$(sed -n 's/.*"isp":"\([^"]*\)".*/\1/p' <<< "$j"); cc=$(sed -n 's/.*"countryCode":"\([^"]*\)".*/\1/p' <<< "$j")
+  fi
+  printf '%s|%s|%s|%s|%s\n' "$ip" "${ll%%,*}" "${ll#*,}" "$isp" "$cc"
 }
 
 st_ookla_near() {  # 纬度 经度 -> 附近的 Speedtest 服务器, 按距离从近到远: 距离km|名称|测延迟地址|下载地址|上传地址
@@ -8185,7 +8193,7 @@ st_ookla_near() {  # 纬度 经度 -> 附近的 Speedtest 服务器, 按距离�
       base = u; sub(/\/[^\/]*$/, "", base)                 # .../speedtest/upload.php -> .../speedtest
       host = u; sub(/^https?:\/\//, "", host); sub(/\/.*$/, "", host)
       printf "%d|%s (%s, %s)|http://%s/|%s/random4000x4000.jpg|%s\n", d, attr("sponsor"), attr("name"), attr("cc"), host, base, u
-    }' | sort -t'|' -k1,1n | awk -F'|' '!seen[$3]++' | head -"$ST_MAX_TRY"
+    }' | { if [[ -n $lat ]]; then sort -t'|' -k1,1n; else cat; fi; } | awk -F'|' '!seen[$3]++' | head -"$ST_MAX_TRY"
 }
 
 # st_try 秒数 线程 候选... : 依次试, 先各测 2 秒确认下载和上传都正常, 正常的才正式测
@@ -8220,14 +8228,15 @@ speed_quick() {  # 本地最近节点: 延迟 + 下载 + 上传
   st_pick_ip || return 1
   n=$(st_threads)
   printf '  查找附近的测速节点 ...'
-  cl=$(st_client); IFS='|' read -r ip lat lon isp <<< "$cl"
-  tr=$(curl $ST_IPV -s --max-time 6 https://speed.cloudflare.com/cdn-cgi/trace 2>/dev/null)
-  loc=$(sed -n 's/^loc=//p' <<< "$tr")
-  [[ -n $ip ]] || ip=$(sed -n 's/^ip=//p' <<< "$tr")
-  [[ -n $lat ]] && mapfile -t cands < <(st_ookla_near "$lat" "$lon")
+  cl=$(st_client); IFS='|' read -r ip lat lon isp loc <<< "$cl"
+  if [[ -z $ip || -z $loc ]]; then
+    tr=$(curl $ST_IPV -s --max-time 6 https://speed.cloudflare.com/cdn-cgi/trace 2>/dev/null)
+    [[ -n $ip ]] || ip=$(sed -n 's/^ip=//p' <<< "$tr"); [[ -n $loc ]] || loc=$(sed -n 's/^loc=//p' <<< "$tr")
+  fi
+  mapfile -t cands < <(st_ookla_near "$lat" "$lon")
   while IFS= read -r c; do cands+=("0|$c"); done < <(st_cf_cand; st_linode_cands "${loc:-US}")
   printf '\r\033[K'
-  echo "  $(kv 出口 "$T${ip:-未知}${isp:+ ($isp)}${loc:+ $loc}$N")   $(kv 线程 "$T$n$N")"
+  echo "  $(kv 本机 "$T${ip:-未知}${isp:+ ($isp)}${loc:+ $loc}$N")   $(kv 线程 "$T$n$N")"
   st_try 10 "$n" "${cands[@]}"
   if [[ -z $ST_NAME ]]; then err "试了 $ST_TRIED 个节点都不能正常测, 请稍后再试"; return 1; fi
   echo "  $(kv 测速节点 "$T$ST_NAME$N")$( ((ST_KM > 0)) && echo "   ${D}距离约 $ST_KM km${N}")"
