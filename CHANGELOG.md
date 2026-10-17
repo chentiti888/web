@@ -2,6 +2,13 @@
 
 wsm 每个版本的改动，新的在最上面。服务器上执行 `wsm update` 时，会显示比当前版本新的条目。
 
+## v3.1.6
+
+- 流媒体 / AI 解锁检测对照 RegionRestrictionCheck (2025-12) 逐项重新核对
+- Disney+ 改用官方接口判断 (设备注册 → 换令牌 → 查地区); 以前只看首页能不能打开, 不支持的地区也会显示可访问
+- Netflix / YouTube Premium / ChatGPT 补上浏览器请求头和 cookie, 避免拿到不同的页面造成误判
+- Disney+ / Prime Video 用 IPv6 检测时提示暂不支持 (这两家不认 IPv6)
+
 ## v3.1.5
 
 - 网速测试改用 speedtest-cli (sivel/speedtest-cli): 官方 Speedtest 服务器, 按本机 IP 自动选附近延迟最低的节点

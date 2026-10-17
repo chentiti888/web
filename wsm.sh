@@ -23,12 +23,12 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="3.1.5"
+WSM_VER="3.1.6"
 # CHANGELOG-BEGIN  (更新时显示比当前版本新的条目, 新的写在最上面; 只留最近几条, 完整记录见仓库 CHANGELOG.md)
+# v3.1.6 流媒体/AI 解锁检测对照 RegionRestrictionCheck 重新核对: Disney+ 改用官方接口判断 (以前只看首页, 不支持的地区也显示可访问); Netflix/YouTube/ChatGPT 补上浏览器请求头和 cookie, 避免拿到不同页面误判
 # v3.1.5 网速测试改用 speedtest-cli (官方 Speedtest 服务器, 自动选最近最快的节点; speedtest.py 放在 wsm 仓库里, 核对 sha256 后临时运行, 测完就删); 不能用时自动改用 Cloudflare / Linode 备用测试
 # v3.1.4 网速测试去掉多节点, 只测本地; 备用节点不再依赖 speedtest.net 查询 (机房 IP 会被拒绝): Cloudflare → 同国家的 Speedtest 服务器 (日本/香港/新加坡/台湾) → 附近的 Linode 机房
 # v3.1.3 修复 Gemini 检测误判 (以前不支持的地区也显示支持); 多节点测速的国内部分改为只测还能用的 电信 / 联通 / 移动 服务器 (列表每天更新, 不通自动换备用)
-# v3.1.2 网速测试: 快速测试和多节点都改为测本地最近节点, 多节点每项都测下载和上传; 每项默认 1 个节点 + 2 个备用, 不通自动换备用
 # CHANGELOG-END
 WSM_DIR=/etc/wsm
 META_DIR=$WSM_DIR/sites
@@ -7876,30 +7876,63 @@ route_check() {
 
 # ---------------- 流媒体 / AI 解锁检测
 # 按各平台网页/接口的返回特征判断; 平台改版后可能不准, 结果仅供参考
+# 检测方法和请求头 / cookie 对照 lmc999/RegionRestrictionCheck (2025-12) 的写法; 少了 cookie 和浏览器请求头时,
+# Netflix / YouTube / ChatGPT 返回的页面不一样, 容易误判
 UA_WEB="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+UA_SEC_CH='"Google Chrome";v="125", "Chromium";v="125", "Not.A/Brand";v="24"'
+UL_NF_COOKIE='flwssn=d2c72c47-49e9-48da-b7a2-2dc6d7ca9fcf; nfvdid=BQFmAAEBEMZa4XMYVzVGf9-kQ1HXumtAKsCyuBZU4QStC6CGEGIVznjNuuTerLAG8v2-9V_kYhg5uxTB5_yyrmqc02U5l1Ts74Qquezc9AE-LZKTo3kY3g%3D%3D; SecureNetflixId=v%3D3%26mac%3DAQEAEQABABSQHKcR1d0sLV0WTu0lL-BO63TKCCHAkeY.%26dt%3D1745376277212; NetflixId=v%3D3%26ct%3DBgjHlOvcAxLAAZuNS4_CJHy9NKJPzUV-9gElzTlTsmDS1B59TycR-fue7f6q7X9JQAOLttD7OnlldUtnYWXL7VUfu9q4pA0gruZKVIhScTYI1GKbyiEqKaULAXOt0PHQzgRLVTNVoXkxcbu7MYG4wm1870fZkd5qrDOEseZv2WIVk4xIeNL87EZh1vS3RZU3e-qWy2tSmfSNUC-FVDGwxbI6-hk3Zg2MbcWYd70-ghohcCSZp5WHAGXg_xWVC7FHM3aOUVTGwRCU1RgGIg4KDKGr_wsTRRw6HWKqeA..; gsid=09bb180e-fbb1-4bf6-adcb-a3fa1236e323; OptanonConsent=isGpcEnabled=0&datestamp=Wed+Apr+23+2025+10%3A47%3A11+GMT%2B0800+(%E4%B8%AD%E5%9B%BD%E6%A0%87%E5%87%86%E6%97%B6%E9%97%B4)&version=202411.1.0&browserGpcFlag=0&isIABGlobal=false&hosts=&consentId=f13f841e-c75d-4f95-ab04-d8f581cac53e&interactionCount=0&isAnonUser=1&landingPath=https%3A%2F%2Fwww.netflix.com%2Fsg-zh%2Ftitle%2F81280792&groups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1'
+UL_YT_COOKIE='YSC=FSCWhKo2Zgw; VISITOR_PRIVACY_METADATA=CgJERRIEEgAgYQ%3D%3D; PREF=f7=4000; __Secure-YEC=CgtRWTBGTFExeV9Iayjele2yBjIKCgJERRIEEgAgYQ%3D%3D; SOCS=CAISOAgDEitib3FfaWRlbnRpdHlmcm9udGVuZHVpc2VydmVyXzIwMjQwNTI2LjAxX3AwGgV6aC1DTiACGgYIgMnpsgY; VISITOR_INFO1_LIVE=Di84mAIbgKY; __Secure-BUCKET=CGQ'
+UL_DISNEY_KEY='ZGlzbmV5JmJyb3dzZXImMS4wLjA.Cu56AgSfBTDag5NiRA81oLHkDZfu5L3CKadnefEAY84'
+UL_DISNEY_TOKEN='grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&latitude=0&longitude=0&platform=browser&subject_token=DISNEYASSERTION&subject_token_type=urn%3Abamtech%3Aparams%3Aoauth%3Atoken-type%3Adevice'
+UL_DISNEY_GRAPHQL='{"query":"mutation refreshToken($input: RefreshTokenInput!) {\n            refreshToken(refreshToken: $input) {\n                activeSession {\n                    sessionId\n                }\n            }\n        }","variables":{"input":{"refreshToken":"ILOVEDISNEY"}}}'
 
 ul_netflix() {
-    local r1 r2 region
-    r1=$(curl $UL_OPT -fsL 'https://www.netflix.com/title/81280792' -H 'accept-language: en-US,en;q=0.9' -A "$UA_WEB")
-    r2=$(curl $UL_OPT -fsL 'https://www.netflix.com/title/70143836' -H 'accept-language: en-US,en;q=0.9' -A "$UA_WEB")
+    local r1 r2 region t
+    local -a h=(-H 'accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8'
+        -H 'accept-language: en-US,en;q=0.9' -b "$UL_NF_COOKIE" -H "sec-ch-ua: $UA_SEC_CH" -H 'sec-ch-ua-mobile: ?0'
+        -H 'sec-ch-ua-platform: "Windows"' -H 'sec-fetch-dest: document' -H 'sec-fetch-mode: navigate'
+        -H 'sec-fetch-site: none' -H 'sec-fetch-user: ?1' -H 'upgrade-insecure-requests: 1' -A "$UA_WEB")
+    r1=$(curl $UL_OPT -fsL 'https://www.netflix.com/title/81280792' "${h[@]}")   # LEGO 忍者 (非自制剧)
+    r2=$(curl $UL_OPT -fsL 'https://www.netflix.com/title/70143836' "${h[@]}")   # 绝命毒师 (非自制剧)
     [[ -z "$r1" || -z "$r2" ]] && { echo "? 检测失败（连不上）"; return; }
     if grep -q 'Oh no!' <<< "$r1" && grep -q 'Oh no!' <<< "$r2"; then echo "! 仅自制剧"; return; fi
     region=$(sed -n 's/.*"id":"\([^"]*\)".*"countryName":"[^"]*".*/\1/p' <<< "$r1" | head -1)
     echo "Y 完整解锁${region:+（地区 $region）}"
 }
 
-ul_disney() {
-    local u
-    u=$(curl $UL_OPT -sL 'https://www.disneyplus.com' -o /dev/null -w '%{http_code} %{url_effective}' -A "$UA_WEB")
-    [[ -z "$u" || "$u" == 000* ]] && { echo "? 检测失败（连不上）"; return; }
-    [[ "$u" == 403* ]] && { echo "N 不支持（IP 被封）"; return; }
-    if [[ "$u" =~ preview|unavailable ]]; then echo "N 不支持"; else echo "Y 可访问（简易判断）"; fi
+ul_disney() {  # 走 Disney+ 自己的登录接口: 设备注册 -> 换令牌 -> 查地区
+    local r a tok rt g pre region sup
+    [[ $UL_OPT == *-6* ]] && { echo "? 暂不支持用 IPv6 检测"; return; }
+    r=$(curl $UL_OPT -s 'https://disney.api.edge.bamgrid.com/devices' -X POST -H "authorization: Bearer $UL_DISNEY_KEY" \
+        -H 'content-type: application/json; charset=UTF-8' -A "$UA_WEB" \
+        -d '{"deviceFamily":"browser","applicationRuntime":"chrome","deviceProfile":"windows","attributes":{}}')
+    [[ -z "$r" ]] && { echo "? 检测失败（连不上）"; return; }
+    grep -qi '403 ERROR' <<< "$r" && { echo "N 不支持（IP 被封）"; return; }
+    a=$(sed -n 's/.*"assertion" *: *"\([^"]*\)".*/\1/p' <<< "$r" | head -1)
+    [[ -z "$a" ]] && { echo "? 检测失败（页面异常）"; return; }
+    tok=$(curl $UL_OPT -s 'https://disney.api.edge.bamgrid.com/token' -X POST -H "authorization: Bearer $UL_DISNEY_KEY" \
+        -A "$UA_WEB" -d "${UL_DISNEY_TOKEN/DISNEYASSERTION/$a}")
+    grep -qiE 'forbidden-location|403 ERROR' <<< "$tok" && { echo "N 不支持（IP 被封）"; return; }
+    rt=$(sed -n 's/.*"refresh_token" *: *"\([^"]*\)".*/\1/p' <<< "$tok" | head -1)
+    g=$(curl $UL_OPT -sL 'https://disney.api.edge.bamgrid.com/graph/v1/device/graphql' -X POST \
+        -H "authorization: $UL_DISNEY_KEY" -A "$UA_WEB" -d "${UL_DISNEY_GRAPHQL/ILOVEDISNEY/$rt}")
+    pre=$(curl $UL_OPT -sL 'https://disneyplus.com' -o /dev/null -w '%{url_effective}' -A "$UA_WEB")
+    region=$(grep -o '"countryCode" *: *"[^"]*"' <<< "$g" | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+    sup=$(grep -oE '"inSupportedLocation" *: *(true|false)' <<< "$g" | head -1 | sed 's/.*: *//')
+    [[ -z "$region" ]] && { echo "N 不支持"; return; }
+    [[ "$region" == JP ]] && { echo "Y 支持（地区 JP）"; return; }
+    [[ "$pre" =~ preview|unavailable ]] && { echo "N 不支持"; return; }
+    case "$sup" in
+        true) echo "Y 支持（地区 $region）" ;;
+        false) echo "! 地区 $region 即将上线" ;;
+        *) echo "? 无法判断（地区 $region）" ;;
+    esac
 }
 
 ul_youtube() {
     local r region
     r=$(curl $UL_OPT -sL 'https://www.youtube.com/premium' -H 'accept-language: en-US,en;q=0.9' \
-        -H 'cookie: SOCS=CAISOAgDEitib3FfaWRlbnRpdHlmcm9udGVuZHVpc2VydmVyXzIwMjQwNTI2LjAxX3AwGgV6aC1DTiACGgYIgMnpsgY; PREF=f7=4000' -A "$UA_WEB")
+        -H "cookie: $UL_YT_COOKIE" -A "$UA_WEB")
     [[ -z "$r" ]] && { echo "? 检测失败（连不上）"; return; }
     grep -q 'www.google.cn' <<< "$r" && { echo "N 不支持（地区 CN）"; return; }
     grep -qi 'Premium is not available in your country' <<< "$r" && { echo "N 不支持"; return; }
@@ -7909,6 +7942,7 @@ ul_youtube() {
 
 ul_prime() {
     local r region
+    [[ $UL_OPT == *-6* ]] && { echo "? 暂不支持用 IPv6 检测"; return; }
     r=$(curl $UL_OPT -sL 'https://www.primevideo.com' -A "$UA_WEB")
     [[ -z "$r" ]] && { echo "? 检测失败（连不上）"; return; }
     grep -qi 'isServiceRestricted' <<< "$r" && { echo "N 不支持"; return; }
@@ -7917,13 +7951,18 @@ ul_prime() {
 }
 
 ul_chatgpt() {
-    local r1 r2 loc
-    r1=$(curl $UL_OPT -s 'https://api.openai.com/compliance/cookie_requirements' -H 'authorization: Bearer null' \
-        -H 'origin: https://platform.openai.com' -H 'referer: https://platform.openai.com/' -A "$UA_WEB")
-    r2=$(curl $UL_OPT -s 'https://ios.chat.openai.com/' -A "$UA_WEB")
+    local r1 r2 loc a=0 b=0
+    r1=$(curl $UL_OPT -s 'https://api.openai.com/compliance/cookie_requirements' -H 'accept: */*' \
+        -H 'accept-language: en-US,en;q=0.9' -H 'authorization: Bearer null' -H 'content-type: application/json' \
+        -H 'origin: https://platform.openai.com' -H 'referer: https://platform.openai.com/' -H "sec-ch-ua: $UA_SEC_CH" \
+        -H 'sec-ch-ua-mobile: ?0' -H 'sec-ch-ua-platform: "Windows"' -H 'sec-fetch-dest: empty' \
+        -H 'sec-fetch-mode: cors' -H 'sec-fetch-site: same-site' -A "$UA_WEB")
+    r2=$(curl $UL_OPT -s 'https://ios.chat.openai.com/' -H 'accept: */*;q=0.8' -H 'accept-language: en-US,en;q=0.9' \
+        -H "sec-ch-ua: $UA_SEC_CH" -H 'sec-ch-ua-mobile: ?0' -H 'sec-ch-ua-platform: "Windows"' \
+        -H 'sec-fetch-dest: document' -H 'sec-fetch-mode: navigate' -H 'sec-fetch-site: none' -H 'sec-fetch-user: ?1' \
+        -H 'upgrade-insecure-requests: 1' -A "$UA_WEB")
     [[ -z "$r1" || -z "$r2" ]] && { echo "? 检测失败（连不上）"; return; }
     loc=$(curl $UL_OPT -s 'https://chatgpt.com/cdn-cgi/trace' | sed -n 's/^loc=//p')
-    local a=0 b=0
     grep -qi 'unsupported_country' <<< "$r1" && a=1
     grep -qi 'VPN' <<< "$r2" && b=1
     if ((a == 0 && b == 0)); then echo "Y 支持${loc:+（地区 $loc）}"
@@ -7988,7 +8027,7 @@ unlock_check() {
     done
     rm -rf "$t"
     echo
-    echo " 说明：结果按各平台网页的特征判断，平台改版后可能不准；Disney+ 只做了简易判断"
+    echo " 说明：判断方法参考 RegionRestrictionCheck，平台改版后可能不准，仅供参考"
 }
 # ---------------- 网速测试 (优先用 speedtest-cli; 不能用时用下面的 curl 方式)
 # 多线程同时下载 / 上传若干秒, 用总流量 ÷ 实际用时算出带宽
