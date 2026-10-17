@@ -23,12 +23,12 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="3.1.3"
+WSM_VER="3.1.4"
 # CHANGELOG-BEGIN  (更新时显示比当前版本新的条目, 新的写在最上面; 只留最近几条, 完整记录见仓库 CHANGELOG.md)
+# v3.1.4 网速测试去掉多节点, 只测本地; 备用节点不再依赖 speedtest.net 查询 (机房 IP 会被拒绝): Cloudflare → 同国家的 Speedtest 服务器 (日本/香港/新加坡/台湾) → 附近的 Linode 机房
 # v3.1.3 修复 Gemini 检测误判 (以前不支持的地区也显示支持); 多节点测速的国内部分改为只测还能用的 电信 / 联通 / 移动 服务器 (列表每天更新, 不通自动换备用)
 # v3.1.2 网速测试: 快速测试和多节点都改为测本地最近节点, 多节点每项都测下载和上传; 每项默认 1 个节点 + 2 个备用, 不通自动换备用
 # v3.1.1 修复网速测试 Cloudflare 下载失败; 多节点测试改为 美国 (美西/美中/美东) + 上海/北京/广州 三网, 国内节点同时测下载和上传
-# v3.1.0 新增网速测试 (网络检测 → 1): 最近机房的 延迟/下载/上传, 东京/新加坡/美西/法兰克福/伦敦 多节点下载; 只用 curl, 不跑第三方测速脚本; 新命令 wsm speedtest
 # CHANGELOG-END
 WSM_DIR=/etc/wsm
 META_DIR=$WSM_DIR/sites
@@ -7992,23 +7992,14 @@ unlock_check() {
 }
 # ---------------- 网速测试 (只用 curl, 不跑第三方测速脚本)
 # 多线程同时下载 / 上传若干秒, 用总流量 ÷ 实际用时算出带宽
-# 节点都是 Speedtest 服务器 (运营商 / 机房自己架的), 在 speedtest.net 的公开列表里实时查找,
-# 直接用 curl 连它的 /download 和 /upload 接口 (服务器列表经常变, 所以不写死地址)
-#   本地: 离本机最近的 2 个 + Cloudflare 最近机房, 共 3 个, 前一个不通就自动换下一个
-#   国内: speedtest.net 在国内的公开服务器已经很少 (而且它的查询接口不让机房 IP 用),
-#         所以用 spiritLHLS/speedtest.net-CN-ID 每天更新的国内服务器列表, 按 电信 / 联通 / 移动 分组,
-#         每组最多 3 个, 前一个不通就换下一个; 列表拉不到时用下面内置的 (2026-10 的数据)
+# 节点按顺序试, 前一个不通就换下一个 (默认 1 个 + 备用 2 个):
+#   1. Cloudflare 最近机房 (下载 + 上传)
+#   2. 同一国家/地区的 Speedtest 服务器 (日本 / 香港 / 新加坡 / 台湾 有, 用 spiritLHLS/speedtest.net-CN-ID 每天更新的列表; 下载 + 上传)
+#   3. 附近的 Linode 机房官方测速文件 (只能测下载)
 # Cloudflare 单次最多给 1 亿字节 (超过直接拒绝), 这里每次取 2500 万, 循环下载
 ST_CF_DOWN="https://speed.cloudflare.com/__down?bytes=25000000"
 ST_CF_UP="https://speed.cloudflare.com/__up"
-ST_CN_LIST_URL="https://raw.githubusercontent.com/spiritLHLS/speedtest.net-CN-ID/main/CN.csv"
-ST_CN_BUILTIN='id,country_code,country,city,ip,host,port,supplier
-24447,CN,China,Shanghai,210.22.155.34,mobile.shunicomtest.com.prod.hosts.ooklaserver.net,8080,China Unicom 5G
-43752,CN,China,Beijing,124.65.21.31,beijing.unicomtest.com,8080,BJ Unicom
-5396,CN,China,Suzhou,115.169.22.130,4gsuzhou1.speedtest.jsinfo.net.prod.hosts.ooklaserver.net,8080,China Telecom JiangSu 5G
-36663,CN,China,Zhenjiang,115.168.74.186,5gzhenjiang.speedtest.jsinfo.net.prod.hosts.ooklaserver.net,8080,China Telecom JiangSu 5G
-59387,CN,China,NingBo,61.153.82.77,cesu-nb.zjtelecom.com.cn.prod.hosts.ooklaserver.net,8080,浙江电信'
-# 运营商: 显示名|英文名|JSON 里的中文 (\u 转义)
+ST_OOKLA_LIST="https://raw.githubusercontent.com/spiritLHLS/speedtest.net-CN-ID/main"
 ST_IPV="-4"
 
 st_now() { date +%s.%N; }
@@ -8080,34 +8071,44 @@ st_pick_ip() {  # 优先 IPv4, 没有 IPv4 的机器用 IPv6
 
 st_threads() { local c; c=$(nproc 2>/dev/null || echo 1); ((c >= 4)) && echo 8 || echo 4; }
 
-st_servers() {  # [城市英文名] -> speedtest.net 服务器, 一行一个: host|运营商|城市|国家代码  (不写城市 = 离本机最近的)
-  local q="limit=10"
-  [[ -n ${1:-} ]] && q="limit=100&search=$1"
-  { curl $ST_IPV -s --max-time 15 -A "Mozilla/5.0" "https://www.speedtest.net/api/js/servers?engine=js&$q" 2>/dev/null; echo; } \
-    | sed 's/},{/}\n{/g' | while IFS= read -r l; do
-        local h sp ct cc
-        h=$(sed -n 's/.*"host":"\([^"]*\)".*/\1/p' <<< "$l"); [[ -n $h ]] || continue
-        sp=$(sed -n 's/.*"sponsor":"\([^"]*\)".*/\1/p' <<< "$l")
-        ct=$(sed -n 's/.*"name":"\([^"]*\)".*/\1/p' <<< "$l")
-        cc=$(sed -n 's/.*"cc":"\([^"]*\)".*/\1/p' <<< "$l")
-        printf '%s|%s|%s|%s\n' "$h" "$sp" "$ct" "$cc"
-      done
-}
-
-st_ookla_cand() {  # host|运营商|城市|... -> 候选: 名称|测延迟地址|下载地址|上传地址
-  local h sp ct
-  IFS='|' read -r h sp ct _ <<< "$1"
-  printf '%s|http://%s/|http://%s/download?size=25000000|http://%s/upload\n' "$sp${ct:+ ($ct)}" "$h" "$h" "$h"
-}
-
 st_cf_cand() {
   local colo
   colo=$(curl $ST_IPV -s --max-time 6 https://speed.cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n 's/^colo=//p')
   printf 'Cloudflare %s|https://speed.cloudflare.com/__down?bytes=0|%s|%s\n' "${colo:-最近机房}" "$ST_CF_DOWN" "$ST_CF_UP"
 }
 
+st_ookla_cands() {  # 国家代码 -> 这个国家的 Speedtest 服务器 (最多 2 个)
+  case $1 in JP|HK|SG|TW) ;; *) return 0 ;; esac
+  curl $ST_IPV -fsL --max-time 10 "$ST_OOKLA_LIST/$1.csv" 2>/dev/null | awk -F',' -v c="$1" '
+    NR > 1 && $2 == c && $6 != "" { p = ($7 ? $7 : 8080); h = $6 ":" p
+      printf "%s|http://%s/|http://%s/download?size=25000000|http://%s/upload\n", $8, h, h, h; if (++n >= 2) exit }'
+}
+
+st_linode_cands() {  # 国家代码 -> 附近的 Linode 机房 (只能测下载, 上传地址留空)
+  local r
+  case $1 in
+    JP|KR|TW|HK|CN|MO) r="tokyo2:东京 singapore:新加坡" ;;
+    SG|MY|ID|TH|VN|PH|KH|MM) r="singapore:新加坡 tokyo2:东京" ;;
+    IN|PK|BD|LK|AE|SA) r="mumbai1:孟买 singapore:新加坡" ;;
+    AU|NZ) r="syd1:悉尼 singapore:新加坡" ;;
+    CA) r="toronto1:多伦多 newark:纽瓦克" ;;
+    GB|IE) r="london:伦敦 frankfurt:法兰克福" ;;
+    DE|NL|FR|BE|LU|CH|AT|IT|ES|PT|PL|CZ|SE|NO|DK|FI|RU|UA|RO|BG|HU|TR) r="frankfurt:法兰克福 london:伦敦" ;;
+    *) r="fremont:弗里蒙特 dallas:达拉斯" ;;   # 美国和其他地区
+  esac
+  local x h f
+  for x in $r; do
+    h=${x%%:*}; f=${h%1}; [[ $h == tokyo2 || $h == syd1 ]] && f=$h
+    printf 'Linode %s|http://speedtest.%s.linode.com/|http://speedtest.%s.linode.com/100MB-%s.bin|\n' "${x#*:}" "$h" "$h" "$f"
+  done
+}
+
+st_local_cands() {  # 国家代码 -> 候选节点 (默认 1 个 + 备用 2 个): 名称|测延迟地址|下载地址|上传地址
+  { st_cf_cand; st_ookla_cands "$1"; st_linode_cands "$1"; } | head -3
+}
+
 # st_try 秒数 线程 候选... : 依次试, 第一个能连上并且下载成功的就用它
-# 结果: ST_NAME ST_LAT ST_D ST_U ST_TRIED (试了几个)
+# 结果: ST_NAME ST_LAT ST_D ST_U (- = 这个节点不能测上传) ST_TRIED (试了几个)
 st_try() {
   local sec=$1 n=$2 c name lu du uu
   shift 2
@@ -8117,32 +8118,26 @@ st_try() {
     ST_TRIED=$((ST_TRIED + 1))
     ST_LAT=$(st_latency "$lu"); [[ -n $ST_LAT ]] || continue
     ST_D=$(st_down "$du" "$sec" "$n"); [[ -n $ST_D ]] || continue
-    ST_U=$(st_up "$uu" "$sec" "$n")
+    if [[ -n $uu ]]; then ST_U=$(st_up "$uu" "$sec" "$n"); else ST_U="-"; fi
     ST_NAME=$name
     return 0
   done
   ST_LAT=""; return 1
 }
 
-st_local_cands() {  # 本地: 最近的 2 个 Speedtest 服务器 + Cloudflare
-  local l k=0
-  while IFS= read -r l; do
-    [[ -n $l ]] || continue
-    st_ookla_cand "$l"; k=$((k + 1)); ((k >= 2)) && break
-  done < <(st_servers)
-  st_cf_cand
-}
-
 speed_quick() {  # 本地最近节点: 延迟 + 下载 + 上传
   local ip loc n tr
   local -a cands=()
+  title "网速测试"
+  echo "  ${D}测这台服务器自己的带宽, 测试期间会占满带宽; 按千兆带宽算约用 2.5GB 流量${N}"
   st_pick_ip || return 1
   n=$(st_threads)
   tr=$(curl $ST_IPV -s --max-time 6 https://speed.cloudflare.com/cdn-cgi/trace 2>/dev/null)
   ip=$(sed -n 's/^ip=//p' <<< "$tr"); loc=$(sed -n 's/^loc=//p' <<< "$tr")
+  [[ -n $ip ]] || ip=$(public_ip)
   echo "  $(kv 出口 "$T${ip:-未知}${loc:+ ($loc)}$N")   $(kv 线程 "$T$n$N")"
-  printf '  查找最近的测速节点 ...'
-  mapfile -t cands < <(st_local_cands); printf '\r\033[K'
+  printf '  查找附近的测速节点 ...'
+  mapfile -t cands < <(st_local_cands "${loc:-US}"); printf '\r\033[K'
   printf '  测试中 (下载 / 上传各 10 秒, 约 25 秒) ...'
   st_try 10 "$n" "${cands[@]}"; printf '\r\033[K'
   if [[ -z $ST_NAME ]]; then err "试了 $ST_TRIED 个节点都连不上, 请稍后再试"; return 1; fi
@@ -8150,78 +8145,8 @@ speed_quick() {  # 本地最近节点: 延迟 + 下载 + 上传
   echo
   echo "  $(kv 延迟 "$T$ST_LAT ms$N")"
   echo "  $(kv 下载 "$(st_fmt "$ST_D")")"
-  echo "  $(kv 上传 "$(st_fmt "$ST_U")")"
-}
-
-st_fmt_short() {
-  if [[ -n $1 ]]; then printf '%s%s Mbps%s' "$G" "$1" "$N"
-  else printf '%s失败%s' "$R" "$N"; fi
-}
-
-st_row() {  # 名称 : 用 st_try 的结果画一行
-  printf '\r\033[K  %s' "$T"; pad_w "$1" 18; printf '%s' "$N"
-  if [[ -z $ST_NAME ]]; then echo "${R}连不上${N} ${D}(试了 $ST_TRIED 个节点)${N}"; return 0; fi
-  pad_w "$ST_LAT ms" 9; printf '%s\e[48G%s\n' "$(st_fmt_short "$ST_D")" "$(st_fmt_short "$ST_U")"
-}
-
-st_cn_list() {  # -> host:port|城市|运营商  (只要中国大陆三大运营商的)
-  local csv
-  csv=$(curl $ST_IPV -fsL --max-time 10 "$ST_CN_LIST_URL?t=$(date +%s)" 2>/dev/null)
-  [[ $csv == id,* ]] || csv=$ST_CN_BUILTIN
-  printf '%s\n' "$csv" | awk -F',' 'NR > 1 && $3 == "China" && $6 != "" {
-      s = $8; isp = ""
-      if (s ~ /Telecom|Tietong|电信/) isp = "电信"; else if (s ~ /Unicom|联通/) isp = "联通"; else if (s ~ /Mobile|移动/) isp = "移动"
-      if (isp != "") print $6 ":" ($7 ? $7 : 8080) "|" $4 "|" isp }'
-}
-
-speed_nodes() {  # 本地最近 + 国内还能用的三网服务器
-  local n isp l h city list local_name
-  local -a cands=()
-  st_pick_ip || return 1
-  n=$(st_threads)
-  echo "  ${D}每个节点 下载 / 上传 各 5 秒 ($n 线程), 不通的自动换备用节点, 约 1 分钟${N}"
-  echo "  ${D}国内 Speedtest 公开服务器已经很少, 只测还能用的; 有的会限制国外访问, 连不上属正常${N}"
-  echo
-  printf '  %s' "$D"; pad_w "节点" 18; pad_w "延迟" 9; printf '下载\e[48G上传%s\n' "$N"
-  printf '  %s' "$T"; pad_w "本地最近" 18; printf '%s测试中 ...' "$N"
-  mapfile -t cands < <(st_local_cands)
-  st_try 5 "$n" "${cands[@]}"; st_row "本地最近"; local_name=$ST_NAME
-  list=$(st_cn_list)
-  for isp in 电信 联通 移动; do
-    cands=()
-    while IFS='|' read -r h city _; do
-      [[ -n $h ]] && cands+=("$isp ($city)|http://$h/|http://$h/download?size=25000000|http://$h/upload")
-    done < <(printf '%s\n' "$list" | awk -F'|' -v i="$isp" '$3 == i' | head -3)
-    if ((${#cands[@]} == 0)); then
-      printf '  %s' "$T"; pad_w "国内$isp" 18; echo "$N${D}目前没有公开的测速服务器${N}"; continue
-    fi
-    printf '  %s' "$T"; pad_w "国内$isp" 18; printf '%s测试中 ...' "$N"
-    st_try 5 "$n" "${cands[@]}"
-    st_row "${ST_NAME:-国内$isp}"
-  done
-  echo
-  [[ -n ${local_name:-} ]] && echo "  ${D}本地最近 = $local_name${N}"
-  echo "  ${D}下载 = 从节点下载到本机; 上传 = 从本机发到节点 (做代理时, 国内用户的下载速度主要看上传这一列)${N}"
-}
-
-speed_menu() {
-  local c
-  while true; do
-    title "网速测试"
-    echo "  ${D}测这台服务器自己的带宽, 测试期间会占满带宽${N}"
-    echo "  ${D}按千兆带宽算: 快速测试约用 2.5GB 流量, 多节点更多; 按流量计费的机器请注意${N}"
-    echo
-    mitem 1 "快速测试" "本地最近节点的 延迟 / 下载 / 上传, 约 25 秒"
-    mitem 2 "多节点测试" "本地 + 国内三网 (还能用的服务器), 约 1 分钟"
-    mback
-    read -r -p "请选择: " c || return 0
-    case "$c" in
-      1) (speed_quick); pause ;;
-      2) (speed_nodes); pause ;;
-      0|q|Q) return 0 ;;
-      *) warn "无效选择" ;;
-    esac
-  done
+  if [[ $ST_U == - ]]; then echo "  $(kv 上传 "${D}这个节点只能测下载${N}")"
+  else echo "  $(kv 上传 "$(st_fmt "$ST_U")")"; fi
 }
 
 # ---------------- 服务器工具的菜单
@@ -8252,13 +8177,13 @@ menu_check() {
     local c
     while true; do
         title "网络检测"
-        mitem 1 "网速测试" "下载 / 上传 / 延迟"
+        mitem 1 "网速测试" "本地 延迟 / 下载 / 上传, 约 25 秒"
         mitem 2 "回程线路检测" "电信 / 联通 / 移动"
         mitem 3 "流媒体 / AI 解锁" "Netflix / YouTube / ChatGPT ..."
         mback
         read -r -p "请选择: " c || return 0
         case "$c" in
-            1) speed_menu ;;
+            1) (speed_quick); pause ;;
             2) (route_check); pause ;;
             3) (unlock_check); pause ;;
             0|q|Q) return 0 ;;
@@ -8833,7 +8758,7 @@ wsm v$WSM_VER - Server Manager   (ssb 是同一个命令)
   wsm key-download [私钥文件]       下载服务器上的私钥
   wsm bbr | noping                  BBR 加速 / 禁 Ping (开关)
   wsm fwd                           端口转发 (TCP/UDP)
-  wsm speedtest                     网速测试 (下载/上传/延迟, 多节点)
+  wsm speedtest                     网速测试 (本地 延迟/下载/上传)
   wsm route | unlock                回程线路检测 / 流媒体与 AI 解锁检测
   wsm bench                         性能测试 (CPU 占用/CPU/内存/硬盘)
   wsm components                    已安装组件 (查看/卸载 wsm 装过的软件)
@@ -8902,7 +8827,7 @@ esac
 case ${1:-menu} in
   menu)         [[ -d $APPS_DIR || -d $META_DIR ]] && apps_migrate_once; main_menu ;;
   sysinfo)      sys_info ;;
-  speedtest)    speed_menu ;;
+  speedtest)    speed_quick ;;
   tgbot)        shift; tgbot_run "$@" ;;
   bbr)          bbr_menu ;;
   noping)       ping_menu ;;
