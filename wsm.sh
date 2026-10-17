@@ -23,12 +23,12 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="3.1.6"
+WSM_VER="3.1.7"
 # CHANGELOG-BEGIN  (更新时显示比当前版本新的条目, 新的写在最上面; 只留最近几条, 完整记录见仓库 CHANGELOG.md)
+# v3.1.7 修复 Gemini 检测: 网页里的可用标记改版失效, 支持的地区 (如日本) 也显示不支持; 改为按 Google 识别的地区对照支持列表判断
 # v3.1.6 流媒体/AI 解锁检测对照 RegionRestrictionCheck 重新核对: Disney+ 改用官方接口判断 (以前只看首页, 不支持的地区也显示可访问); Netflix/YouTube/ChatGPT 补上浏览器请求头和 cookie, 避免拿到不同页面误判
 # v3.1.5 网速测试改用 speedtest-cli (官方 Speedtest 服务器, 自动选最近最快的节点; speedtest.py 放在 wsm 仓库里, 核对 sha256 后临时运行, 测完就删); 不能用时自动改用 Cloudflare / Linode 备用测试
 # v3.1.4 网速测试去掉多节点, 只测本地; 备用节点不再依赖 speedtest.net 查询 (机房 IP 会被拒绝): Cloudflare → 同国家的 Speedtest 服务器 (日本/香港/新加坡/台湾) → 附近的 Linode 机房
-# v3.1.3 修复 Gemini 检测误判 (以前不支持的地区也显示支持); 多节点测速的国内部分改为只测还能用的 电信 / 联通 / 移动 服务器 (列表每天更新, 不通自动换备用)
 # CHANGELOG-END
 WSM_DIR=/etc/wsm
 META_DIR=$WSM_DIR/sites
@@ -7982,14 +7982,34 @@ ul_claude() {
     esac
 }
 
+# Gemini 支持的国家/地区 (三位代码, 来自 oneclickvirt/UnlockTests 2026-10 的列表; 不在里面的如 CHN HKG MAC RUS IRN PRK CUB SYR)
+UL_GEMINI_OK="
+ALA ALB DZA ASM AND AGO AIA ATA ATG ARG ARM ABW AUS AUT AZE BHR BGD BRB BEL BLZ BEN BMU BTN BOL BIH
+BWA BRA IOT VGB BRN BGR BFA BDI CPV KHM CMR CAN BES CYM CAF TCD CHL CXR CCK COL COM COK CRI CIV HRV
+CUW CZE COD DNK DJI DMA DOM ECU EGY SLV GNQ ERI EST SWZ ETH FLK FRO FJI FIN FRA GUF PYF ATF GAB GEO
+DEU GHA GIB GRC GRL GRD GLP GUM GTM GGY GIN GNB GUY HTI HMD HND HUN ISL IND IDN IRQ IRL IMN ISR ITA
+JAM JPN JEY JOR KAZ KEN KIR KWT KGZ LAO LVA LBN LSO LBR LBY LIE LTU LUX MDG MWI MYS MDV MLI MLT MHL
+MTQ MRT MUS MYT MEX FSM MDA MCO MNG MNE MSR MAR MOZ MMR NAM NRU NPL NLD NCL NZL NIC NER NGA NIU NFK
+MKD MNP NOR OMN PAK PLW PSE PAN PNG PRY PER PHL PCN POL PRT PRI QAT CYP COG REU ROU RWA BLM SHN KNA
+LCA MAF SPM VCT WSM SMR STP SAU SEN SRB SYC SLE SGP SXM SVK SVN SLB SOM ZAF SGS KOR SSD ESP LKA SDN
+SUR SJM SWE CHE TWN TJK TZA THA BHS GMB TLS TGO TKL TON TTO TUN TUR TKM TCA TUV VIR UGA UKR ARE GBR
+USA UMI URY UZB VUT VAT VEN VNM WLF ESH YEM ZMB ZWE XKX
+"
+
 ul_gemini() {
-    # 看 Gemini 网页: 地区支持时页面里有 45631641,null,true; 地区代码在 ,2,1,200,"XXX" 里
+    # 打开 Gemini 网页: 页面里会写 Google 判断的地区 (,2,1,200,"JPN" 这样的三位代码), 在支持列表里就是支持;
+    # 页面里有 45631641,null,true 或 45617354,null,true 也表示可用 (这两个标记会随改版变化, 只当辅助判断)
     # 不用 API 判断: 带无效 key 请求时 Google 先校验 key, 不管哪个地区都返回 "key 无效", 会被误判成支持
-    local r cc
-    r=$(curl $UL_OPT -sL 'https://gemini.google.com' -A "$UA_WEB")
-    [[ -z "$r" ]] && { echo "? 检测失败（连不上）"; return; }
+    local r code cc ok=0
+    r=$(curl $UL_OPT -sL 'https://gemini.google.com' -A "$UA_WEB" -H 'accept-language: en-US,en;q=0.9' -w '\n__HTTP__%{http_code}')
+    code=${r##*__HTTP__}; r=${r%__HTTP__*}
+    [[ -z "$r" || $code == 000 ]] && { echo "? 检测失败（连不上）"; return; }
+    [[ $code == 403 || $code == 451 ]] && { echo "N 不支持（IP 被封）"; return; }
     cc=$(grep -o ',2,1,200,"[A-Z]\{3\}"' <<< "$r" | head -1 | sed 's/.*"\([A-Z]*\)"/\1/')
-    if grep -q '45631641,null,true' <<< "$r"; then echo "Y 支持${cc:+（地区 $cc）}"; else echo "N 不支持${cc:+（地区 $cc）}"; fi
+    grep -qE '45631641,null,true|45617354,null,true' <<< "$r" && ok=1
+    if [[ -n $cc && " ${UL_GEMINI_OK//$'\n'/ } " == *" $cc "* ]]; then echo "Y 支持（地区 $cc）"
+    elif ((ok)); then echo "Y 支持${cc:+（地区 $cc）}"
+    else echo "N 不支持${cc:+（地区 $cc）}"; fi
 }
 
 unlock_check() {

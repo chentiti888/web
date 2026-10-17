@@ -2,6 +2,12 @@
 
 wsm 每个版本的改动，新的在最上面。服务器上执行 `wsm update` 时，会显示比当前版本新的条目。
 
+## v3.1.7
+
+- 修复 Gemini 检测: Gemini 网页里的可用标记改版后失效, 日本等支持的地区也显示不支持
+- 改为读取 Google 自己识别的地区, 对照 Gemini 支持的国家/地区列表判断 (列表来自 oneclickvirt/UnlockTests); 新旧两种可用标记作为辅助
+- 返回 403 / 451 时显示 IP 被封
+
 ## v3.1.6
 
 - 流媒体 / AI 解锁检测对照 RegionRestrictionCheck (2025-12) 逐项重新核对
