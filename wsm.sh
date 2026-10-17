@@ -6813,7 +6813,7 @@ key_download() {
         fi
         echo
         echo " NAT 机器（SSH 端口是服务商分配的那种）要填服务商给你转发好的端口，否则外面连不上"
-        read -rp "下载端口（回车随机）: " dport
+        read -r -p "下载端口（回车随机）: " dport || { trap - INT; return; }
         if [[ -z "$dport" ]]; then
             dport=$((RANDOM % 10000 + 40000))
         elif ! [[ "$dport" =~ ^[0-9]+$ ]] || ((dport < 1 || dport > 65535)); then
@@ -7037,7 +7037,7 @@ fwd_add() {
     local PROTOS=() PROTO_DESC="" PROTO OUT_IF o o1 o2 o3 o4
 
     echo
-    read -r -p "请输入落地服务器 IP: " BACKEND_IP
+    read -r -p "请输入落地服务器 IP: " BACKEND_IP || return 9   # 输入 0: 直接回到菜单
     [[ "$BACKEND_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || { err "IP 格式不正确：$BACKEND_IP"; return 1; }
 
     IFS='.' read -r o1 o2 o3 o4 <<< "$BACKEND_IP"
@@ -7045,11 +7045,11 @@ fwd_add() {
         (( 10#$o <= 255 )) || { err "IP 地址不正确：$BACKEND_IP"; return 1; }
     done
 
-    read -r -p "请输入落地服务器端口: " BACKEND_PORT
+    read -r -p "请输入落地服务器端口: " BACKEND_PORT || return 9   # 输入 0: 直接回到菜单
     [[ "$BACKEND_PORT" =~ ^[0-9]+$ ]] || { err "端口必须是数字"; return 1; }
     (( BACKEND_PORT >= 1 && BACKEND_PORT <= 65535 )) || { err "端口范围必须是 1-65535"; return 1; }
 
-    read -r -p "请输入中转服务器监听端口: " FRONT_PORT
+    read -r -p "请输入中转服务器监听端口: " FRONT_PORT || return 9   # 输入 0: 直接回到菜单
     [[ "$FRONT_PORT" =~ ^[0-9]+$ ]] || { err "端口必须是数字"; return 1; }
     (( FRONT_PORT >= 1 && FRONT_PORT <= 65535 )) || { err "端口范围必须是 1-65535"; return 1; }
 
@@ -7058,7 +7058,7 @@ fwd_add() {
     echo "  1) TCP + UDP（默认）"
     echo "  2) 仅 UDP"
     echo "  3) 仅 TCP"
-    read -r -p "请选择 [1-3]: " PROTO_CHOICE
+    read -r -p "请选择 [1-3]: " PROTO_CHOICE || return 9   # 输入 0: 直接回到菜单
     case "${PROTO_CHOICE:-1}" in
         1) PROTOS=(tcp udp); PROTO_DESC="TCP+UDP" ;;
         2) PROTOS=(udp);     PROTO_DESC="UDP" ;;
@@ -7286,7 +7286,7 @@ forward_menu() {
         mback
         read -r -p "请选择: " c || return 0
         case "$c" in
-            1) (fwd_add); pause ;;
+            1) (fwd_add); (($? == 9)) || pause ;;
             2) (fwd_delete); pause ;;
             3) (fwd_clear_all && fwd_persist_remove); pause ;;
             4) (fwd_list); pause ;;
@@ -7901,12 +7901,9 @@ route_check() {
         printf ' %s  %b%s%b  %s\n' "$name" "$c1" "$label" "$NC" "${ms:-终点不回应}"
     done
     echo
-    echo " 说明：精品 > 优质 > 普通。电信 CN2 GIA、移动 CMIN2、联通 9929 一般最稳；163/4837/CMI 晚高峰容易拥堵"
+    echo " 说明："
     echo " 终点不回应：目标地址不回 ping，只是测不到延迟，线路判断照样有效"
     echo " 没看到骨干网 / 无法判断：途中路由器不回应探测，换了备用地址和方式还是看不到，多测几次或换时间再测"
-    echo " 去程（国内到这台）在服务器上测不了，要从国内发起。可在手机/电脑浏览器打开："
-    myip=$(curl -s4 --max-time 5 ip.sb 2>/dev/null)
-    echo -e "   ${CYAN}https://www.itdog.cn/tracert/${myip:-你的服务器IP}${NC}"
     echo
     read -rp "查看某一条的详细路由？输入序号 1-${#RT_TARGETS[@]}（回车跳过）: " sel
     if [[ "$sel" =~ ^[0-9]+$ ]] && ((sel >= 1 && sel <= ${#RT_TARGETS[@]})); then
