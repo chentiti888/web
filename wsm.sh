@@ -517,7 +517,14 @@ install_base() {
   if [[ $PM == apt ]]; then
     apt_fix_sources
     apt-get update -y
-    pkg_install nginx curl ca-certificates openssl cron certbot unzip tar gzip || die "基础软件安装失败"
+    pkg_install nginx curl ca-certificates openssl cron certbot unzip tar gzip
+    # 卸载后重装时 dpkg 认为配置文件是用户删掉的, 不会再生成 nginx.conf -> 强制补回缺失的配置文件
+    if command -v nginx >/dev/null 2>&1 && [[ ! -f /etc/nginx/nginx.conf ]]; then
+      info "补回缺失的 Nginx 配置文件 ..."
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --reinstall -o Dpkg::Options::=--force-confmiss nginx-common nginx >/dev/null 2>&1
+    fi
+    command -v nginx >/dev/null 2>&1 && command -v certbot >/dev/null 2>&1 || die "基础软件安装失败"
+    [[ -f /etc/nginx/nginx.conf ]] || die "Nginx 主配置 /etc/nginx/nginx.conf 缺失, 请执行: apt-get purge -y nginx nginx-common 后重新安装"
     rm -f /etc/nginx/sites-enabled/default
     systemctl enable --now cron >/dev/null 2>&1 || true
   else
@@ -8533,6 +8540,7 @@ web_uninstall() {
   fi
   info "正在卸载 Nginx / certbot / PHP ..."
   if [[ $PM == apt ]]; then
+    pkg_has nginx-common && pkgs+=(nginx-common)   # 依赖包也要 purge, 不然重装时不会重新生成 nginx.conf
     DEBIAN_FRONTEND=noninteractive apt-get purge -y "${pkgs[@]}" >/dev/null 2>&1
     mapfile -t pk < <(dpkg-query -W -f='${Package} ${Status}\n' 'php*' 2>/dev/null | awk '/install ok installed/{print $1}')
     ((${#pk[@]})) && DEBIAN_FRONTEND=noninteractive apt-get purge -y "${pk[@]}" >/dev/null 2>&1
@@ -8565,7 +8573,7 @@ web_uninstall() {
       fi
     fi
   fi
-  [[ $PM == apt ]] && DEBIAN_FRONTEND=noninteractive apt-get autoremove -y >/dev/null 2>&1
+  [[ $PM == apt ]] && DEBIAN_FRONTEND=noninteractive apt-get autoremove --purge -y >/dev/null 2>&1
   # 5. 网站文件
   if [[ -d $WWW_ROOT ]]; then
     echo
