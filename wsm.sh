@@ -4259,8 +4259,8 @@ update_set_url() {
   printf 'UPDATE_URL=%q\n' "$url" > "$UPDATE_CONF"
   UPDATE_URL=$url
   info "已保存: $url"
-  echo "  新服务器一键安装:"
-  echo "  curl -fsSL $url -o wsm.sh && bash wsm.sh install"
+  echo "  新服务器安装 wsm (不装任何软件): curl -fsSL $url -o wsm.sh && bash wsm.sh"
+  echo "  需要网站环境时再执行: wsm install (或菜单里选 [安装网站环境])"
 }
 
 update_fetch() {  # -> UPD_TMP
@@ -8700,7 +8700,7 @@ case ${1:-menu} in
   web-uninstall) web_installed && web_uninstall ;;
   icons)        ui_icon_set "${2:-}" ;;
   timezone)     if [[ -n ${2:-} ]]; then tz_set "$2"; else echo "时区: $(tz_get)  时间: $(tz_now)"; fi ;;
-  install)      cmd_install ;;
+  install)      web_install_flow ;;   # 先说明要装什么, 确认后才开始
   php-install)  install_php "${2:-}" ;;
   db-install)   install_db ;;
   db-create)    db_create "${2:-}" ;;
