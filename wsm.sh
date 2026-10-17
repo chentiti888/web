@@ -23,12 +23,12 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="3.1.4"
+WSM_VER="3.1.5"
 # CHANGELOG-BEGIN  (更新时显示比当前版本新的条目, 新的写在最上面; 只留最近几条, 完整记录见仓库 CHANGELOG.md)
+# v3.1.5 网速测试改用 speedtest-cli (官方 Speedtest 服务器, 自动选最近最快的节点; speedtest.py 放在 wsm 仓库里, 核对 sha256 后临时运行, 测完就删); 不能用时自动改用 Cloudflare / Linode 备用测试
 # v3.1.4 网速测试去掉多节点, 只测本地; 备用节点不再依赖 speedtest.net 查询 (机房 IP 会被拒绝): Cloudflare → 同国家的 Speedtest 服务器 (日本/香港/新加坡/台湾) → 附近的 Linode 机房
 # v3.1.3 修复 Gemini 检测误判 (以前不支持的地区也显示支持); 多节点测速的国内部分改为只测还能用的 电信 / 联通 / 移动 服务器 (列表每天更新, 不通自动换备用)
 # v3.1.2 网速测试: 快速测试和多节点都改为测本地最近节点, 多节点每项都测下载和上传; 每项默认 1 个节点 + 2 个备用, 不通自动换备用
-# v3.1.1 修复网速测试 Cloudflare 下载失败; 多节点测试改为 美国 (美西/美中/美东) + 上海/北京/广州 三网, 国内节点同时测下载和上传
 # CHANGELOG-END
 WSM_DIR=/etc/wsm
 META_DIR=$WSM_DIR/sites
@@ -7990,7 +7990,7 @@ unlock_check() {
     echo
     echo " 说明：结果按各平台网页的特征判断，平台改版后可能不准；Disney+ 只做了简易判断"
 }
-# ---------------- 网速测试 (只用 curl, 不跑第三方测速脚本)
+# ---------------- 网速测试 (优先用 speedtest-cli; 不能用时用下面的 curl 方式)
 # 多线程同时下载 / 上传若干秒, 用总流量 ÷ 实际用时算出带宽
 # 节点按顺序试, 前一个不通就换下一个 (默认 1 个 + 备用 2 个):
 #   1. Cloudflare 最近机房 (下载 + 上传)
@@ -8125,19 +8125,69 @@ st_try() {
   ST_LAT=""; return 1
 }
 
+# speedtest-cli (sivel/speedtest-cli 2.1.4b1, Apache-2.0, 官方 Speedtest 服务器): 按本机 IP 拿附近的服务器列表,
+# 测延迟挑最快的一个, 再多线程下载 / 上传。每次运行时下载到临时目录, 测完就删, 不留在系统里
+# 优先从 wsm 自己的仓库下载 (和 wsm.sh 同一个目录的 speedtest.py), 拿不到再用原作者仓库
+# 下载后核对 sha256, 和下面记录的不一样就不运行 (防止文件被替换); 换新版 speedtest.py 时要同时改这里
+ST_CLI_SHA256="519d5938d78b8f911e8ac2843b61bf95c6351b6b5bb8c933c103f22274509d55"
+ST_CLI_ORIGIN="https://raw.githubusercontent.com/sivel/speedtest-cli/master/speedtest.py"
+
+st_cli_run() {  # -> 成功时输出: 延迟|下载bps|上传bps|节点|节点城市|国家|距离km|本机IP|运营商
+  local t py out
+  command -v python3 >/dev/null 2>&1 || return 1
+  local u ok=0
+  t=$(mktemp -d); py=$t/speedtest.py
+  update_load 2>/dev/null
+  for u in "${UPDATE_URL:-$UPDATE_DEFAULT_URL}" "$ST_CLI_ORIGIN"; do
+    [[ $u == */wsm.sh ]] && u=${u%/*}/speedtest.py
+    curl -fsSL --retry 2 --max-time 30 "$u" -o "$py" 2>/dev/null || continue
+    [[ $(sha256sum "$py" 2>/dev/null | awk '{print $1}') == "$ST_CLI_SHA256" ]] && { ok=1; break; }
+  done
+  ((ok)) || { rm -rf "$t"; return 1; }
+  out=$(timeout 180 python3 "$py" --json 2>/dev/null) || out=$(timeout 180 python3 "$py" --json --secure 2>/dev/null)
+  rm -rf "$t"
+  [[ -n $out ]] || return 1
+  printf '%s' "$out" | python3 -c '
+import json, sys
+d = json.load(sys.stdin); s = d.get("server", {}); c = d.get("client", {})
+print("|".join(str(x) for x in (round(d.get("ping", 0)), d.get("download", 0), d.get("upload", 0),
+      s.get("sponsor", ""), s.get("name", ""), s.get("country", ""), round(float(s.get("d", 0))),
+      c.get("ip", ""), c.get("isp", ""))))' 2>/dev/null
+}
+
 speed_quick() {  # 本地最近节点: 延迟 + 下载 + 上传
-  local ip loc n tr
+  local r lat dl ul sp ct co km ip isp n tr loc
   local -a cands=()
   title "网速测试"
   echo "  ${D}测这台服务器自己的带宽, 测试期间会占满带宽; 按千兆带宽算约用 2.5GB 流量${N}"
+  if ! command -v python3 >/dev/null 2>&1; then
+    ensure_pkg python3 python3 "网速测试要用" || warn "没有 python3, 改用备用方式测试"
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    printf '  测试中 (自动选最近的 Speedtest 服务器, 约 30 秒) ...'
+    r=$(st_cli_run); printf '\r\033[K'
+    if [[ -n $r ]]; then
+      IFS='|' read -r lat dl ul sp ct co km ip isp <<< "$r"
+      dl=$(awk -v b="$dl" 'BEGIN{ if (b > 0) printf "%.1f", b / 1000000 }')
+      ul=$(awk -v b="$ul" 'BEGIN{ if (b > 0) printf "%.1f", b / 1000000 }')
+      echo "  $(kv 出口 "$T${ip:-未知}${isp:+ ($isp)}$N")"
+      echo "  $(kv 测速节点 "$T$sp${ct:+ ($ct${co:+, $co})}$N")   ${D}距离约 ${km} km${N}"
+      echo
+      echo "  $(kv 延迟 "$T$lat ms$N")"
+      echo "  $(kv 下载 "$(st_fmt "$dl")")"
+      echo "  $(kv 上传 "$(st_fmt "$ul")")"
+      return 0
+    fi
+    warn "Speedtest 测试没有成功, 改用备用方式 (Cloudflare / Linode)"
+  fi
+  # 备用: curl 直接测, 节点不通自动换下一个
   st_pick_ip || return 1
   n=$(st_threads)
   tr=$(curl $ST_IPV -s --max-time 6 https://speed.cloudflare.com/cdn-cgi/trace 2>/dev/null)
   ip=$(sed -n 's/^ip=//p' <<< "$tr"); loc=$(sed -n 's/^loc=//p' <<< "$tr")
   [[ -n $ip ]] || ip=$(public_ip)
   echo "  $(kv 出口 "$T${ip:-未知}${loc:+ ($loc)}$N")   $(kv 线程 "$T$n$N")"
-  printf '  查找附近的测速节点 ...'
-  mapfile -t cands < <(st_local_cands "${loc:-US}"); printf '\r\033[K'
+  mapfile -t cands < <(st_local_cands "${loc:-US}")
   printf '  测试中 (下载 / 上传各 10 秒, 约 25 秒) ...'
   st_try 10 "$n" "${cands[@]}"; printf '\r\033[K'
   if [[ -z $ST_NAME ]]; then err "试了 $ST_TRIED 个节点都连不上, 请稍后再试"; return 1; fi

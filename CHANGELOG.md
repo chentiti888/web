@@ -2,6 +2,13 @@
 
 wsm 每个版本的改动，新的在最上面。服务器上执行 `wsm update` 时，会显示比当前版本新的条目。
 
+## v3.1.5
+
+- 网速测试改用 speedtest-cli (sivel/speedtest-cli): 官方 Speedtest 服务器, 按本机 IP 自动选附近延迟最低的节点
+- speedtest.py 放在 wsm 自己的仓库里 (拿不到再用原作者仓库), 下载后核对 sha256, 对不上就不运行
+- speedtest.py 每次运行时下载到临时目录, 测完就删, 不留在系统里; 需要 python3 (没有会询问安装)
+- speedtest-cli 不能用时, 自动改用 Cloudflare / Linode 备用测试
+
 ## v3.1.4
 
 - 网速测试去掉多节点 (国内公开测速服务器太少, 测不全), 只测本地
