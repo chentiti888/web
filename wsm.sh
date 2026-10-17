@@ -23,12 +23,12 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="3.1.9"
+WSM_VER="3.1.10"
 # CHANGELOG-BEGIN  (更新时显示比当前版本新的条目, 新的写在最上面; 只留最近几条, 完整记录见仓库 CHANGELOG.md)
+# v3.1.10 网速测试改用 speedtest.net 网页版的服务器接口, 并按本机所在城市补充搜索 (老接口返回的列表和位置无关, 美国机器给台湾节点, 日本机器给印度节点)
 # v3.1.9 修复网速测试显示的本机 IP 不对 (speedtest.net 返回的是固定的美国 Comcast 地址), 按它算距离会选到很远的节点; 改为按本机真实位置排序
 # v3.1.8 网速测试改回 curl 自己测 (不再用 speedtest-cli): 从官方 Speedtest 服务器列表按距离由近到远试, 每个先试测 2 秒, 下载和上传都正常才用; Speedtest 都不行再用 Cloudflare / Linode
 # v3.1.7 修复 Gemini 检测: 网页里的可用标记改版失效, 支持的地区 (如日本) 也显示不支持; 改为按 Google 识别的地区对照支持列表判断
-# v3.1.6 流媒体/AI 解锁检测对照 RegionRestrictionCheck 重新核对: Disney+ 改用官方接口判断 (以前只看首页, 不支持的地区也显示可访问); Netflix/YouTube/ChatGPT 补上浏览器请求头和 cookie, 避免拿到不同页面误判
 # CHANGELOG-END
 WSM_DIR=/etc/wsm
 META_DIR=$WSM_DIR/sites
@@ -8051,13 +8051,15 @@ unlock_check() {
 }
 # ---------------- 网速测试 (只用 curl, 不跑第三方测速脚本)
 # 多线程同时下载 / 上传若干秒, 用总流量 ÷ 实际用时算出带宽
-# 节点: 官方 Speedtest 服务器列表 (和 speedtest-cli 用的同一个接口, 按本机 IP 给出附近的服务器),
-#       按距离从近到远排: 同城 → 临近城市 → 更远; 每个先试测 2 秒, 下载和上传都正常才用它, 不行就换下一个
+# 节点: speedtest.net 网页版用的服务器接口 (按本机 IP 给出附近的服务器), 再按本机所在城市搜一次补充,
+#       合并后按本机真实坐标 (ipinfo.io) 从近到远排: 同城 → 临近城市 → 更远;
+#       每个先试测 2 秒, 下载和上传都正常才用它, 不行就换下一个
+#       (不用 speedtest-cli 的 speedtest-servers-static.php: 它现在返回的列表和本机位置无关, 会选到很远的节点)
 #       Speedtest 都不行时用 Cloudflare 最近机房, 再不行用附近的 Linode 机房 (只能测下载)
 # Cloudflare 单次最多给 1 亿字节 (超过直接拒绝), 这里每次取 2500 万, 循环下载
 ST_CF_DOWN="https://speed.cloudflare.com/__down?bytes=25000000"
 ST_CF_UP="https://speed.cloudflare.com/__up"
-ST_UA_CLI="Mozilla/5.0 (Linux-x86_64; U; 64bit; en-us) Python/3.11 (KHTML, like Gecko) speedtest-cli/2.1.3"
+ST_UA_WEB="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 ST_MAX_TRY=10      # Speedtest 服务器最多试几个
 ST_IPV="-4"
 
@@ -8155,36 +8157,38 @@ st_linode_cands() {  # 国家代码 -> 附近的 Linode 机房 (只能测下载,
   done
 }
 
-st_client() {  # -> 本机公网IP|纬度|经度|运营商|国家代码
+st_client() {  # -> 本机公网IP|纬度|经度|运营商|国家代码|城市
   # 不用 speedtest-config.php 返回的本机信息: 它现在对很多机器都返回同一个美国 Comcast 的 IP 和坐标, 按它算距离会选错节点
-  local j ip ll isp cc
+  local j ip ll isp cc city
   j=$(curl $ST_IPV -s --max-time 8 https://ipinfo.io/json 2>/dev/null)
+  city=$(sed -n 's/.*"city": *"\([^"]*\)".*/\1/p' <<< "$j" | head -1)
   ip=$(sed -n 's/.*"ip": *"\([^"]*\)".*/\1/p' <<< "$j" | head -1)
   ll=$(sed -n 's/.*"loc": *"\([^"]*\)".*/\1/p' <<< "$j" | head -1)
   isp=$(sed -n 's/.*"org": *"\([^"]*\)".*/\1/p' <<< "$j" | head -1); isp=${isp#AS* }
   cc=$(sed -n 's/.*"country": *"\([^"]*\)".*/\1/p' <<< "$j" | head -1)
   if [[ -z $ll ]]; then   # 备用: ip-api.com
-    j=$(curl $ST_IPV -s --max-time 8 'http://ip-api.com/json/?fields=query,lat,lon,isp,countryCode' 2>/dev/null)
+    j=$(curl $ST_IPV -s --max-time 8 'http://ip-api.com/json/?fields=query,lat,lon,isp,countryCode,city' 2>/dev/null)
+    city=$(sed -n 's/.*"city":"\([^"]*\)".*/\1/p' <<< "$j")
     ip=$(sed -n 's/.*"query":"\([^"]*\)".*/\1/p' <<< "$j")
     ll="$(sed -n 's/.*"lat":\([-0-9.]*\).*/\1/p' <<< "$j"),$(sed -n 's/.*"lon":\([-0-9.]*\).*/\1/p' <<< "$j")"
     [[ $ll == , ]] && ll=""
     isp=$(sed -n 's/.*"isp":"\([^"]*\)".*/\1/p' <<< "$j"); cc=$(sed -n 's/.*"countryCode":"\([^"]*\)".*/\1/p' <<< "$j")
   fi
-  printf '%s|%s|%s|%s|%s\n' "$ip" "${ll%%,*}" "${ll#*,}" "$isp" "$cc"
+  printf '%s|%s|%s|%s|%s|%s\n' "$ip" "${ll%%,*}" "${ll#*,}" "$isp" "$cc" "$city"
 }
 
-st_ookla_near() {  # 纬度 经度 -> 附近的 Speedtest 服务器, 按距离从近到远: 距离km|名称|测延迟地址|下载地址|上传地址
-  local lat=$1 lon=$2 u xml=""
-  for u in "https://www.speedtest.net/speedtest-servers-static.php" "http://c.speedtest.net/speedtest-servers-static.php" \
-           "https://www.speedtest.net/speedtest-servers.php" "http://c.speedtest.net/speedtest-servers.php"; do
-    xml=$(curl $ST_IPV -s --max-time 15 -A "$ST_UA_CLI" "$u?threads=4" 2>/dev/null)
-    [[ $xml == *'<server '* ]] && break
-  done
-  [[ $xml == *'<server '* ]] || return 0
-  printf '%s\n' "$xml" | sed 's/<server /\n<server /g' | grep '^<server ' | awk -v la="$lat" -v lo="$lon" '
-    function attr(k,  m) { if (match($0, " " k "=\"[^\"]*\"")) { m = substr($0, RSTART, RLENGTH); sub(/^[^"]*"/, "", m); sub(/"$/, "", m); return m } return "" }
+st_ookla_near() {  # 纬度 经度 [城市] -> 附近的 Speedtest 服务器, 按距离从近到远: 距离km|名称|测延迟地址|下载地址|上传地址
+  local lat=$1 lon=$2 city=${3:-} api="https://www.speedtest.net/api/js/servers?engine=js&https_functional=true" q
+  {
+    curl $ST_IPV -s --max-time 15 -A "$ST_UA_WEB" "$api&limit=20" 2>/dev/null; echo
+    if [[ -n $city ]]; then
+      q=$(sed 's/ /%20/g' <<< "$city")
+      curl $ST_IPV -s --max-time 15 -A "$ST_UA_WEB" "$api&limit=20&search=$q" 2>/dev/null; echo
+    fi
+  } | sed 's/},{/}\n{/g' | grep '"url":' | awk -v la="$lat" -v lo="$lon" '
+    function attr(k,  m) { if (match($0, "\"" k "\":\"[^\"]*\"")) { m = substr($0, RSTART, RLENGTH); sub(/^"[^"]*":"/, "", m); sub(/"$/, "", m); return m } return "" }
     function rad(d) { return d * 3.14159265358979 / 180 }
-    { u = attr("url"); sla = attr("lat"); slo = attr("lon"); if (u == "" || sla == "") next
+    { u = attr("url"); gsub(/\\\//, "/", u); sla = attr("lat"); slo = attr("lon"); if (u == "" || sla == "") next
       d = 0
       if (la != "" && lo != "") {
         a = sin(rad(sla - la) / 2) ^ 2 + cos(rad(la)) * cos(rad(sla)) * sin(rad(slo - lo) / 2) ^ 2
@@ -8193,7 +8197,8 @@ st_ookla_near() {  # 纬度 经度 -> 附近的 Speedtest 服务器, 按距离�
       base = u; sub(/\/[^\/]*$/, "", base)                 # .../speedtest/upload.php -> .../speedtest
       host = u; sub(/^https?:\/\//, "", host); sub(/\/.*$/, "", host)
       printf "%d|%s (%s, %s)|http://%s/|%s/random4000x4000.jpg|%s\n", d, attr("sponsor"), attr("name"), attr("cc"), host, base, u
-    }' | { if [[ -n $lat ]]; then sort -t'|' -k1,1n; else cat; fi; } | awk -F'|' '!seen[$3]++' | head -"$ST_MAX_TRY"
+    }' | { if [[ -n $lat ]]; then sort -t'|' -k1,1n; else cat; fi; } | awk -F'|' '!seen[$3]++' | head -"$ST_MAX_TRY" \
+    | while IFS= read -r l; do [[ $l == *'\u'* ]] && l=$(echo -e "$l"); printf '%s\n' "$l"; done   # 名称里的 \u4e2d 这类转义转成中文
 }
 
 # st_try 秒数 线程 候选... : 依次试, 先各测 2 秒确认下载和上传都正常, 正常的才正式测
@@ -8221,22 +8226,22 @@ st_try() {
 }
 
 speed_quick() {  # 本地最近节点: 延迟 + 下载 + 上传
-  local cl ip lat lon isp loc n tr c
+  local cl ip lat lon isp loc city n tr c
   local -a cands=()
   title "网速测试"
   echo "  ${D}测这台服务器自己的带宽, 测试期间会占满带宽; 按千兆带宽算约用 2.5GB 流量${N}"
   st_pick_ip || return 1
   n=$(st_threads)
   printf '  查找附近的测速节点 ...'
-  cl=$(st_client); IFS='|' read -r ip lat lon isp loc <<< "$cl"
+  cl=$(st_client); IFS='|' read -r ip lat lon isp loc city <<< "$cl"
   if [[ -z $ip || -z $loc ]]; then
     tr=$(curl $ST_IPV -s --max-time 6 https://speed.cloudflare.com/cdn-cgi/trace 2>/dev/null)
     [[ -n $ip ]] || ip=$(sed -n 's/^ip=//p' <<< "$tr"); [[ -n $loc ]] || loc=$(sed -n 's/^loc=//p' <<< "$tr")
   fi
-  mapfile -t cands < <(st_ookla_near "$lat" "$lon")
+  mapfile -t cands < <(st_ookla_near "$lat" "$lon" "$city")
   while IFS= read -r c; do cands+=("0|$c"); done < <(st_cf_cand; st_linode_cands "${loc:-US}")
   printf '\r\033[K'
-  echo "  $(kv 本机 "$T${ip:-未知}${isp:+ ($isp)}${loc:+ $loc}$N")   $(kv 线程 "$T$n$N")"
+  echo "  $(kv 本机 "$T${ip:-未知}${isp:+ ($isp)}${city:+ $city}${loc:+ $loc}$N")   $(kv 线程 "$T$n$N")"
   st_try 10 "$n" "${cands[@]}"
   if [[ -z $ST_NAME ]]; then err "试了 $ST_TRIED 个节点都不能正常测, 请稍后再试"; return 1; fi
   echo "  $(kv 测速节点 "$T$ST_NAME$N")$( ((ST_KM > 0)) && echo "   ${D}距离约 $ST_KM km${N}")"
