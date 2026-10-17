@@ -1,26 +1,31 @@
 #!/usr/bin/env bash
 # =====================================================================
-#  wsm.sh v2  -  Web Server Manager (命令行版"宝塔")
+#  wsm.sh v3  -  Server Manager (服务器工具箱 + 命令行版"宝塔")
 #
-#  网站: PHP / 静态 / 反向代理 / 域名重定向, 多域名绑定, 伪静态, 子路径反代,
-#        访问密码, 防盗链, IP 黑白名单, Gzip, 静态缓存, 停用/启用, 日志分析,
-#        防篡改(文件锁定 + 可写目录禁PHP + 完整性基线检测/自动还原)
-#        网站应用模块(Xboard、WordPress 等, 随时添加删除), 访问统计(PV/IP/流量/TOP/蜘蛛), 在线更新(Git 仓库)
-#        全量备份(网站/数据库/机器人分开)/一键搬家/异地备份, Telegram 告警, SSH 密钥登录, 源站保护(多 CDN)
-#  证书: Let's Encrypt(HTTP) / 通配符(Cloudflare DNS) / 自有证书 / 自签名, 自动续期
-#  PHP : 7.4-8.4 多版本共存, 扩展, 参数, 禁用函数, FPM 进程数
-#  其他: MariaDB + phpMyAdmin, Redis, Composer, 备份/还原, 计划任务, 服务管理,
-#        程序下载: 扩展程序模块 (Xboard / WordPress / Typecho / Nextcloud / 哪吒 / Uptime Kuma / OpenList / 3x-ui,
-#                  可随时添加/删除, 部署时自动检测最新版本), 网站环境, 开发运行环境, 系统工具
-#  系统: Debian 10+ / Ubuntu 20.04+ (推荐)   RHEL 系 (Rocky/Alma/CentOS) 尽力支持
+#  启动不安装任何软件: 只装 wsm 快捷命令, 其他都是在菜单里选了才装, 装过的都能卸载
 #
-#  用法: bash wsm.sh install      首次安装环境 (之后直接用 wsm 命令)
-#        wsm                      进入交互菜单
+#  服务器: 系统信息, SSH 安全(端口/密钥/导入公钥/下载私钥/密码登录), BBR, 禁 Ping, 端口转发(TCP/UDP),
+#          回程线路检测, 流媒体/AI 解锁检测, CPU/内存/硬盘测试, CPU 占用, Swap, 时区, 服务管理, Telegram 告警,
+#          已安装组件(统一卸载)
+#  网站:   (选 [安装网站环境] 后才有) PHP / 静态 / 反向代理 / 域名重定向, 多域名绑定, 伪静态, 子路径反代,
+#          访问密码, 防盗链, IP 黑白名单, Gzip, 静态缓存, 停用/启用, 日志分析,
+#          防篡改(文件锁定 + 可写目录禁PHP + 完整性基线检测/自动还原), 访问统计(PV/IP/流量/TOP/蜘蛛),
+#          全量备份(网站/数据库/机器人分开)/一键搬家/异地备份, 源站保护(多 CDN), 防 CC
+#  证书:   Let's Encrypt(HTTP) / 通配符(Cloudflare DNS) / 自有证书 / 自签名, 自动续期
+#  PHP :   7.4-8.4 多版本共存, 扩展, 参数, 禁用函数, FPM 进程数
+#  程序下载: 扩展程序模块 (Xboard / WordPress / Typecho / Nextcloud / 哪吒 / Uptime Kuma / OpenList / 3x-ui,
+#            可随时添加/删除), 数据库, 开发运行环境, 系统工具
+#  系统:   Debian 10+ / Ubuntu 20.04+ (推荐)   RHEL 系 (Rocky/Alma/CentOS) 尽力支持
+#
+#  用法: bash wsm.sh                 安装 wsm 命令并进入菜单 (不装任何软件)
+#        wsm                         进入交互菜单
+#        wsm install                 一键安装网站环境 (Nginx + PHP + MariaDB + certbot)
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="2.12.1"
+WSM_VER="3.0.0"
 # CHANGELOG-BEGIN  (更新时会显示比当前版本新的条目, 新的写在最上面)
+# v3.0.0 合并 SSH 小工具 (ssb): 系统信息/BBR/禁Ping/端口转发/回程线路/流媒体与AI解锁/CPU内存硬盘测试/导入公钥/下载私钥; 启动不再安装任何软件, 网站环境改为菜单里一键安装; 新菜单 (服务器 / 网站 两区) 和配色; 新增 [已安装组件] 统一卸载, 可卸载网站环境和 wsm 本身; ssb 命令保留为别名
 # v2.12.1 修复: 更新时把已经装过的旧版本说明也显示出来
 # v2.12 访问统计区分 真人/爬虫/可疑, 列出疑似恶意 IP (原因) 和被扫描路径, 可核实搜索引擎真假, 概览加 [真人] 列; 系统与服务新增 CPU 性能测试 (单核/多核)
 # v2.11.2 修复: 从旧版本更新后防 CC 规则没有自动升级 (空 User-Agent 仍被拦截)
@@ -62,12 +67,41 @@ CRON_TASKS=/etc/cron.d/wsm-tasks
 WSM_BIN=/usr/local/bin/wsm
 PHP_VERSIONS="7.4 8.0 8.1 8.2 8.3 8.4"
 
-R=$'\e[31m'; G=$'\e[32m'; Y=$'\e[33m'; B=$'\e[36m'; D=$'\e[2m'; N=$'\e[0m'
-info() { echo "${G}[+]${N} $*"; }
-warn() { echo "${Y}[!]${N} $*"; }
-err()  { echo "${R}[x]${N} $*" >&2; }
+# ---------------- 配色 (256 色; 终端只支持 8 色时自动退回基本色)
+# 主色(天蓝): 序号/标题/提示   正文: 亮白   说明: 灰   状态: 绿=正常 黄=注意 红=异常/退出
+if [[ ${TERM:-} == *256color* || ${COLORTERM:-} == *color* || ${TERM:-} == xterm* || ${TERM:-} == screen* || ${TERM:-} == tmux* ]]; then
+  R=$'\e[38;5;203m'; G=$'\e[38;5;114m'; Y=$'\e[38;5;221m'; B=$'\e[38;5;75m'; D=$'\e[38;5;244m'
+  T=$'\e[38;5;252m'; L=$'\e[38;5;238m'; S=$'\e[38;5;110m'
+else
+  R=$'\e[31m'; G=$'\e[32m'; Y=$'\e[33m'; B=$'\e[36m'; D=$'\e[2m'; T=$'\e[0m'; L=$'\e[2m'; S=$'\e[34m'
+fi
+N=$'\e[0m'; BD=$'\e[1m'
+# 原 SSH 小工具 (ssb) 部分用的颜色名
+RED=$R; GREEN=$G; YELLOW=$Y; CYAN=$B; NC=$N
+info() { echo "  ${G}✔${N} $*"; }
+warn() { echo "  ${Y}!${N} $*"; }
+err()  { echo "  ${R}✘${N} $*" >&2; }
 die()  { err "$*"; exit 1; }
-title() { echo; echo "${B}━━━━━━━━ $* ━━━━━━━━${N}"; }
+# disp_w 文本 : 显示宽度 (中文占 2 格; 文本里不要带颜色码)
+disp_w() { local s=$1 t LC_ALL=C; t=${s//[! -~]/}; echo $(( ${#t} + (${#s} - ${#t}) / 3 * 2 )); }
+rep() { local i o=""; for ((i = 0; i < $2; i++)); do o+=$1; done; printf '%s' "$o"; }
+title() { local n=$((46 - $(disp_w "$*"))); ((n < 4)) && n=4; printf '\n  %s%s%s%s %s%s%s\n' "$BD" "$B" "$*" "$N" "$L" "$(rep ─ "$n")" "$N"; }
+# 菜单项统一样式: 序号(主色) 名称(亮白) 说明(灰)
+# mitem 序号 名称 [说明]     mback : 0 返回      mlist : 把 "   1) 名称 (说明)" 这种行转成统一样式
+mitem() { printf '  %s%3s%s  %s%s%s\e[24G%s%s%s\n' "$BD$B" "$1" "$N" "$T" "$2" "$N" "$D" "${3:-}" "$N"; }
+mback() { printf '  %s%3s%s  %s%s%s\n' "$BD$G" 0 "$N" "$G" "${1:-返回}" "$N"; }
+mlist() {
+  local line n t d
+  while IFS= read -r line; do
+    if [[ $line =~ ^[[:space:]]*([0-9a-z]+)\)[[:space:]]+(.*)$ ]]; then
+      n=${BASH_REMATCH[1]}; t=${BASH_REMATCH[2]}; d=""
+      if [[ $t =~ ^(.*[^[:space:]])[[:space:]]+\((.*)\)$ ]]; then t=${BASH_REMATCH[1]}; d=${BASH_REMATCH[2]}; fi
+      mitem "$n" "$t" "$d"
+    else
+      printf '%s\n' "$line"
+    fi
+  done
+}
 # pad_w 文本 宽度 : 按显示宽度补空格 (中文占 2 格), 文本里不要带颜色码
 pad_w() {
   local s=$1 w=$2 t n LC_ALL=C
@@ -120,21 +154,18 @@ tz_suggest() {  # 时区是 UTC 时建议改成北京时间 (安装环境时调�
   return 0
 }
 
-# ---------------- 菜单图标: 默认 Nerd 字体图标; 终端没有 Nerd 字体显示成方框时, 用 wsm icons plain 换成普通符号
+# ---------------- 菜单图标: 默认普通符号 (所有终端都能显示); 终端装了 Nerd 字体可以用 wsm icons nerd 换成图标
 UI_CONF=$WSM_DIR/ui.conf
-ICON_STYLE=nerd
+ICON_STYLE=plain
 declare -A ICO_PLAIN=([web]="⌂" [ssl]="◈" [php]="◇" [db]="▤" [bak]="⇅" [sys]="◎" [app]="⇩" [sec]="◆" [upd]="↻" [exit]="×" [c_panel]="▣" [c_web]="◫" [c_dev]="❯" [c_tool]="▥")
 declare -A ICO_NERD=([web]="" [ssl]="" [php]="" [db]="" [bak]="" [sys]="" [app]="" [sec]="" [upd]="" [exit]="" [c_panel]="" [c_web]="" [c_dev]="" [c_tool]="")
-ui_load() { ICON_STYLE=nerd; [[ -f $UI_CONF ]] && source "$UI_CONF"; [[ $ICON_STYLE == plain ]] || ICON_STYLE=nerd; return 0; }
+ui_load() { ICON_STYLE=plain; [[ -f $UI_CONF ]] && source "$UI_CONF"; [[ $ICON_STYLE == nerd ]] || ICON_STYLE=plain; return 0; }
 ico() { if [[ $ICON_STYLE == nerd ]]; then printf '%s' "${ICO_NERD[$1]:-}"; else printf '%s' "${ICO_PLAIN[$1]:-}"; fi; }
 ui_icon_set() {  # ui_icon_set plain|nerd
   [[ $1 == nerd || $1 == plain ]] || { err "只能是 nerd 或 plain"; return 1; }
   mkdir -p "$WSM_DIR"; printf 'ICON_STYLE=%s\n' "$1" > "$UI_CONF"; ICON_STYLE=$1
   info "菜单图标: $([[ $1 == nerd ]] && echo "Nerd 字体图标" || echo "普通符号")"
 }
-# mi 序号 图标 名称 说明 : 主菜单一行
-# 用"跳到第 N 列"控制码定位, 图标在不同终端显示 1 格还是 2 格都不影响对齐
-mi() { printf ' %2s) %s\e[8G%s\e[20G%s\n' "$1" "$2" "$3" "${4:-}"; }
 
 # 所有带提示的输入 (read -p): 自动提示 "(0返回)", 输入 0 就取消并返回上一级 (返回值 1)
 # 例外: "按回车继续" 和 "(0-23)" 这类 0 本身有效的数字输入; 不带 -p 的数据读取不受影响
@@ -145,10 +176,11 @@ read() {
     if [[ ${_rd_a[_rd_i]} == -p ]]; then _rd_pi=$((_rd_i + 1)); _rd_p=${_rd_a[_rd_pi]:-}; break; fi
   done
   if ((_rd_pi < 0)); then builtin read "$@"; return; fi
+  [[ $_rd_p == 请选择* || $_rd_p == 输入序号* ]] && { _rd_p="  ${B}›${N} $_rd_p"; _rd_a[_rd_pi]=$_rd_p; }
   _rd_var=${_rd_a[${#_rd_a[@]}-1]}
   [[ $_rd_p == *按回车* || $_rd_p == *"(0-"* ]] && _rd_cancel=0
   if ((_rd_cancel)) && [[ $_rd_p == *": " && $_rd_p != 请选择* && $_rd_p != *"0 返回"* \
-        && $_rd_p != *回车取消* && $_rd_p != *回车返回* ]]; then
+        && $_rd_p != *回车取消* && $_rd_p != *回车返回* && $_rd_p != *"[Y/n]"* && $_rd_p != *"[y/N]"* ]]; then
     _rd_a[_rd_pi]="${_rd_p%: } ${D}(0返回)${N}: "
   fi
   builtin read "${_rd_a[@]}" || return
@@ -183,12 +215,13 @@ choose() {  # choose 结果变量 "标题" 选项1 选项2 ...   (数字选择, 
   local -a __items=("$@")
   local __i __c __last
   __last=${__items[${#__items[@]}-1]}
-  echo "$__title"
+  echo "  ${D}$__title${N}"
   for __i in "${!__items[@]}"; do
-    if [[ ${__items[__i]} == 返回* ]]; then printf "   %d) %s\n" $((__i + 1)) "${G}${__items[__i]}${N}"
-    else printf "   %d) %s\n" $((__i + 1)) "${__items[__i]}"; fi
+    # 最后一项是 "返回" 时显示成 0 (原来的序号也照样能用)
+    if [[ ${__items[__i]} == 返回* ]] && ((__i == ${#__items[@]} - 1)); then continue; fi
+    printf '  %s%3d%s  %s%s%s\n' "$BD$B" $((__i + 1)) "$N" "$T" "${__items[__i]}" "$N"
   done
-  [[ $__last == 返回* ]] || echo "   0) ${G}返回${N}"
+  mback
   while true; do
     read -r -p "请选择 [1]: " __c || return 1
     __c=${__c:-1}
@@ -226,9 +259,63 @@ detect_os() {
   [[ -e /proc/net/if_inet6 ]] && HAS_V6=1 || HAS_V6=0
 }
 
+# ---------------- 安装记录: wsm 装过的软件包都记在这里, [系统维护 → 已安装组件] 可以统一卸载
+# 装之前系统里就有的包不记录, 所以卸载时不会动系统原有的东西
+# 记录格式: 包名<TAB>用途<TAB>日期     用途取自变量 PKG_FOR (调用方设置, 不设就留空)
+LEDGER=$WSM_DIR/installed.list
+PKG_FOR=""
+
+pkg_has() {  # pkg_has 包名 : 这个包是否已安装
+  if [[ $PM == apt ]]; then [[ $(dpkg-query -W -f='${Status}' "$1" 2>/dev/null) == *'install ok installed'* ]]
+  else rpm -q "$1" >/dev/null 2>&1; fi
+}
+
+ledger_add() {  # ledger_add 包名 [用途]
+  mkdir -p "$WSM_DIR"
+  ledger_has "$1" && return 0
+  printf '%s\t%s\t%s\n' "$1" "${2:-}" "$(date +%F)" >> "$LEDGER"
+}
+
+ledger_has() { [[ -f $LEDGER ]] && awk -F'\t' -v p="$1" '$1==p{f=1} END{exit !f}' "$LEDGER"; }
+ledger_del() {
+  [[ -f $LEDGER ]] || return 0
+  awk -F'\t' -v p="$1" '$1!=p' "$LEDGER" > "$LEDGER.tmp" && mv -f "$LEDGER.tmp" "$LEDGER"
+}
+
 pkg_install() {
+  local p rc
+  local -a new=()
+  for p in "$@"; do
+    [[ $p == -* || $p == *'*'* ]] && continue
+    pkg_has "$p" || new+=("$p")
+  done
   if [[ $PM == apt ]]; then DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
   else dnf install -y "$@"; fi
+  rc=$?
+  for p in ${new[@]+"${new[@]}"}; do pkg_has "$p" && ledger_add "$p" "$PKG_FOR"; done
+  return $rc
+}
+
+ensure_pkg() {  # ensure_pkg 命令 包名 "用途说明" : 没有这个命令就询问并安装 (安装会记录, 可在 已安装组件 里卸载)
+  local cmd=$1 pkg=$2 why=${3:-}
+  command -v "$cmd" >/dev/null 2>&1 && return 0
+  confirm "需要安装 $pkg${why:+ ($why)}, 现在安装?" y || return 1
+  info "正在安装 $pkg ..."
+  pkg_refresh
+  PKG_FOR=${why:-$pkg} pkg_install "$pkg" >/dev/null 2>&1 \
+    || { [[ $PM == dnf ]] && pkg_install epel-release >/dev/null 2>&1 && PKG_FOR=${why:-$pkg} pkg_install "$pkg" >/dev/null 2>&1; }
+  command -v "$cmd" >/dev/null 2>&1 && { info "$pkg 已安装"; return 0; }
+  err "$pkg 安装失败"; return 1
+}
+
+web_installed() { command -v nginx >/dev/null 2>&1 && [[ -f $NGX_CONF/00-wsm.conf ]]; }
+
+need_web() {  # 网站相关功能的入口检查: 没有网站环境就提示一键安装
+  web_installed && return 0
+  echo
+  warn "这个功能需要网站环境 (Nginx + PHP + MariaDB + certbot)"
+  confirm "现在一键安装网站环境?" y || return 1
+  cmd_install && web_installed
 }
 
 public_ip() {
@@ -315,7 +402,7 @@ add_php_repo() {
 }
 
 install_php() {
-  local v=${1:-}
+  local v=${1:-} PKG_FOR=${PKG_FOR:-网站环境}
   if [[ -z $v ]]; then
     local -a avail=()
     local x
@@ -425,6 +512,7 @@ selinux_tune() {
 }
 
 install_base() {
+  local PKG_FOR="网站环境"
   info "安装 Nginx / certbot / 常用工具 ..."
   if [[ $PM == apt ]]; then
     apt_fix_sources
@@ -451,6 +539,7 @@ EOF
   systemctl enable --now nginx
   nginx -t && systemctl reload nginx
   ensure_renew_cron
+  wsm_logrotate
   self_install >/dev/null 2>&1
   realip_ensure
 }
@@ -843,7 +932,7 @@ ssl_le_dns() {
   echo "通配符证书需要 DNS 验证。目前支持 Cloudflare (域名需托管在 Cloudflare)。"
   if ! certbot plugins 2>/dev/null | grep -q dns-cloudflare; then
     info "安装 certbot Cloudflare 插件 ..."
-    pkg_install python3-certbot-dns-cloudflare || { err "插件安装失败"; return 1; }
+    PKG_FOR="网站环境 (通配符证书插件)" pkg_install python3-certbot-dns-cloudflare || { err "插件安装失败"; return 1; }
   fi
   local cf=$WSM_DIR/cloudflare.ini token base n
   if [[ ! -f $cf ]] || confirm "已保存过 Cloudflare Token, 是否重新输入?" n; then
@@ -2082,11 +2171,11 @@ site_settings() {
       "查看Nginx配置" "日志统计" "备份此站点" "修复权限" "网站防篡改" "防CC/防恶意bot")
     local __k
     for __k in "${!__it[@]}"; do
-      printf '%3d) ' $((__k + 1)); pad_w "${__it[__k]}" 14
+      printf '  %s%3d%s  %s' "$BD$B" $((__k + 1)) "$N" "$T"; pad_w "${__it[__k]}" 16; printf '%s' "$N"
       ((__k % 2)) && echo || printf ' '
     done
     ((${#__it[@]} % 2)) && echo
-    echo "  0) ${G}返回${N}"
+    mback
     read -r -p "请选择: " c || return 0
     case $c in
       1) site_domains "$d" ;;
@@ -2434,6 +2523,7 @@ php_fpm_tune() {
 need_mysql() { command -v mysql >/dev/null 2>&1 || { err "还没安装 MariaDB, 请先在 [程序下载] 里安装"; return 1; }; }
 
 install_db() {
+  local PKG_FOR=${PKG_FOR:-数据库 MariaDB}
   info "安装 MariaDB ..."
   pkg_install mariadb-server || die "MariaDB 安装失败"
   systemctl enable --now mariadb
@@ -2761,14 +2851,14 @@ svc_list() {  # 需要管理的服务 (去掉别名重复, 如 redis 和 redis-s
   local x u id
   local -A seen=()
   {
-    echo nginx
-    for x in mariadb redis-server redis; do unit_exists "$x" && echo "$x"; done
+    sshd_service
+    for x in nginx mariadb redis-server redis netfilter-persistent; do unit_exists "$x" && echo "$x"; done
     for x in $(php_installed | sort -V); do php_svc "$x"; echo; done
     apps_units
     tg_load 2>/dev/null; for x in ${TG_UNITS:-}; do echo "$x"; done
   } | while read -r u; do
     [[ -n $u ]] || continue
-    unit_exists "$u" || [[ $u == nginx ]] || continue
+    unit_exists "$u" || continue
     id=$(systemctl show -p Id --value "$u" 2>/dev/null); id=${id%.service}
     [[ -n ${seen[${id:-$u}]:-} ]] && continue
     seen[${id:-$u}]=1; echo "$u"
@@ -2830,18 +2920,47 @@ manage_service() {
   done
 }
 
+# 安装 wsm 快捷命令 (每次启动都会检查, 已装好就什么都不做). 这是启动时唯一会写入系统的东西
+# 另外: ssb 作为别名指向 wsm; 清理原 SSH 小工具的旧命令 (sshm/chen/cc) 并迁移它的配置
+WSM_ALIAS=/usr/local/bin/ssb
+OLD_TOOL_CMDS=(sshm chen cc ssb)
 self_install() {
-  local me
+  local me tmp c p
   me=$(readlink -f "$0" 2>/dev/null || true)
-  if [[ -f $me && $me != "$WSM_BIN" ]]; then
-    install -m755 "$me" "$WSM_BIN" && info "已安装命令: wsm (之后直接输入 wsm 即可)"
+  if [[ -f $me && $me != "$WSM_BIN" && $me != /proc/* && $me != /dev/* ]]; then
+    install -m755 "$me" "$WSM_BIN" && info "已安装命令: ${G}wsm${N} (之后直接输入 wsm 即可, ssb 也可以)"
+  elif [[ ! -f $WSM_BIN ]]; then
+    # 通过 bash <(curl ...) 运行: 从仓库下载一份
+    update_load 2>/dev/null
+    tmp=$(mktemp)
+    if curl -fsSL --retry 2 --max-time 60 "${UPDATE_URL:-$UPDATE_DEFAULT_URL}" -o "$tmp" 2>/dev/null \
+        && head -n1 "$tmp" | grep -q '^#!' && grep -q '^WSM_VER=' "$tmp" && bash -n "$tmp" 2>/dev/null; then
+      install -m755 "$tmp" "$WSM_BIN" && info "已安装命令: ${G}wsm${N} (之后直接输入 wsm 即可, ssb 也可以)"
+    else
+      warn "快捷命令安装失败 (下载不到脚本), 可手动: curl -fsSL $UPDATE_DEFAULT_URL -o $WSM_BIN && chmod +x $WSM_BIN"
+    fi
+    rm -f "$tmp"
   fi
+  [[ -f $WSM_BIN ]] || return 0
+  for c in "${OLD_TOOL_CMDS[@]}"; do   # 只删确认是原 SSH 小工具的文件, 别的程序不动
+    p=/usr/local/bin/$c
+    [[ -f $p && ! -L $p ]] && grep -q "SSH 小工具" "$p" 2>/dev/null && rm -f "$p"
+  done
+  [[ -e $WSM_ALIAS ]] || ln -s "$WSM_BIN" "$WSM_ALIAS" 2>/dev/null
+  if [[ -f /etc/ssh-tool.conf ]]; then   # 原 SSH 小工具保存的公钥地址
+    mkdir -p "$WSM_DIR"
+    grep '^KEYS_URL=https://' /etc/ssh-tool.conf | tail -1 >> "$SSH_TOOL_CONF" && chmod 600 "$SSH_TOOL_CONF"
+    rm -f /etc/ssh-tool.conf
+  fi
+  return 0
 }
 
 cmd_install() {
+  local PKG_FOR="网站环境"
+  pkg_refresh
   tz_suggest
   install_base
-  local v=""
+  local v="" x
   read -r -p "安装哪些 PHP 版本? (${PHP_VERSIONS}; 多个用空格分隔, 输入 none 跳过) [8.3]: " v || return 1
   v=${v:-8.3}
   if [[ $v != none ]]; then
@@ -2850,7 +2969,7 @@ cmd_install() {
   confirm "安装 MariaDB 数据库?" y && install_db
   self_install
   echo
-  info "环境安装完成!  输入 ${G}wsm${N} 进入管理菜单"
+  info "网站环境安装完成!  菜单里的 [网站面板] 管理网站 (命令: ${G}wsm${N})"
   warn "云服务器请在安全组放行 80 / 443 端口"
 }
 
@@ -3023,8 +3142,12 @@ pkg_refresh() {
   return 0
 }
 pkg_remove() {
+  local p rc
   if [[ $PM == apt ]]; then DEBIAN_FRONTEND=noninteractive apt-get remove -y "$@"
   else dnf remove -y "$@"; fi
+  rc=$?
+  for p in "$@"; do [[ $p == -* ]] && continue; pkg_has "$p" || ledger_del "$p"; done
+  return $rc
 }
 confirm_typed() { local a; read -r -p "$1 (输入 yes-delete 确认): " a || return 1; [[ $a == yes-delete ]]; }
 
@@ -3192,7 +3315,8 @@ app_uninstall() {
       warn "卸载 Docker 不会删除镜像和容器数据 (/var/lib/docker)"
       confirm_typed "确认卸载 Docker" || return 0
       systemctl stop docker; pkg_remove docker.io docker-compose docker-compose-v2 2>/dev/null || pkg_remove docker.io ;;
-    rclone) pkg_remove rclone ;;
+    rclone) pkg_has rclone && pkg_remove rclone
+            if [[ -f /usr/bin/rclone ]] && ! pkg_has rclone; then rm -f /usr/bin/rclone /usr/local/share/man/man1/rclone.1; ledger_del @rclone; fi ;;
     ffmpeg) pkg_remove ffmpeg ;;
     imagemagick) if [[ $PM == apt ]]; then pkg_remove imagemagick; else pkg_remove ImageMagick; fi ;;
     monitor) pkg_remove htop iotop iftop nload ;;
@@ -3221,7 +3345,7 @@ app_manage() {
     opts+=("返回")
     choose c "操作:" "${opts[@]}" || return 0
     case $c in
-      安装|重新*) ( app_install "$id" ); pause ;;
+      安装|重新*) { [[ $id != phpmyadmin && $id != composer ]] || need_web; } && ( app_install "$id" ); pause ;;
       卸载) ( app_uninstall "$id" ); pause ;;
       启动) systemctl start "$svc" && info "已启动" ;;
       停止) confirm "确认停止 $svc ?" n && systemctl stop "$svc" && info "已停止" ;;
@@ -3248,23 +3372,24 @@ menu_store() {
     apps_load
     mods=("${APPS_LOADED[@]}"); m=${#mods[@]}
     title "程序下载"
-    echo; echo "  ${B}$(ico c_panel) 扩展程序 (模块, 可添加删除)${N}"
+    echo; echo "  ${S}${BD}$(ico c_panel) 扩展程序${N} ${D}(模块, 可随时添加删除, 不依赖网站环境的可以直接装)${N}"
     i=0
     for id in "${mods[@]}"; do
       i=$((i + 1))
-      printf "  %2d) " "$i"; pad_w "${APP_NAMES[$id]}" 16; app_status "$id"
+      printf '  %s%3d%s  %s' "$BD$B" "$i" "$N" "$T"; pad_w "${APP_NAMES[$id]}" 16; printf '%s' "$N"; app_status "$id"
     done
-    ((m)) || echo "      ${D}(还没有模块, 输入 a 从仓库添加)${N}"
-    echo "   a) 添加模块     d) 删除模块"
+    ((m)) || echo "       ${D}(还没有模块, 输入 a 从仓库添加)${N}"
+    printf '  %s%3s%s  %s添加模块%s     %s%s%s  %s删除模块%s\n' "$BD$B" a "$N" "$T" "$N" "$BD$B" d "$N" "$T" "$N"
     last=""
     for id in "${APP_IDS[@]}"; do
       i=$((i + 1))
       cat=$(app_cat "$id")
-      if [[ $cat != "$last" ]]; then echo; echo "  ${B}$(app_cat_icon "$cat") ${cat}${N}"; last=$cat; fi
-      if app_installed "$id"; then st="${G}已装${N}"; else st="${D}未装${N}"; fi
-      printf "  %2d) " "$i"; pad_w "$(app_name "$id")" 16; echo "$st"
+      if [[ $cat != "$last" ]]; then echo; echo "  ${S}${BD}$(app_cat_icon "$cat") ${cat}${N}"; last=$cat; fi
+      if app_installed "$id"; then st="${G}● 已装${N}"; else st="${D}○ 未装${N}"; fi
+      printf '  %s%3d%s  %s' "$BD$B" "$i" "$N" "$T"; pad_w "$(app_name "$id")" 16; printf '%s%s\n' "$N" "$st"
     done
     echo
+    mback
     read -r -p "输入序号 (回车返回): " c || return 0
     [[ -z $c || $c == 0 || $c == q ]] && return 0
     case $c in
@@ -3575,7 +3700,8 @@ app_module_menu() {  # 单个模块的菜单
     opts+=("更新模块" "删除模块" "返回")
     choose c "操作:" "${opts[@]}" || return 0
     case $c in
-      部署*|安装|重新安装) ("app_${id}_install"); pause ;;
+      部署*) need_web && ("app_${id}_install"); pause ;;
+      安装|重新安装) ("app_${id}_install"); pause ;;
       管理) ("app_${id}_menu") ;;
       卸载软件) ("app_${id}_uninstall") && info "已卸载 (模块还在, 想彻底不要可以再删除模块)"; pause ;;
       管理已部署*)
@@ -3609,7 +3735,7 @@ app_cli() {  # wsm app ...
       id=$a; shift
       app_loaded "$id" || { err "没有这个模块: $id (wsm app list 查看)"; return 1; }
       case ${1:-} in
-        install) "app_${id}_install" "${2:-}" ;;
+        install) { app_soft "$id" || need_web; } && "app_${id}_install" "${2:-}" ;;
         uninstall) app_has "$id" uninstall || { err "这个模块不支持卸载"; return 1; }; "app_${id}_uninstall" ;;
         *) if app_has "$id" cli; then "app_${id}_cli" "$@"; else app_module_menu "$id"; fi ;;
       esac ;;
@@ -4212,14 +4338,15 @@ update_menu() {
   while true; do
     update_load
     UPDATED=0
-    title "更新脚本"
+    title "更新 / 卸载"
     u=${UPDATE_URL#https://raw.githubusercontent.com/}
     echo "  当前版本: v$WSM_VER"
     echo "  来源: $(files_trunc "$u" 32)"
-    choose c "操作:" "检查并更新" "回滚到旧版本" "返回" || return 0
+    choose c "操作:" "检查并更新" "回滚到旧版本" "卸载 wsm" "返回" || return 0
     case $c in
       检查*) update_run ;;
       回滚*) update_rollback ;;
+      卸载*) wsm_uninstall ;;
       *) return 0 ;;
     esac
     if [[ $UPDATED == 1 ]]; then info "重新载入新版本 ..."; sleep 1; exec "$WSM_BIN"; fi
@@ -5016,7 +5143,11 @@ fb_rclone_ensure() {
   command -v rclone >/dev/null 2>&1 && return 0
   info "安装 rclone ..."
   command -v unzip >/dev/null 2>&1 || pkg_install unzip >/dev/null 2>&1
-  curl -fsSL https://rclone.org/install.sh | bash >/dev/null 2>&1 || pkg_install rclone >/dev/null 2>&1
+  if curl -fsSL https://rclone.org/install.sh | bash >/dev/null 2>&1 && command -v rclone >/dev/null 2>&1; then
+    pkg_has rclone || ledger_add @rclone "异地备份 (rclone)"
+  else
+    PKG_FOR="异地备份" pkg_install rclone >/dev/null 2>&1
+  fi
   command -v rclone >/dev/null 2>&1 || { err "rclone 安装失败, 请检查网络"; return 1; }
 }
 
@@ -6147,7 +6278,11 @@ ssh_reload() {
   systemctl restart "$(sshd_service)" 2>/dev/null || systemctl reload "$(sshd_service)" 2>/dev/null
 }
 
-ssh_apply() {  # ssh_apply 关闭密码(0|1) 端口(空或22=默认)
+ssh_pass_mode() {  # wsm 当前写入的密码登录设置 -> ssh_apply 的第一个参数
+  case $(ssh_wsm_get PasswordAuthentication) in no) echo 1 ;; yes) echo 2 ;; *) echo 0 ;; esac
+}
+
+ssh_apply() {  # ssh_apply 密码登录(0=不管 1=关闭 2=强制开启) 端口(空或22=默认)
   local nopass=$1 port=${2:-} bak dbak f tmp
   local -a body=()
   [[ -f $SSH_MAIN ]] || { err "找不到 $SSH_MAIN"; return 1; }
@@ -6156,6 +6291,9 @@ ssh_apply() {  # ssh_apply 关闭密码(0|1) 端口(空或22=默认)
   body+=("PubkeyAuthentication yes")
   if [[ $nopass == 1 ]]; then
     body+=("PasswordAuthentication no" "ChallengeResponseAuthentication no" "PermitRootLogin prohibit-password")
+  elif [[ $nopass == 2 ]]; then
+    # 云厂商的 50-cloud-init.conf 等可能写了 no; 这里写在最前面 (先读到的生效)
+    body+=("PasswordAuthentication yes" "PermitRootLogin yes")
   fi
   [[ -n $port ]] && body+=("Port $port")
   bak=$(mktemp); cp -a "$SSH_MAIN" "$bak"
@@ -6191,7 +6329,7 @@ ssh_apply() {  # ssh_apply 关闭密码(0|1) 端口(空或22=默认)
 
 ssh_pubkey_ensure() {  # 系统关闭了密钥登录时自动打开 (不然加了公钥也用不了)
   [[ $(ssh_eff pubkeyauthentication) == no ]] || return 0
-  ssh_apply "$([[ $(ssh_wsm_get PasswordAuthentication) == no ]] && echo 1 || echo 0)" "$(ssh_wsm_get Port)" \
+  ssh_apply "$(ssh_pass_mode)" "$(ssh_wsm_get Port)" \
     && info "检测到 SSH 关闭了密钥登录, 已自动打开"
 }
 
@@ -6225,23 +6363,21 @@ ssh_key_gen() {
   echo "  2. Termius: Keychain → + → Import Key → 选择该文件"
   echo "  3. 主机设置里 Key 选它, 新开窗口测试密钥登录"
   echo "  4. 测试成功后, 回本菜单 [删除服务器上的私钥文件]"
-  if confirm "需要同时在屏幕上显示私钥内容吗?" n; then
-    echo "------------------------------------------"
-    cat "$f"
-    echo "------------------------------------------"
-  fi
+  echo "  (不方便用 SFTP 的话, 也可以用临时链接下载 / 屏幕显示 / scp 命令)"
+  confirm "现在下载这个私钥?" n && key_download "$f"
+  return 0
 }
 
 ssh_key_files_del() {  # 删除服务器上留存的私钥文件 (公钥不受影响)
   local -a fs=()
   local f
-  for f in "$SSH_KEYDIR"/*.key /root/.ssh/wsm-*; do [[ -f $f && $f != *.pub ]] && fs+=("$f"); done
+  for f in "$SSH_KEYDIR"/*.key /root/.ssh/wsm-* "$OLD_KEYDIR"/*; do [[ -f $f && $f != *.pub ]] && fs+=("$f"); done
   ((${#fs[@]})) || { info "服务器上没有留存的私钥文件"; return 0; }
   echo "将删除这些私钥文件 (已加入服务器的公钥不受影响):"
   printf '   %s\n' "${fs[@]}"
   warn "确认你已经下载并导入客户端, 删除后无法恢复"
   confirm "确认删除?" n || return 0
-  rm -f -- "${fs[@]}"; rmdir "$SSH_KEYDIR" 2>/dev/null
+  rm -f -- "${fs[@]}"; rmdir "$SSH_KEYDIR" 2>/dev/null; rm -f "$OLD_KEYDIR"/*.pub 2>/dev/null; rmdir "$OLD_KEYDIR" 2>/dev/null
   info "已删除"
 }
 
@@ -6298,8 +6434,18 @@ ssh_nopass_on() {
 }
 
 ssh_nopass_off() {
-  confirm "恢复密码登录?" y || return 0
-  ssh_apply 0 "$(ssh_wsm_get Port)" && info "已恢复密码登录"
+  local st
+  confirm "恢复密码登录 (root 也允许用密码登录)?" y || return 0
+  ssh_apply 2 "$(ssh_wsm_get Port)" || return 1
+  if ssh_nopass_now; then warn "已写入配置, 但密码登录仍是关闭状态 (可能被其他配置覆盖)"; return 1; fi
+  info "已恢复密码登录"
+  # 很多云服务器 root 默认没有密码 (已锁定), 开了密码登录也登不上
+  st=$(passwd -S root 2>/dev/null | awk '{print $2}')
+  if [[ $st == L || $st == LK || $st == NP ]]; then
+    warn "root 账号目前没有可用的密码, 需要先设置一个"
+    confirm "现在设置 root 密码?" y && passwd root
+  fi
+  return 0
 }
 
 ssh_fw_open() {  # 防火墙放行新端口
@@ -6320,7 +6466,7 @@ ssh_fw_open() {  # 防火墙放行新端口
 ssh_port_change() {
   local old new nopass=0
   old=$(ssh_port_now)
-  [[ $(ssh_wsm_get PasswordAuthentication) == no ]] && nopass=1
+  nopass=$(ssh_pass_mode)
   echo "当前 SSH 端口: $old"
   read -r -p "新端口 (1024-65535, 22 恢复默认, 0 返回): " new || return 1
   [[ $new == 0 || -z $new ]] && return 0
@@ -6351,15 +6497,16 @@ ssh_menu() {
   local c
   while true; do
     title "SSH 安全"
-    echo "  密码登录: $(ssh_nopass_now && echo "${G}已关闭 (只能用密钥)${N}" || echo "${Y}开启${N}")"
-    echo "  已添加密钥: $(ssh_key_count) 个"
-    echo "  SSH 端口: $(ssh_port_now)"
-    echo "  推荐顺序: 生成密钥 → 新窗口测试 → 关闭密码登录"
-    choose c "操作:" "生成新密钥" "粘贴已有公钥" "查看/删除公钥" "删除服务器上的私钥文件" \
-      "关闭密码登录" "恢复密码登录" "修改 SSH 端口" "返回" || return 0
+    printf '  %s   %s   %s\n' "$(kv 端口 "$T$(ssh_port_now)$N")" \
+      "$(kv 密码登录 "$(ssh_nopass_now && echo "${G}已关闭 (只能用密钥)" || echo "${Y}开启")$N")" "$(kv 密钥 "$T$(ssh_key_count) 个$N")"
+    echo "  ${D}推荐顺序: 生成密钥 → 新窗口测试 → 关闭密码登录${N}"
+    echo
+    choose c "操作:" "生成新密钥" "导入公钥 (从仓库拉取 / 粘贴)" "查看/删除公钥" "下载服务器上的私钥" \
+      "删除服务器上的私钥文件" "关闭密码登录" "恢复密码登录" "修改 SSH 端口" "返回" || return 0
     case $c in
       生成*) (ssh_key_gen); pause ;;
-      粘贴*) (ssh_key_add); pause ;;
+      导入*) (import_keys); pause ;;
+      下载*) (key_download ""); pause ;;
       查看*) (ssh_key_del); pause ;;
       删除服务器*) (ssh_key_files_del); pause ;;
       关闭*) (ssh_nopass_on); pause ;;
@@ -6377,25 +6524,23 @@ menu_security() {
     echo "  源站保护:   $(cfw_state)"
     echo "  CDN真实IP:  $(realip_state)"
     echo "  防CC/bot:   $(guard_summary)"
-    echo "  SSH:        $(ssh_state)"
-    cat <<'EOF'
+    echo "  ${D}(SSH 安全在主菜单 → 2)${N}"
+    mlist <<'EOF'
 
    1) 源站保护 开/关
    2) CDN 设置 (真实IP / 其他CDN / 更新IP)
    3) 防 CC / 恶意 bot
-   4) SSH 安全
-   5) 禁止IP直接访问 (开关)
-   6) 网站防篡改
+   4) 禁止IP直接访问 (开关)
+   5) 网站防篡改
 EOF
-    echo "   0) ${G}返回${N}"
+    mback
     read -r -p "请选择: " c || return 0
     case $c in
       1) (cfw_toggle); pause ;;
       2) cdn_menu ;;
       3) guard_overview ;;
-      4) ssh_menu ;;
-      5) (toggle_block_ip); pause ;;
-      6) (menu_tamper) ;;
+      4) (toggle_block_ip); pause ;;
+      5) (menu_tamper) ;;
       0|q) return 0 ;;
       *) warn "无效选择" ;;
     esac
@@ -6417,27 +6562,6 @@ logs_clean() {
   info "清理完成: ${before}MB → ${after}MB (系统日志也压缩到 200MB 以内)"
 }
 
-dashboard() {
-  local n=0 f phps
-  for f in "$META_DIR"/*.conf; do [[ -e $f ]] && n=$((n + 1)); done
-  phps=$(php_installed | sort -V | tr '\n' ' ')
-  echo
-  echo "${B}╔══════════════════════════════════════════════════════╗${N}"
-  echo "${B}║${N}  Web Server Manager v$WSM_VER   服务器 IP: ${SERVER_IP:-未知}"
-  echo "${B}╚══════════════════════════════════════════════════════╝${N}"
-  printf "  Nginx: %s   站点: %s 个   PHP: %s\n" "$(svc_state nginx)" "$n" "${phps:-未安装}"
-  if unit_exists mariadb; then printf "  MariaDB: %s   " "$(svc_state mariadb)"; fi
-  printf "磁盘: %s   负载: %s\n" "$(df -h / | awk 'NR==2{print $5}')" "$(cut -d' ' -f1-3 /proc/loadavg)"
-  local logmb
-  logmb=$(du -sm /var/log/nginx 2>/dev/null | awk '{print $1+0}')
-  if (( ${logmb:-0} >= 1024 )); then
-    echo "  ${Y}提示: 网站日志已占用 ${logmb}MB, 6 → 6 可清理${N}"
-  fi
-  if (( $(swap_total) == 0 && $(free -m | awk '/^Mem:/{print $2+0}') <= 4096 )); then
-    echo "  ${Y}提示: 没有 Swap, 内存吃紧时数据库容易被杀, 6 → 7 可创建${N}"
-  fi
-}
-
 menu_tamper() {
   use_site "" || { pause; return 0; }
   if [[ $TYPE != php && $TYPE != static ]]; then
@@ -6450,7 +6574,7 @@ menu_sites() {
   local c
   while true; do
     title "网站管理"
-    cat <<'EOF'
+    mlist <<'EOF'
    1) 站点列表
    2) 新建 PHP 站点
    3) 部署网站应用 (WordPress / Xboard 等)
@@ -6461,7 +6585,7 @@ menu_sites() {
    8) 删除站点
    9) 访问统计
 EOF
-    echo "   0) ${G}返回${N}"
+    mback
     read -r -p "请选择: " c || return 0
     case $c in
       1) list_sites; pause ;;
@@ -6483,14 +6607,14 @@ menu_ssl() {
   local c
   while true; do
     title "SSL 证书管理"
-    cat <<'EOF'
+    mlist <<'EOF'
    1) 证书总览 (来源/剩余天数)
    2) 申请 / 更换证书
    3) 站点 SSL 设置 (强制HTTPS)
    4) 立即续期全部证书
    5) 自动续期 开/关
 EOF
-    echo "   0) ${G}返回${N}"
+    mback
     read -r -p "请选择: " c || return 0
     case $c in
       1) list_certs; pause ;;
@@ -6509,7 +6633,7 @@ menu_php() {
   while true; do
     title "PHP 管理"
     php_status_table
-    cat <<'EOF'
+    mlist <<'EOF'
 
    1) 安装新的 PHP 版本
    2) 卸载 PHP 版本
@@ -6519,7 +6643,7 @@ menu_php() {
    6) PHP-FPM 进程数调优
    7) 重启 PHP-FPM
 EOF
-    echo "   0) ${G}返回${N}"
+    mback
     read -r -p "请选择: " c || return 0
     case $c in
       1) (install_php ""); pause ;;
@@ -6539,7 +6663,7 @@ menu_db() {
   local c
   while true; do
     title "数据库管理"
-    cat <<'EOF'
+    mlist <<'EOF'
    1) 数据库列表
    2) 创建数据库和用户
    3) 删除数据库
@@ -6548,7 +6672,7 @@ menu_db() {
    6) 还原数据库
    7) 安装 phpMyAdmin (网页管理数据库)
 EOF
-    echo "   0) ${G}返回${N}"
+    mback
     read -r -p "请选择: " c || return 0
     case $c in
       1) (db_list); pause ;;
@@ -6568,7 +6692,7 @@ menu_backup() {
   local c
   while true; do
     title "备份与搬家"
-    cat <<'EOF'
+    mlist <<'EOF'
    1) 立即备份网站
    2) 立即备份数据库
    3) 查看备份文件
@@ -6579,7 +6703,7 @@ menu_backup() {
    8) 删除计划任务
    9) 全量备份 / 搬家 / 异地备份
 EOF
-    echo "   0) ${G}返回${N}"
+    mback
     echo "  备份目录: $BACKUP_DIR"
     read -r -p "请选择: " c || return 0
     case $c in
@@ -6596,6 +6720,1386 @@ EOF
       *) warn "无效选择" ;;
     esac
   done
+}
+
+# ================================================================ 服务器工具 (原 SSH 小工具 ssb 合并进来)
+# 这一部分不依赖网站环境; 需要的小工具 (sysbench / traceroute / iptables) 用到时才询问安装, 都记在 已安装组件 里
+SSH_TOOL_CONF=$WSM_DIR/ssh-tool.conf      # 导入公钥的地址 (原 /etc/ssh-tool.conf 会自动迁移过来)
+OLD_KEYDIR=/root/.ssh/keys                # 原 SSH 小工具生成的私钥目录
+KEYS_URL_DEFAULT="https://raw.githubusercontent.com/chentiti888/gy/main/authorized_keys"
+KEYS_URL=$KEYS_URL_DEFAULT
+if [[ -f $SSH_TOOL_CONF ]]; then
+  _u=$(sed -n 's/^KEYS_URL=//p' "$SSH_TOOL_CONF" | tail -1)
+  [[ $_u =~ ^https:// ]] && KEYS_URL=$_u
+  unset _u
+fi
+
+# 兼容原脚本的几个名字
+current_port() { ssh_port_now; }
+get_ip() { local ip; ip=$(public_ip); echo "${ip:-服务器IP}"; }
+pass_state() { ssh_nopass_now && echo "已禁用" || echo "允许"; }
+
+# 临时放行 / 关闭一个端口 (只给临时下载用, 不改 SELinux)
+tmp_port_open() {
+    local port=$1
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+        ufw allow "${port}/tcp" >/dev/null
+    fi
+    if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
+        firewall-cmd --add-port="${port}/tcp" >/dev/null 2>&1
+    fi
+    if command -v iptables >/dev/null 2>&1; then
+        iptables -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "$port" -j ACCEPT
+    fi
+}
+tmp_port_close() {
+    local port=$1
+    command -v ufw >/dev/null 2>&1 && ufw delete allow "${port}/tcp" >/dev/null 2>&1
+    command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --remove-port="${port}/tcp" >/dev/null 2>&1
+    command -v iptables >/dev/null 2>&1 && iptables -D INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null
+    return 0
+}
+
+# ---------------- 下载私钥 (wsm 生成的在 /root/ssh-key/, 原 SSH 小工具生成的在 /root/.ssh/keys/)
+list_keys() {
+    local f
+    for f in "$SSH_KEYDIR"/*.key "$OLD_KEYDIR"/*; do [[ -f $f && $f != *.pub ]] && echo "$f"; done
+    return 0
+}
+
+key_download() {
+    local keyfile=$1
+    local n m k
+    if [[ -z "$keyfile" ]]; then
+        local -a keys=()
+        mapfile -t keys < <(list_keys)
+        if ((${#keys[@]} == 0)); then err "服务器上没有留存的私钥 (可以先 [生成新密钥])"; return; fi
+        if ((${#keys[@]} == 1)); then keyfile=${keys[0]}
+        else choose keyfile "下载哪个私钥:" "${keys[@]}" || return; fi
+    fi
+    [[ -f $keyfile ]] || { err "找不到 $keyfile"; return; }
+    local ip port
+    ip=$(get_ip)
+    port=$(current_port)
+
+    echo
+    echo "  ${D}下载方式:${N}"
+    mitem 1 "屏幕显示私钥内容" "复制保存为文件, 最安全"
+    mitem 2 "临时链接下载" "一次性, 120 秒自动关闭, 明文传输"
+    mitem 3 "显示 scp 命令" "在你本地电脑执行"
+    read -r -p "请选择 [1]: " m || return
+    case "$m" in
+    2)
+        command -v python3 >/dev/null || { err "需要 python3"; return; }
+        local dport="" token tmp="" dip rc fw=0
+        # 这一步里任何时候按 Ctrl+C: 清理临时文件和防火墙规则, 回到菜单 (不退出整个脚本)
+        dl_cleanup() {
+            [[ -n "$tmp" ]] && rm -rf "$tmp"
+            ((fw)) && tmp_port_close "$dport"
+            tmp=""; fw=0
+        }
+        trap 'echo; warn "已取消"; dl_cleanup; trap - INT; return' INT
+        # 链接里的 IP 用这次 SSH 连进来的地址 (NAT/中转机器上, 出口 IP 和入口 IP 可能不一样)
+        dip=$(awk '{print $3}' <<< "${SSH_CONNECTION:-}")
+        if [[ -z "$dip" || "$dip" =~ ^(10\.|127\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.) || "$dip" == *:* ]]; then
+            dip=$ip
+        fi
+        echo
+        echo " NAT 机器（SSH 端口是服务商分配的那种）要填服务商给你转发好的端口，否则外面连不上"
+        read -rp "下载端口（回车随机）: " dport
+        if [[ -z "$dport" ]]; then
+            dport=$((RANDOM % 10000 + 40000))
+        elif ! [[ "$dport" =~ ^[0-9]+$ ]] || ((dport < 1 || dport > 65535)); then
+            trap - INT; err "端口无效"; return
+        fi
+        if timeout 5 ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${dport}$"; then
+            trap - INT; err "端口 ${dport} 已被占用，换一个"; return
+        fi
+        echo " 使用端口：${dport}"
+        token=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
+        tmp=$(mktemp -d)
+        cp "$keyfile" "${tmp}/${token}"
+        fw=1; tmp_port_open "$dport"
+        warn "私钥将通过明文 HTTP 传输，下载完成后建议删除并重新生成"
+        echo -e "下载链接：${CYAN}http://${dip}:${dport}/${token}${NC}"
+        echo " 用手机/电脑浏览器打开链接，会下载一个名为 ${keyfile##*/} 的文件（在浏览器的「下载」里）"
+        echo " 或在电脑上执行：curl -o ${keyfile##*/} http://${dip}:${dport}/${token}"
+        echo " （云服务器需在安全组放行 ${dport}/tcp；120 秒内没人下载自动关闭；按 Ctrl+C 取消）"
+        # 等待下载时按 Ctrl+C: 只结束下载服务, 然后照常往下清理
+        trap ':' INT
+        python3 - "$tmp" "$dport" "$token" "${keyfile##*/}" <<'PY'
+import http.server, sys, os, threading
+d, port, token, name = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+data = open(os.path.join(d, token), "rb").read()
+result = {"ok": False}
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.strip('/') != token:
+            self.send_error(404); return
+        # 告诉浏览器这是要下载的文件, 并用密钥名作为文件名 (不然会保存成一串随机字符)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Disposition", 'attachment; filename="%s"' % name)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+        result["ok"] = True
+        threading.Thread(target=self.server.shutdown, daemon=True).start()
+    def log_message(self, *a): pass
+try:
+    s = http.server.HTTPServer(('0.0.0.0', port), H)
+except OSError as e:
+    print(" 无法监听端口 %d：%s" % (port, e)); sys.exit(2)
+t = threading.Timer(120, s.shutdown); t.daemon = True; t.start()
+try:
+    s.serve_forever()
+except KeyboardInterrupt:
+    print("\n 已取消下载"); sys.exit(1)
+sys.exit(0 if result["ok"] else 3)
+PY
+        rc=$?
+        trap - INT
+        dl_cleanup
+        case $rc in
+            0) info "已下载，临时下载服务已关闭" ;;
+            3) warn "120 秒内没有人下载，已自动关闭。连不上的话：检查安全组是否放行 ${dport}/tcp，NAT 机器要用转发好的端口" ;;
+            *) info "临时下载服务已关闭" ;;
+        esac
+        ;;
+    3)
+        echo -e "在本地电脑执行：\n${CYAN}scp -P ${port} root@${ip}:${keyfile} ./${keyfile##*/}${NC}"
+        ;;
+    *)
+        echo -e "${YELLOW}↓↓↓ 复制下面全部内容保存为文件（含 BEGIN/END 行）↓↓↓${NC}"
+        cat "$keyfile"
+        echo -e "${YELLOW}↑↑↑ 结束 ↑↑↑${NC}"
+        echo "本地保存后执行：chmod 600 文件名 ；登录：ssh -i 文件名 -p ${port} root@${ip}"
+        ;;
+    esac
+}
+
+# ---------------- 6. 端口转发 ----------------
+# TCP/UDP DNAT 端口转发（来自 udp-f.sh，规则和独立脚本完全通用，两边都能看到、删除）
+#   - 支持 TCP+UDP / 仅 UDP / 仅 TCP，中转端口和落地端口可以不同
+#   - 重复添加相同转发不会重复写入；只处理 IPv4，不修改 SSH 等其他规则
+#   - 同时识别并可删除旧版 UDP 脚本创建的 UDP_FORWARD_* 规则
+DNAT_CHAIN="PORT_FWD_DNAT"
+ACCEPT_CHAIN="PORT_FWD_ACCEPT"
+LEGACY_DNAT_CHAIN="UDP_FORWARD_DNAT"
+LEGACY_ACCEPT_CHAIN="UDP_FORWARD_ACCEPT"
+
+FWD_RULES=()
+
+# ---------------------------------------------------------------- 通用函数
+
+fwd_install_iptables() {
+    ensure_pkg iptables iptables "端口转发"
+}
+
+fwd_need_iptables() {
+    command -v iptables >/dev/null 2>&1 || { err "未安装 iptables，没有可操作的规则。"; return 1; }
+}
+
+# 幂等添加规则：已存在则跳过
+# 用法：fwd_ensure [-t table] CHAIN rule...
+fwd_ensure() {
+    local tbl=()
+    if [[ "$1" == "-t" ]]; then
+        tbl=(-t "$2")
+        shift 2
+    fi
+    local chain="$1"
+    shift
+    iptables ${tbl[@]+"${tbl[@]}"} -C "$chain" "$@" 2>/dev/null ||
+        iptables ${tbl[@]+"${tbl[@]}"} -A "$chain" "$@"
+}
+
+# 按正则筛选并删除规则
+# 用法：fwd_purge TABLE CHAIN REGEX...   （REGEX 以 ! 开头表示"不匹配"）
+fwd_purge() {
+    local table="$1" chain="$2"
+    shift 2
+    local out line re
+    local a=()
+    out="$(iptables -t "$table" -S "$chain" 2>/dev/null | grep '^-A' || true)"
+    for re in "$@"; do
+        if [[ "$re" == '!'* ]]; then
+            out="$(grep -Ev -- "${re:1}" <<< "$out" || true)"
+        else
+            out="$(grep -E -- "$re" <<< "$out" || true)"
+        fi
+    done
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        read -ra a <<< "$line"
+        a[0]="-D"
+        iptables -t "$table" "${a[@]}" 2>/dev/null || true
+    done <<< "$out"
+}
+
+# 开机恢复规则用 iptables-persistent (netfilter-persistent 服务)
+# 保存时排除 wsm 源站保护的 WSM_CF 链: 那部分由它自己的开机服务管理, 存进来会重复加载, 关掉后还会被恢复
+fwd_save() {
+    info "正在保存 iptables 规则..."
+    if [[ $PM == apt ]] && ! pkg_has iptables-persistent && pkg_has ufw; then
+        warn "系统装了 ufw (和 iptables-persistent 冲突), 不自动安装; 服务器重启后转发规则需要重新添加"
+    elif [[ $PM == apt ]] && ! pkg_has iptables-persistent; then
+        info "正在安装 iptables-persistent（开机自动恢复转发规则，可在 已安装组件 里卸载）..."
+        echo "iptables-persistent iptables-persistent/autosave_v4 boolean false" | debconf-set-selections 2>/dev/null
+        echo "iptables-persistent iptables-persistent/autosave_v6 boolean false" | debconf-set-selections 2>/dev/null
+        pkg_refresh
+        PKG_FOR="端口转发 (开机恢复规则)" pkg_install iptables-persistent >/dev/null 2>&1 \
+            || warn "iptables-persistent 安装失败，服务器重启后转发规则可能丢失"
+    fi
+    mkdir -p /etc/iptables
+    iptables-save 2>/dev/null | grep -v -- 'WSM_CF' > /etc/iptables/rules.v4.tmp \
+        && mv -f /etc/iptables/rules.v4.tmp /etc/iptables/rules.v4
+    if [[ -f /etc/iptables/rules.v6 ]] && command -v ip6tables-save >/dev/null 2>&1; then
+        ip6tables-save 2>/dev/null | grep -v -- 'WSM_CF' > /etc/iptables/rules.v6.tmp \
+            && mv -f /etc/iptables/rules.v6.tmp /etc/iptables/rules.v6
+    fi
+    if systemctl list-unit-files 2>/dev/null | grep -q '^netfilter-persistent.service'; then
+        systemctl enable netfilter-persistent >/dev/null 2>&1 || true
+    elif [[ $PM != apt ]]; then
+        warn "已保存到 /etc/iptables/rules.v4；这个系统重启后需要自行设置恢复规则"
+    fi
+}
+
+# 读取当前所有转发规则到 FWD_RULES 数组
+# 每项格式：chain|proto|前端端口|落地IP|落地端口
+fwd_collect() {
+    FWD_RULES=()
+    local chain line proto front dest i
+    local f=()
+    for chain in "$DNAT_CHAIN" "$LEGACY_DNAT_CHAIN"; do
+        while IFS= read -r line; do
+            [[ -n "$line" ]] || continue
+            read -ra f <<< "$line"
+            proto=""; front=""; dest=""
+            for ((i = 0; i < ${#f[@]}; i++)); do
+                case "${f[i]}" in
+                    -p)               proto="${f[i+1]:-}" ;;
+                    --dport)          front="${f[i+1]:-}" ;;
+                    --to-destination) dest="${f[i+1]:-}" ;;
+                esac
+            done
+            if [[ -n "$proto" && -n "$front" && -n "$dest" ]]; then
+                FWD_RULES+=("${chain}|${proto}|${front}|${dest%:*}|${dest##*:}")
+            fi
+        done < <(iptables -t nat -S "$chain" 2>/dev/null | grep '^-A' || true)
+    done
+}
+
+# 统计匹配的规则数，参数可用 * 作通配：fwd_count proto front ip port
+fwd_count() {
+    local n=0 r chain proto front ip port
+    for r in ${FWD_RULES[@]+"${FWD_RULES[@]}"}; do
+        IFS='|' read -r chain proto front ip port <<< "$r"
+        # shellcheck disable=SC2053
+        if [[ "$proto" == $1 && "$front" == $2 && "$ip" == $3 && "$port" == $4 ]]; then
+            n=$((n + 1))
+        fi
+    done
+    echo "$n"
+}
+
+# 打印规则列表，返回规则数量到 FWD_COUNT
+fwd_print() {
+    fwd_collect
+    FWD_COUNT=${#FWD_RULES[@]}
+    if (( FWD_COUNT == 0 )); then
+        echo "  （当前没有转发规则）"
+        return
+    fi
+    printf "  %-4s %-6s %-10s %-24s %s\n" "编号" "协议" "中转端口" "落地地址" "来源"
+    local i=1 r chain proto front ip port src
+    for r in "${FWD_RULES[@]}"; do
+        IFS='|' read -r chain proto front ip port <<< "$r"
+        src="当前版本"
+        [[ "$chain" == "$LEGACY_DNAT_CHAIN" ]] && src="旧版UDP脚本"
+        printf "  %-6s %-6s %-12s %-24s %s\n" "$i" "${proto^^}" "$front" "${ip}:${port}" "$src"
+        i=$((i + 1))
+    done
+}
+
+# ---------------------------------------------------------------- 添加转发
+
+fwd_add() {
+    local BACKEND_IP BACKEND_PORT FRONT_PORT PROTO_CHOICE CONFIRM
+    local PROTOS=() PROTO_DESC="" PROTO OUT_IF o o1 o2 o3 o4
+
+    echo
+    read -r -p "请输入落地服务器 IP: " BACKEND_IP
+    [[ "$BACKEND_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || { err "IP 格式不正确：$BACKEND_IP"; return 1; }
+
+    IFS='.' read -r o1 o2 o3 o4 <<< "$BACKEND_IP"
+    for o in "$o1" "$o2" "$o3" "$o4"; do
+        (( 10#$o <= 255 )) || { err "IP 地址不正确：$BACKEND_IP"; return 1; }
+    done
+
+    read -r -p "请输入落地服务器端口: " BACKEND_PORT
+    [[ "$BACKEND_PORT" =~ ^[0-9]+$ ]] || { err "端口必须是数字"; return 1; }
+    (( BACKEND_PORT >= 1 && BACKEND_PORT <= 65535 )) || { err "端口范围必须是 1-65535"; return 1; }
+
+    read -r -p "请输入中转服务器监听端口: " FRONT_PORT
+    [[ "$FRONT_PORT" =~ ^[0-9]+$ ]] || { err "端口必须是数字"; return 1; }
+    (( FRONT_PORT >= 1 && FRONT_PORT <= 65535 )) || { err "端口范围必须是 1-65535"; return 1; }
+
+    echo
+    echo "转发协议："
+    echo "  1) TCP + UDP（默认）"
+    echo "  2) 仅 UDP"
+    echo "  3) 仅 TCP"
+    read -r -p "请选择 [1-3]: " PROTO_CHOICE
+    case "${PROTO_CHOICE:-1}" in
+        1) PROTOS=(tcp udp); PROTO_DESC="TCP+UDP" ;;
+        2) PROTOS=(udp);     PROTO_DESC="UDP" ;;
+        3) PROTOS=(tcp);     PROTO_DESC="TCP" ;;
+        *) { err "无效选择：$PROTO_CHOICE"; return 1; } ;;
+    esac
+
+    echo
+    echo "----------------------------------------------"
+    echo "转发协议 : ${PROTO_DESC}"
+    echo "中转端口 : ${FRONT_PORT}"
+    echo "落地地址 : ${BACKEND_IP}:${BACKEND_PORT}"
+    echo "----------------------------------------------"
+    read -r -p "确认配置？[Y/n]: " CONFIRM
+    [[ -z "$CONFIRM" || "$CONFIRM" =~ ^[Yy]$ ]] || { echo "已取消。"; return; }
+
+    fwd_install_iptables || return
+
+    info "正在开启 IPv4 转发..."
+    cat >/etc/sysctl.d/99-port-forward.conf <<'EOF'
+net.ipv4.ip_forward=1
+EOF
+    sysctl --system >/dev/null
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null
+
+    if ! ip route get "$BACKEND_IP" >/dev/null 2>&1; then
+        warn "当前服务器没有到 $BACKEND_IP 的有效路由，继续配置可能无法工作。"
+    fi
+
+    OUT_IF="$(ip route get "$BACKEND_IP" 2>/dev/null | awk '
+        {
+            for (i=1; i<=NF; i++)
+                if ($i=="dev") { print $(i+1); exit }
+        }')"
+    [[ -n "$OUT_IF" ]] || OUT_IF="$(ip route show default | awk '/default/ {print $5; exit}')"
+    [[ -n "$OUT_IF" ]] || { err "无法确定出口网卡。"; return 1; }
+    info "检测到出口网卡：$OUT_IF"
+
+    iptables -t nat -N "$DNAT_CHAIN" 2>/dev/null || true
+    iptables -N "$ACCEPT_CHAIN" 2>/dev/null || true
+
+    for PROTO in "${PROTOS[@]}"; do
+        info "正在配置 ${PROTO^^} 转发..."
+
+        fwd_ensure -t nat PREROUTING -p "$PROTO" --dport "$FRONT_PORT" -j "$DNAT_CHAIN"
+        fwd_ensure FORWARD -p "$PROTO" -d "$BACKEND_IP" --dport "$BACKEND_PORT" -j "$ACCEPT_CHAIN"
+
+        fwd_ensure -t nat "$DNAT_CHAIN" -p "$PROTO" --dport "$FRONT_PORT" \
+            -j DNAT --to-destination "${BACKEND_IP}:${BACKEND_PORT}"
+
+        fwd_ensure "$ACCEPT_CHAIN" -p "$PROTO" -d "$BACKEND_IP" --dport "$BACKEND_PORT" \
+            -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT
+
+        fwd_ensure "$ACCEPT_CHAIN" -p "$PROTO" -s "$BACKEND_IP" --sport "$BACKEND_PORT" \
+            -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+        fwd_ensure -t nat POSTROUTING -o "$OUT_IF" -p "$PROTO" -d "$BACKEND_IP" --dport "$BACKEND_PORT" \
+            -j MASQUERADE
+    done
+
+    fwd_save
+
+    echo
+    echo "=============================================="
+    echo -e "             ${GREEN}配置完成${NC}"
+    echo "=============================================="
+    echo
+    echo "中转服务器：$(hostname -I 2>/dev/null | awk '{print $1}')"
+    echo "转发协议  ：${PROTO_DESC}"
+    echo "中转端口  ：${FRONT_PORT}"
+    echo "落地服务器：${BACKEND_IP}:${BACKEND_PORT}"
+    echo "出口网卡  ：${OUT_IF}"
+    echo "IPv4 转发 ：$(sysctl -n net.ipv4.ip_forward)"
+    echo
+    echo "当前转发规则："
+    fwd_print
+    echo
+    info "重复添加相同配置不会重复写入相同规则。"
+}
+
+# ---------------------------------------------------------------- 删除转发
+
+# 删除单条转发（参数：chain|proto|前端端口|落地IP|落地端口）
+fwd_delete_one() {
+    local entry="$1"
+    local chain proto front ip port acc_chain ip_re
+    IFS='|' read -r chain proto front ip port <<< "$entry"
+    ip_re="${ip//./\\.}"
+
+    acc_chain="$ACCEPT_CHAIN"
+    [[ "$chain" == "$LEGACY_DNAT_CHAIN" ]] && acc_chain="$LEGACY_ACCEPT_CHAIN"
+
+    # 1. 删除 DNAT 规则
+    iptables -t nat -D "$chain" -p "$proto" --dport "$front" \
+        -j DNAT --to-destination "${ip}:${port}" 2>/dev/null || true
+
+    fwd_collect
+
+    # 2. 没有其他规则使用该前端端口，则删除 PREROUTING 跳转
+    if [[ "$(fwd_count "$proto" "$front" '*' '*')" == "0" ]]; then
+        fwd_purge nat PREROUTING "-p ${proto} " "--dport ${front} " \
+            "-j (${DNAT_CHAIN}|${LEGACY_DNAT_CHAIN})\$"
+    fi
+
+    # 3. 没有其他规则使用该落地目标，则删除放行与 MASQUERADE
+    if [[ "$(fwd_count "$proto" '*' "$ip" "$port")" == "0" ]]; then
+        fwd_purge filter FORWARD "-p ${proto} " "-d ${ip_re}/32 " "--dport ${port} " \
+            "-j (${ACCEPT_CHAIN}|${LEGACY_ACCEPT_CHAIN})\$"
+        fwd_purge filter "$acc_chain" "-p ${proto} " "-d ${ip_re}/32 " "--dport ${port} "
+        fwd_purge filter "$acc_chain" "-p ${proto} " "-s ${ip_re}/32 " "--sport ${port} "
+        fwd_purge nat POSTROUTING "-p ${proto} " "-d ${ip_re}/32 " "--dport ${port} " "-j MASQUERADE\$"
+    fi
+
+    # 4. 旧版回程规则（不带 --sport），该 IP+协议下已无转发才删除
+    if [[ "$(fwd_count "$proto" '*' "$ip" '*')" == "0" ]]; then
+        fwd_purge filter "$acc_chain" "-p ${proto} " "-s ${ip_re}/32 " "!--sport"
+    fi
+
+    info "已删除：${proto^^} ${front} -> ${ip}:${port}"
+}
+
+fwd_delete() {
+    fwd_need_iptables || return
+    echo
+    echo "当前转发规则："
+    fwd_print
+    (( FWD_COUNT > 0 )) || return
+
+    echo
+    local sel idx
+    local picks=() entries=()
+    read -r -p "请输入要删除的编号（可多个，空格分隔；直接回车取消）: " sel
+    [[ -n "$sel" ]] || { echo "已取消。"; return; }
+
+    for idx in $sel; do
+        [[ "$idx" =~ ^[0-9]+$ ]] && (( idx >= 1 && idx <= FWD_COUNT )) || { err "无效编号：$idx"; return 1; }
+        entries+=("${FWD_RULES[idx-1]}")
+    done
+
+    local CONFIRM
+    read -r -p "确认删除选中的 ${#entries[@]} 条规则？[y/N]: " CONFIRM
+    [[ "$CONFIRM" =~ ^[Yy]$ ]] || { echo "已取消。"; return; }
+
+    local e
+    for e in "${entries[@]}"; do
+        fwd_delete_one "$e"
+    done
+
+    fwd_save
+    echo
+    echo "剩余转发规则："
+    fwd_print
+}
+
+fwd_clear_all() {
+    fwd_need_iptables || return
+    echo
+    echo "当前转发规则："
+    fwd_print
+    (( FWD_COUNT > 0 )) || { warn "没有规则，仍会清理残留的自定义链。"; }
+
+    echo
+    local CONFIRM
+    read -r -p "确认清空全部转发规则（含旧版 UDP 脚本规则）？[y/N]: " CONFIRM
+    [[ "$CONFIRM" =~ ^[Yy]$ ]] || { echo "已取消。"; return 1; }
+
+    local r chain proto front ip port ip_re c
+    fwd_collect
+    for r in ${FWD_RULES[@]+"${FWD_RULES[@]}"}; do
+        IFS='|' read -r chain proto front ip port <<< "$r"
+        ip_re="${ip//./\\.}"
+        fwd_purge nat POSTROUTING "-p ${proto} " "-d ${ip_re}/32 " "--dport ${port} " "-j MASQUERADE\$"
+    done
+
+    fwd_purge nat PREROUTING "-j (${DNAT_CHAIN}|${LEGACY_DNAT_CHAIN})\$"
+    fwd_purge filter FORWARD "-j (${ACCEPT_CHAIN}|${LEGACY_ACCEPT_CHAIN})\$"
+
+    for c in "$DNAT_CHAIN" "$LEGACY_DNAT_CHAIN"; do
+        iptables -t nat -F "$c" 2>/dev/null || true
+        iptables -t nat -X "$c" 2>/dev/null || true
+    done
+    for c in "$ACCEPT_CHAIN" "$LEGACY_ACCEPT_CHAIN"; do
+        iptables -F "$c" 2>/dev/null || true
+        iptables -X "$c" 2>/dev/null || true
+    done
+
+    fwd_save
+    info "已清空全部转发规则。"
+}
+
+fwd_list() {
+    fwd_need_iptables || return
+    echo
+    echo "当前转发规则："
+    fwd_print
+    echo
+    echo "详细规则查看："
+    echo "  iptables -t nat -vnL"
+    echo "  iptables -vnL FORWARD"
+}
+
+fwd_persist_remove() {  # 清空转发后: 询问是否卸载 iptables-persistent (只卸载 wsm 装的)
+    ledger_has iptables-persistent || return 0
+    pkg_has iptables-persistent || { ledger_del iptables-persistent; return 0; }
+    echo
+    echo "  iptables-persistent 是添加转发时装的 (开机恢复规则的服务), 现在没有转发规则了"
+    confirm "一起卸载它?" y || return 0
+    systemctl disable --now netfilter-persistent >/dev/null 2>&1
+    pkg_remove iptables-persistent netfilter-persistent >/dev/null 2>&1 && info "已卸载 iptables-persistent"
+    rm -f /etc/iptables/rules.v4 /etc/iptables/rules.v6; rmdir /etc/iptables 2>/dev/null
+    return 0
+}
+
+forward_menu() {
+    local c n
+    while true; do
+        title "端口转发 (TCP/UDP)"
+        fwd_collect 2>/dev/null; n=${#FWD_RULES[@]}
+        echo "  当前规则: ${T}${n}${N} 条    IPv4 转发: $([[ $(sysctl -n net.ipv4.ip_forward 2>/dev/null) == 1 ]] && echo "${G}开${N}" || echo "${D}关${N}")"
+        echo
+        mitem 1 "添加转发"
+        mitem 2 "删除指定转发"
+        mitem 3 "清空全部转发规则"
+        mitem 4 "查看当前转发规则"
+        mback
+        read -r -p "请选择: " c || return 0
+        case "$c" in
+            1) (fwd_add); pause ;;
+            2) (fwd_delete); pause ;;
+            3) (fwd_clear_all && fwd_persist_remove); pause ;;
+            4) (fwd_list); pause ;;
+            0|q|Q) return 0 ;;
+            *) warn "无效选择" ;;
+        esac
+    done
+}
+
+# ---------------- 导入公钥 ----------------
+# 从 GitHub 拉文件时先查最新提交, 按提交编号下载, 避开 raw 链接几分钟的缓存
+gh_fresh_url() {  # gh_fresh_url raw地址 -> 能拿到最新内容的地址
+    local u=$1 repo branch path sha
+    if [[ "$u" =~ ^https://raw\.githubusercontent\.com/([^/]+/[^/]+)/([^/]+)/(.+)$ ]]; then
+        repo=${BASH_REMATCH[1]}; branch=${BASH_REMATCH[2]}; path=${BASH_REMATCH[3]}
+        sha=$(curl -fsSL --max-time 10 "https://api.github.com/repos/${repo}/commits/${branch}" 2>/dev/null |
+            awk -F'"' '/"sha":/{print $4; exit}')
+        [[ -n "$sha" ]] && { echo "https://raw.githubusercontent.com/${repo}/${sha}/${path}"; return; }
+    fi
+    echo "$u"
+}
+
+KEY_RE='^(ssh-(ed25519|rsa|dss)|ecdsa-sha2-nistp(256|384|521)|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com) [A-Za-z0-9+/]+=*( .*)?$'
+
+keys_url_normalize() {  # 把各种写法统一成能直接下载的地址
+    local u=$1
+    u=$(sed 's/^[[:space:]]*//; s/[[:space:]]*$//' <<< "$u")
+    if [[ "$u" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+        # 用户名/仓库名 -> 仓库 main 分支根目录的 authorized_keys
+        u="https://raw.githubusercontent.com/${u}/main/authorized_keys"
+    elif [[ "$u" =~ ^https://github\.com/([^/]+/[^/]+)/blob/(.+)$ ]]; then
+        # 网页上的文件地址 -> raw 地址
+        u="https://raw.githubusercontent.com/${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    elif [[ "$u" =~ ^https://github\.com/([^/]+/[^/.]+)/?$ ]]; then
+        # 只给了仓库首页
+        u="https://raw.githubusercontent.com/${BASH_REMATCH[1]}/main/authorized_keys"
+    elif [[ "$u" =~ ^[A-Za-z0-9-]+$ ]]; then
+        # 只给了 GitHub 用户名 -> 这个账号在 GitHub 上登记的所有公钥
+        u="https://github.com/${u}.keys"
+    fi
+    echo "$u"
+}
+
+keys_url_set() {
+    local u n yn
+    echo
+    echo " 当前地址：${KEYS_URL}"
+    [[ "$KEYS_URL" == "$KEYS_URL_DEFAULT" ]] && echo " （默认地址）"
+    echo " 可以填："
+    echo "   用户名/仓库名           如 chentiti888/gy（取 main 分支的 authorized_keys）"
+    echo "   GitHub 文件网页地址     如 https://github.com/用户/仓库/blob/main/文件"
+    echo "   GitHub 用户名           如 chentiti888（取账号设置里登记的公钥）"
+    echo "   任意 https 直链"
+    echo "   输入 default 恢复默认地址"
+    read -rp "新地址（回车取消）: " u
+    [[ -z "$u" ]] && return
+    if [[ "$u" == default ]]; then
+        u=$KEYS_URL_DEFAULT
+    else
+        u=$(keys_url_normalize "$u")
+    fi
+    [[ "$u" =~ ^https:// ]] || { err "地址要以 https:// 开头：$u"; return; }
+    echo " 解析为：${u}"
+    info "正在试拉一次 ..."
+    n=$(curl -fsSL --max-time 20 "$(gh_fresh_url "$u")" 2>/dev/null | tr -d '\r' | grep -cE "$KEY_RE")
+    if ((n > 0)); then
+        info "能拉到 ${n} 把公钥"
+    else
+        warn "这个地址没拉到公钥（地址不对、仓库是私有的，或文件里没有公钥）"
+        read -rp "仍然保存这个地址？[y/N]: " yn
+        [[ "$yn" =~ ^[Yy]$ ]] || return
+    fi
+    KEYS_URL=$u
+    mkdir -p "$WSM_DIR"
+    { grep -v '^KEYS_URL=' "$SSH_TOOL_CONF" 2>/dev/null; echo "KEYS_URL=$u"; } > "$SSH_TOOL_CONF.tmp" && mv -f "$SSH_TOOL_CONF.tmp" "$SSH_TOOL_CONF"
+    chmod 600 "$SSH_TOOL_CONF"
+    info "已保存，以后从这个地址拉取（保存在 ${SSH_TOOL_CONF}，更新脚本也不会丢）"
+}
+
+import_keys() {
+    local c src="" tmp line yn n=0 add=0 i blob comment fp state
+    local -a keys=()
+    title "导入公钥"
+    mitem 1 "从仓库拉取" "$(files_trunc "${KEYS_URL#https://}" 40)"
+    mitem 2 "手动粘贴公钥"
+    mitem 3 "修改拉取地址"
+    mback
+    read -r -p "请选择 [1]: " c
+    tmp=$(mktemp)
+    case "${c:-1}" in
+        1)
+            info "正在拉取 ..."
+            if ! curl -fsSL --retry 2 --max-time 20 "$(gh_fresh_url "$KEYS_URL")" -o "$tmp" 2>/dev/null; then
+                rm -f "$tmp"; err "拉取失败：${KEYS_URL}"; return
+            fi
+            src="仓库" ;;
+        2)
+            echo "粘贴公钥（可以多行，以 ssh-ed25519 / ssh-rsa 等开头），粘贴完按一次回车（空行）结束："
+            while IFS= read -r line; do [[ -z "$line" ]] && break; echo "$line" >> "$tmp"; done
+            src="粘贴" ;;
+        3) rm -f "$tmp"; keys_url_set; return ;;
+        *) rm -f "$tmp"; return ;;
+    esac
+    tr -d '\r' < "$tmp" > "$tmp.x" && mv -f "$tmp.x" "$tmp"
+    if grep -q 'PRIVATE KEY' "$tmp"; then
+        rm -f "$tmp"
+        err "内容里有【私钥】！私钥绝对不能放进仓库或发给别人，已停止导入"
+        err "请马上删掉仓库里的私钥，并重新生成一对新密钥"
+        return
+    fi
+    while IFS= read -r line; do
+        line=$(sed 's/^[[:space:]]*//; s/[[:space:]]*$//' <<< "$line")
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        if [[ "$line" =~ $KEY_RE ]]; then keys+=("$line"); else warn "跳过一行不像公钥的内容：${line:0:40}..."; fi
+    done < "$tmp"
+    rm -f "$tmp"
+    ((${#keys[@]} == 0)) && { err "没有找到可用的公钥"; return; }
+    ssh_ak_prepare
+    echo
+    echo "从${src}读到 ${#keys[@]} 把公钥："
+    for i in "${!keys[@]}"; do
+        read -r _ blob comment <<< "${keys[i]}"
+        fp=""
+        command -v ssh-keygen >/dev/null 2>&1 && fp=$(ssh-keygen -lf <(echo "${keys[i]}") 2>/dev/null | awk '{print $2}')
+        if grep -qF "$blob" /root/.ssh/authorized_keys; then state="已存在"; else state="${GREEN}新增${NC}"; add=$((add + 1)); fi
+        echo -e "  $((i + 1))) ${keys[i]%% *}  ${comment:-（无备注）}  [${state}]"
+        [[ -n "$fp" ]] && echo "     指纹：${fp}"
+    done
+    ((add == 0)) && { info "这些公钥都已经在服务器上了，不用导入"; return; }
+    echo
+    read -rp "把 ${add} 把新公钥加入 /root/.ssh/authorized_keys？（原有的不会删除）[Y/n]: " yn
+    [[ "$yn" =~ ^[Nn]$ ]] && return
+    cp -a /root/.ssh/authorized_keys "/root/.ssh/authorized_keys.bak.$(date +%Y%m%d%H%M%S)"
+    # 原文件最后一行没换行时先补一个, 免得两把钥匙粘在一行
+    [[ -s /root/.ssh/authorized_keys && -n "$(tail -c1 /root/.ssh/authorized_keys)" ]] && echo >> /root/.ssh/authorized_keys
+    for i in "${!keys[@]}"; do
+        read -r _ blob _ <<< "${keys[i]}"
+        grep -qF "$blob" /root/.ssh/authorized_keys || { echo "${keys[i]}" >> /root/.ssh/authorized_keys; n=$((n + 1)); }
+    done
+    chmod 600 /root/.ssh/authorized_keys
+    info "已导入 ${n} 把公钥（原文件已备份）"
+    warn "请【新开一个终端】用私钥测试登录：ssh -i 私钥文件 -p $(current_port) root@服务器IP"
+    warn "确认能登录后，再到 SSH 安全 → 关闭密码登录"
+}
+
+# ---------------- 系统信息 ----------------
+sys_info() {
+    local os kern virt model cores load mem swap disk upt ip4 ip6 cc
+    os=$( (. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME") || uname -s )
+    kern=$(uname -r)
+    virt=$(systemd-detect-virt 2>/dev/null || echo "未知")
+    [[ "$virt" == none ]] && virt="独立服务器 / 未检测到虚拟化"
+    model=$(awk -F: '/^(model name|Model Name|Hardware|cpu model)/{print $2; exit}' /proc/cpuinfo 2>/dev/null | tr -s ' ' | sed 's/^ //')
+    cores=$(nproc 2>/dev/null || echo 1)
+    load=$(cut -d' ' -f1-3 /proc/loadavg)
+    mem=$(free -m 2>/dev/null | awk '/^Mem:/{printf "%d / %d MB (已用 %.0f%%)", $3, $2, $3*100/$2}')
+    swap=$(free -m 2>/dev/null | awk '/^Swap:/{if ($2 > 0) printf "%d / %d MB", $3, $2; else print "未开启"}')
+    disk=$(df -hP / 2>/dev/null | awk 'NR==2{printf "%s / %s (已用 %s)", $3, $2, $5}')
+    upt=$(awk '{d=int($1/86400); h=int($1%86400/3600); m=int($1%3600/60); printf "%d 天 %d 小时 %d 分", d, h, m}' /proc/uptime)
+    cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+    title "系统信息"
+    echo " 主机名：$(hostname)"
+    echo " 系统：  ${os}（$(uname -m)）"
+    echo " 内核：  ${kern}"
+    echo " 虚拟化：${virt}"
+    echo " CPU：   ${model:-未知}（${cores} 核）"
+    echo " 负载：  ${load}"
+    echo " 内存：  ${mem}"
+    echo " Swap：  ${swap}"
+    echo " 硬盘：  ${disk}"
+    echo " 运行：  ${upt}"
+    echo " TCP 拥塞控制：${cc:-未知}$([[ "$cc" == bbr ]] && echo "（BBR 已开启）")"
+    echo " SSH 端口：$(current_port)    密码登录：$(pass_state)    Ping：$(ping_state)"
+    printf ' 查询公网 IP ...'
+    ip4=$(curl -s4 --max-time 5 ip.sb 2>/dev/null)
+    ip6=$(curl -s6 --max-time 5 ip.sb 2>/dev/null)
+    printf '\r\033[K'
+    echo " IPv4：  ${ip4:-无}"
+    echo " IPv6：  ${ip6:-无}"
+}
+
+# ---------------- 内存性能测试 ----------------
+bench_sysbench_mem() {  # bench_sysbench_mem read|write 线程数 秒数 -> MB/s
+    sysbench memory --memory-block-size=1M --memory-total-size=100T --memory-oper="$1" \
+        --threads="$2" --time="$3" run 2>/dev/null |
+        sed -n 's/.*(\([0-9.]*\) MiB\/sec).*/\1/p' | head -1 | awk '{printf "%.0f", $1}'
+}
+
+bench_dd_mem() {  # 没有 sysbench 时: 内核在内存里搬数据的速度 -> MB/s
+    LC_ALL=C dd if=/dev/zero of=/dev/null bs=1M count=20000 2>&1 |
+        awk '/copied/{v=$(NF-1); u=$NF; if (u ~ /^GB/) v*=1000; else if (u ~ /^kB/) v/=1000; printf "%.0f", v}'
+}
+
+mem_bench() {
+    local yn total avail swapu cores tool r1="" w1="" rm="" wm="" d=""
+    cores=$(nproc 2>/dev/null || echo 1)
+    total=$(awk '/^MemTotal:/{printf "%d", $2/1024}' /proc/meminfo)
+    avail=$(awk '/^MemAvailable:/{printf "%d", $2/1024}' /proc/meminfo)
+    swapu=$(awk '/^SwapTotal:/{t=$2} /^SwapFree:/{f=$2} END{printf "%d", (t-f)/1024}' /proc/meminfo)
+    title "内存性能测试"
+    echo " 内存：${total} MB    可用：${avail} MB    Swap 已用：${swapu} MB"
+    ((swapu > 100)) && warn "Swap 用了 ${swapu} MB，说明内存曾经不够用，测试结果可能偏低"
+    echo " 测试内容：单线程读 / 写，多线程读 / 写（各 5 秒，约 20 秒）"
+    echo " 只在内存里反复读写一小块数据，不会占满内存，也不写硬盘"
+    if bench_ensure_sysbench; then
+        tool=sysbench
+    else
+        tool=dd
+        warn "改用 dd 粗测（只测一项搬运速度），结果和 sysbench 不能直接比"
+    fi
+    read -rp "开始测试？[Y/n]: " yn
+    [[ "$yn" =~ ^[Nn]$ ]] && return
+    echo
+    if [[ "$tool" == sysbench ]]; then
+        printf ' 单线程读 ...'; r1=$(bench_sysbench_mem read 1 5); printf '\r\033[K'
+        printf ' 单线程写 ...'; w1=$(bench_sysbench_mem write 1 5); printf '\r\033[K'
+        if ((cores > 1)); then
+            printf ' 多线程读（%s 线程）...' "$cores"; rm=$(bench_sysbench_mem read "$cores" 5); printf '\r\033[K'
+            printf ' 多线程写（%s 线程）...' "$cores"; wm=$(bench_sysbench_mem write "$cores" 5); printf '\r\033[K'
+        fi
+        [[ -z "$r1$w1" ]] && { err "测试没有输出结果"; return; }
+        echo -e "${CYAN}测试结果${NC}（sysbench，单位 MB/s，越高越好）"
+        echo -e " 单线程读：${GREEN}${r1:-失败}${NC}"
+        echo -e " 单线程写：${GREEN}${w1:-失败}${NC}"
+        if ((cores > 1)); then
+            echo -e " 多线程读：${GREEN}${rm:-失败}${NC}（${cores} 线程）"
+            echo -e " 多线程写：${GREEN}${wm:-失败}${NC}（${cores} 线程）"
+        fi
+        echo
+        echo " 说明："
+        echo "  单线程 = 一个程序能用到的内存速度，影响网站/机器人的响应快慢"
+        echo "  多线程 = 多个程序同时读写时的总速度，看整机内存带宽"
+        if [[ -n "$r1" && -n "$rm" ]] && ((cores > 1)) && awk -v a="$rm" -v b="$r1" 'BEGIN{exit !(a < b * 1.2)}'; then
+            echo -e "  ${YELLOW}多线程几乎没有比单线程快：内存带宽可能被限制，或多个核在争抢${NC}"
+        fi
+        echo "  同配置的机器之间对比才有意义；多测几次差距很大，可能是宿主机繁忙或超售"
+    else
+        printf ' 测试中 ...'; d=$(bench_dd_mem); printf '\r\033[K'
+        [[ -z "$d" ]] && { err "测试没有输出结果"; return; }
+        echo -e "${CYAN}测试结果${NC}（dd 粗测）"
+        echo -e " 内存搬运速度：${GREEN}${d}${NC} MB/s"
+        echo "  这是内核在内存里搬数据的速度，只适合同一种方法互相比较；装上 sysbench 结果更全面"
+    fi
+}
+
+# ---------------- CPU 占用状态 ----------------
+# 读 /proc 两次 (间隔几秒) 算出这段时间的真实占用; 不装任何工具, 看完就结束
+cpu_snap() {  # cpu_snap 文件 : 记录 各核 和 各进程 的累计 CPU 时间
+    local f line rest pid
+    local -a a
+    grep '^cpu' /proc/stat > "$1.stat"
+    : > "$1.proc"
+    for f in /proc/[0-9]*/stat; do
+        read -r line < "$f" 2>/dev/null || continue
+        pid=${line%% *}
+        rest=${line##*) }              # 程序名里可能有空格, 从最后一个 ")" 后面开始数
+        read -ra a <<< "$rest"
+        echo "$pid $((a[11] + a[12]))" >> "$1.proc"   # utime + stime
+    done
+}
+
+cpu_bar() {  # cpu_bar 百分比 -> 10 格进度条
+    local n=$(( ($1 + 5) / 10 )) b="" i
+    ((n > 10)) && n=10
+    for ((i = 0; i < 10; i++)); do if ((i < n)); then b+="█"; else b+="░"; fi; done
+    printf '%s' "$b"
+}
+
+cpu_usage_show() {  # cpu_usage_show 采样秒数
+    local sec=$1 t hz cores load1 load5 load15 x us=0 ni=0 sy=0 id=100 wa=0 hi=0 si=0 st=0 tot=0 pid p
+    t=$(mktemp)
+    hz=$(getconf CLK_TCK 2>/dev/null || echo 100)
+    cores=$(nproc 2>/dev/null || echo 1)
+    cpu_snap "$t.a"; sleep "$sec"; cpu_snap "$t.b"
+    read -r load1 load5 load15 _ < /proc/loadavg
+    # 总体: user nice system idle iowait irq softirq steal
+    read -r us ni sy id wa hi si st tot < <(awk '
+        FNR==NR && $1=="cpu" {for (i=2;i<=9;i++) a[i]=$i; next}
+        $1=="cpu" {t=0; for (i=2;i<=9;i++) {d[i]=$i-a[i]; t+=d[i]}; if (t<=0) t=1;
+                   for (i=2;i<=9;i++) printf "%.1f ", d[i]*100/t; print t}' "$t.a.stat" "$t.b.stat")
+    local used
+    used=$(awk -v i="$id" 'BEGIN{printf "%.0f", 100-i}')
+    title "CPU 占用状态"
+    echo -e " 总占用：${GREEN}${used}%${NC}（最近 ${sec} 秒，${cores} 核平均）"
+    echo " 负载：  ${load1} / ${load5} / ${load15}（1 / 5 / 15 分钟）"
+    echo
+    echo -e "${CYAN}各核占用${NC}"
+    awk 'FNR==NR && $1~/^cpu[0-9]/ {for (i=2;i<=9;i++) a[$1,i]=$i; next}
+         $1~/^cpu[0-9]/ {t=0; idl=0; for (i=2;i<=9;i++) {d=$i-a[$1,i]; t+=d; if (i==5) idl=d}
+                          if (t<=0) t=1; printf "%s %.0f\n", substr($1,4), (t-idl)*100/t}' "$t.a.stat" "$t.b.stat" |
+    while read -r n p; do printf ' 核%-3s %s %3s%%\n' "$n" "$(cpu_bar "$p")" "$p"; done
+    echo
+    echo -e "${CYAN}占用细节${NC}"
+    printf ' 用户程序   %5s%%  网站、机器人、代理等程序自己在计算\n' "$us"
+    printf ' 系统内核   %5s%%  内核在帮程序收发数据、读写文件\n' "$sy"
+    printf ' 低优先级   %5s%%  被调低优先级的后台任务（如探针）\n' "$ni"
+    printf ' 等待硬盘   %5s%%  CPU 空等硬盘读写，高说明硬盘慢或太忙\n' "$wa"
+    printf ' 网络中断   %5s%%  处理网卡收到的数据包，流量大时会升高\n' "$(awk -v a="$hi" -v b="$si" 'BEGIN{printf "%.1f", a+b}')"
+    printf ' 被宿主占用 %5s%%  宿主机拿走的时间，高说明 VPS 超售\n' "$st"
+    printf ' 空闲       %5s%%\n' "$id"
+    echo
+    echo -e "${CYAN}最耗 CPU 的程序（100% = 占满 1 个核）${NC}"
+    printf ' %-7s %6s  %s\n' "PID" "CPU" "程序"
+    awk -v hz="$hz" -v sec="$sec" 'FNR==NR {a[$1]=$2; next} ($1 in a) {d=$2-a[$1]; if (d>0) printf "%s %.1f\n", $1, d*100/(hz*sec)}' \
+        "$t.a.proc" "$t.b.proc" | sort -k2,2nr | head -n 10 > "$t.top"
+    if [[ -s "$t.top" ]]; then
+        while read -r pid p; do
+            local name cmd
+            name=$(cat "/proc/$pid/comm" 2>/dev/null) || continue
+            cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | sed 's/ *$//')
+            printf ' %-7s %5s%%  %s\n' "$pid" "$p" "$name"
+            [[ -n "$cmd" && "$cmd" != "$name" ]] && echo "                 ${cmd:0:44}"
+        done < "$t.top"
+    else
+        echo " （这段时间没有程序明显占用 CPU）"
+    fi
+    # 简单结论
+    echo
+    x=""
+    awk -v v="$used" 'BEGIN{exit !(v >= 90)}' && x+=" CPU 基本跑满，网站/程序可能变慢；"
+    awk -v v="$wa" 'BEGIN{exit !(v >= 20)}' && x+=" 等待硬盘偏高，瓶颈在硬盘不在 CPU；"
+    awk -v v="$st" 'BEGIN{exit !(v >= 10)}' && x+=" 被宿主占用偏高，这台 VPS 可能超售；"
+    awk -v a="$hi" -v b="$si" 'BEGIN{exit !(a + b >= 20)}' && x+=" 网络中断偏高，流量很大（代理/转发）；"
+    awk -v l="$load5" -v c="$cores" 'BEGIN{exit !(l > c * 1.5)}' && x+=" 5 分钟负载超过核心数 1.5 倍，任务在排队；"
+    if [[ -s "$t.top" ]]; then
+        read -r pid p < "$t.top"
+        awk -v v="$p" 'BEGIN{exit !(v >= 90)}' &&
+            x+=" 程序 $(cat "/proc/$pid/comm" 2>/dev/null || echo "PID $pid") 占满了约 $(awk -v v="$p" 'BEGIN{printf "%.0f", v/100}') 个核；"
+    fi
+    if [[ -n "$x" ]]; then echo -e " ${YELLOW}提示：${x%；}${NC}"; else echo -e " ${GREEN}状态正常${NC}"; fi
+    rm -f "$t" "$t".*
+}
+
+cpu_usage() {
+    local c k
+    title "CPU 占用状态"
+    mitem 1 "查看一次" "采样 3 秒"
+    mitem 2 "实时刷新" "每 3 秒，按回车停止"
+    mback
+    read -r -p "请选择 [1]: " c
+    case "${c:-1}" in
+        1) echo " 正在采样 3 秒 ..."; cpu_usage_show 3 ;;
+        2)
+            # 不整屏清空 (那样会闪): 旧画面留着, 新数据算好后从左上角逐行覆盖, 多出来的旧行再擦掉
+            local out line
+            printf '\033[2J\033[H\033[?25l'; echo " 正在采样 3 秒 ..."
+            while true; do
+                out=$(cpu_usage_show 3)
+                printf '\033[H'
+                while IFS= read -r line; do printf '%s\033[K\n' "$line"; done <<< "$out"
+                printf '\033[K\n （每 3 秒刷新，按回车停止）\033[K\n\033[J'
+                read -rt 1 k && break
+            done
+            printf '\033[?25h' ;;
+        *) return ;;
+    esac
+}
+
+# ---------------- 硬盘 IO 测试 ----------------
+io_dd() {  # io_dd 写|读 文件 MB数 -> 速度 (如 "512 MB/s")
+    local out
+    if [[ "$1" == 写 ]]; then
+        out=$(LC_ALL=C dd if=/dev/zero of="$2" bs=1M count="$3" oflag=direct conv=fdatasync 2>&1) ||
+            out=$(LC_ALL=C dd if=/dev/zero of="$2" bs=1M count="$3" conv=fdatasync 2>&1)   # 不支持直写的文件系统
+    else
+        sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
+        out=$(LC_ALL=C dd if="$2" of=/dev/null bs=1M iflag=direct 2>&1) ||
+            out=$(LC_ALL=C dd if="$2" of=/dev/null bs=1M 2>&1)
+    fi
+    awk '/copied/{print $(NF-1), $NF}' <<< "$out"
+}
+
+io_bench() {
+    local avail mb f yn w1 w2 w3 r
+    avail=$(df -Pm /root 2>/dev/null | awk 'NR==2{print $4}')
+    if ((${avail:-0} >= 2048)); then mb=1024
+    elif ((${avail:-0} >= 600)); then mb=256
+    else err "硬盘剩余空间不足（${avail:-0} MB），无法测试"; return; fi
+    title "硬盘 IO 测试"
+    echo " 硬盘剩余：${avail} MB"
+    warn "会临时写入一个 ${mb}MB 的测试文件（测完自动删除），期间硬盘会很忙"
+    read -rp "开始测试？[Y/n]: " yn
+    [[ "$yn" =~ ^[Nn]$ ]] && return
+    f="/root/.wsm-iotest.$$"
+    trap 'rm -f "${f:-}"' RETURN
+    echo
+    printf ' 写入测试 1/3 ...'; w1=$(io_dd 写 "$f" "$mb"); printf '\r\033[K'
+    printf ' 写入测试 2/3 ...'; w2=$(io_dd 写 "$f" "$mb"); printf '\r\033[K'
+    printf ' 写入测试 3/3 ...'; w3=$(io_dd 写 "$f" "$mb"); printf '\r\033[K'
+    printf ' 读取测试 ...';    r=$(io_dd 读 "$f" "$mb");  printf '\r\033[K'
+    rm -f "$f"; trap - RETURN
+    [[ -z "$w1$w2$w3$r" ]] && { err "测试失败（dd 没有输出结果）"; return; }
+    echo -e "${CYAN}测试结果${NC}（每次 ${mb}MB）"
+    echo -e " 写入：${GREEN}${w1:-失败}${NC} / ${GREEN}${w2:-失败}${NC} / ${GREEN}${w3:-失败}${NC}"
+    echo -e " 读取：${GREEN}${r:-失败}${NC}"
+    echo " 参考：机械硬盘约 100 MB/s，普通 SSD 300 MB/s 以上，NVMe 可达 1 GB/s 以上"
+}
+
+# ---------------- BBR ----------------
+BBR_CONF="/etc/sysctl.d/99-bbr.conf"
+
+bbr_menu() {
+    local cc yn avail
+    cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+    title "BBR 加速"
+    echo " 当前拥塞控制：${cc:-未知}    队列：$(sysctl -n net.core.default_qdisc 2>/dev/null)"
+    if [[ "$cc" == bbr ]]; then
+        echo -e " 状态：${GREEN}BBR 已开启${NC}"
+        read -rp "关闭 BBR（恢复系统默认 cubic）？[y/N]: " yn
+        [[ "$yn" =~ ^[Yy]$ ]] || return
+        rm -f "$BBR_CONF"
+        sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1
+        sysctl -w net.core.default_qdisc=fq_codel >/dev/null 2>&1
+        info "已关闭 BBR（当前：$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)）"
+        return
+    fi
+    echo " 状态：未开启"
+    echo " BBR 能明显提升高延迟、有丢包线路的速度，适合代理/中转服务器；只改内核参数，不占资源"
+    # 内核 4.9 以上才自带 BBR
+    if ! awk -v k="$(uname -r)" 'BEGIN{split(k, a, "[.-]"); exit !(a[1] > 4 || (a[1] == 4 && a[2] >= 9))}'; then
+        err "内核版本 $(uname -r) 太旧（需要 4.9 以上），请先升级内核"; return
+    fi
+    read -rp "开启 BBR？[Y/n]: " yn
+    [[ "$yn" =~ ^[Nn]$ ]] && return
+    modprobe tcp_bbr 2>/dev/null
+    avail=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null)
+    if [[ " $avail " != *" bbr "* ]]; then
+        err "这台机器的内核没有 BBR 模块（可用：${avail:-未知}）。OpenVZ/LXC 这类容器 VPS 不能自己改，需要服务商开启"
+        return
+    fi
+    printf 'net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n' > "$BBR_CONF"
+    sysctl -p "$BBR_CONF" >/dev/null 2>&1
+    cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+    if [[ "$cc" == bbr ]]; then
+        info "BBR 已开启，重启后也会保持（配置文件：${BBR_CONF}）"
+    else
+        rm -f "$BBR_CONF"
+        err "开启失败（当前：${cc:-未知}），这台 VPS 可能不允许修改内核参数"
+    fi
+}
+
+# ---------------- 禁 Ping ----------------
+# 用内核参数只关掉"回应 ping", 其他 ICMP (如探测网络 MTU 用的) 照常, 不影响正常上网和代理
+PING_CONF="/etc/sysctl.d/99-disable-ping.conf"
+
+ping_state() {
+    [[ "$(sysctl -n net.ipv4.icmp_echo_ignore_all 2>/dev/null)" == 1 ]] && echo "已禁用" || echo "允许"
+}
+
+ping_menu() {
+    local yn has6=0 f
+    sysctl -n net.ipv6.icmp.echo_ignore_all >/dev/null 2>&1 && has6=1
+    title "禁 Ping"
+    echo -e " 当前：IPv4 Ping ${GREEN}$(ping_state)${NC}$( ((has6)) && [[ "$(sysctl -n net.ipv6.icmp.echo_ignore_all 2>/dev/null)" == 1 ]] && echo "，IPv6 Ping 已禁用")"
+    if [[ "$(ping_state)" == 已禁用 ]]; then
+        read -rp "恢复 Ping（允许别人 ping 通这台服务器）？[y/N]: " yn
+        [[ "$yn" =~ ^[Yy]$ ]] || return
+        rm -f "$PING_CONF"
+        sysctl -w net.ipv4.icmp_echo_ignore_all=0 >/dev/null 2>&1
+        ((has6)) && sysctl -w net.ipv6.icmp.echo_ignore_all=0 >/dev/null 2>&1
+        # 别的配置文件里也写了禁 ping 的话, 重启后还会生效, 提示一下
+        f=$(grep -lE '^[[:space:]]*net\.ipv4\.icmp_echo_ignore_all[[:space:]]*=[[:space:]]*1' /etc/sysctl.conf /etc/sysctl.d/*.conf 2>/dev/null | head -1)
+        [[ -n "$f" ]] && warn "${f} 里也设置了禁 ping，重启后会再次生效，需要的话请删掉那一行"
+        info "Ping 已恢复（当前：$(ping_state)）"
+        return
+    fi
+    echo " 禁用后：别人 ping 这台服务器会超时，扫描器更难发现它；网站、SSH、代理不受影响"
+    echo " 注意：用 ping 做监控的工具（如部分测速、在线监控）会显示这台离线；tcping 照常可用"
+    read -rp "禁用 Ping？[y/N]: " yn
+    [[ "$yn" =~ ^[Yy]$ ]] || return
+    {
+        echo "# managed by wsm: 禁止回应 ping"
+        echo "net.ipv4.icmp_echo_ignore_all=1"
+        ((has6)) && echo "net.ipv6.icmp.echo_ignore_all=1"
+    } > "$PING_CONF"
+    sysctl -p "$PING_CONF" >/dev/null 2>&1
+    if [[ "$(ping_state)" == 已禁用 ]]; then
+        info "已禁用 Ping，重启后也会保持$( ((has6)) && echo "（IPv4 和 IPv6）")"
+    else
+        rm -f "$PING_CONF"
+        err "设置失败，这台 VPS 可能不允许修改内核参数（如 OpenVZ/LXC 容器）"
+    fi
+}
+
+# ---------------- 回程线路检测 ----------------
+# 从本机 traceroute 到国内 4 个城市的电信/联通/移动, 按经过的骨干网 IP 段判断线路类型
+# 判断规则参考开源项目 oneclickvirt/backtrace (IP 段 + 经过顺序), 结果是推测, 仅供参考
+# 每个目标: 名称 首选IP 运营商 备用IP...
+# 备用 IP 取自 spiritLHLS/icmp_targets (MIT 协议) 2026-10-16 的数据: 各省会回应 ping 的地址, 首选不回应时换着试
+RT_TARGETS=(
+    "北京电信 219.141.140.10 CT 106.37.68.13 106.37.68.245"
+    "北京联通 202.106.195.68 CU 221.222.185.232 221.222.185.246"
+    "北京移动 221.179.155.161 CM 211.136.25.153 211.136.25.12"
+    "上海电信 202.96.209.133 CT 101.226.94.50 101.226.94.13"
+    "上海联通 210.22.97.1 CU 112.64.235.107 112.64.235.17"
+    "上海移动 211.136.112.200 CM 117.185.117.117 117.185.117.17"
+    "广州电信 58.60.188.222 CT 14.22.119.35 14.22.119.2"
+    "广州联通 210.21.196.6 CU 122.13.24.8 122.13.24.1"
+    "广州移动 120.196.165.24 CM 211.139.145.129 211.139.145.13"
+    "成都电信 61.139.2.69 CT 118.112.1.150 118.112.1.245"
+    "成都联通 119.6.6.6 CU 119.6.217.100 119.6.217.10"
+    "成都移动 211.137.96.205 CM 36.133.60.2 36.133.60.241"
+)
+
+# 每一跳的 IP -> 所属骨干网
+RT_ASN_AWK='
+function asn(ip,  a) {
+    split(ip, a, ".")
+    if (ip ~ /^59\.43\./) return "AS4809"
+    if (ip ~ /^202\.97\./) return "AS4134"
+    if (ip ~ /^(218\.105|210\.51)\./) return "AS9929"
+    if (ip ~ /^(202\.77|43\.252|61\.14)\./) return "AS10099"
+    if (ip ~ /^219\.158\./) return "AS4837"
+    if (a[1] == 223 && ((a[2] == 118 && a[3] == 32) || (a[2] == 120 && a[3] >= 128) ||
+        (a[2] == 119 && (a[3] == 8 || a[3] == 9 || (a[3] >= 10 && a[3] <= 15) || (a[3] >= 26 && a[3] <= 29) ||
+         (a[3] >= 32 && a[3] <= 37) || a[3] == 74 || a[3] == 75 || a[3] == 88 || a[3] == 89 ||
+         a[3] == 100 || a[3] == 252 || a[3] == 253)))) return "AS58807"
+    if (ip ~ /^223\.(118|119|120|121)\./) return "AS58453"
+    if (ip ~ /^(221\.183|111\.24)\./) return "AS9808"
+    if (ip ~ /^(69\.194|203\.22)\./) return "AS23764"
+    return ""
+}
+'
+
+rt_parse() {  # rt_parse traceroute输出文件 : 每跳一行 "跳数 IP 毫秒 骨干网"
+    awk "$RT_ASN_AWK"'
+        $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9.]+$/ { ms = ($3 ~ /^[0-9.]+$/) ? $3 : "-"; print $1, $2, ms, asn($2) }
+        $1 ~ /^[0-9]+$/ && $2 == "*"       { print $1, "*", "-", "" }' "$1"
+}
+
+rt_classify() {  # rt_classify 运营商(CT/CU/CM) 解析文件 -> 线路名称
+    awk -v c="$1" '
+        { if ($4 != "") { n[$4]++; if (!($4 in f)) f[$4] = NR } }
+        function first(k) { return (k in f) ? f[k] : -1 }
+        END {
+            if (c == "CT") {
+                if (first("AS4809") >= 0) {
+                    if (n["AS4809"] < 2) { print "电信CN2混合 [优质线路]"; exit }
+                    if (first("AS4134") < 0 || (f["AS4809"] < f["AS4134"] && n["AS4134"] <= 1)) { print "电信CN2 GIA [精品线路]"; exit }
+                    if (f["AS4809"] < f["AS4134"]) { print "电信CN2混合 [优质线路]"; exit }
+                    print "电信CN2 GT [优质线路]"; exit
+                }
+                if (first("AS23764") >= 0) { print "电信CTGNET [精品线路]"; exit }
+                if (n["AS4134"] > 1) { print "电信163 [普通线路]"; exit }
+                print (n["AS4134"] == 1) ? "只看到电信入口，无法判断" : "没看到电信骨干网"; exit
+            }
+            if (c == "CU") {
+                if (first("AS9929") >= 0) {
+                    if (first("AS4837") >= 0 && f["AS4837"] < f["AS9929"]) { print "联通9929混合 [优质线路]"; exit }
+                    print "联通9929 [优质线路]"; exit
+                }
+                if (first("AS10099") >= 0) { print "联通CUG [优质线路]"; exit }
+                if (n["AS4837"] > 1) { print "联通4837 [普通线路]"; exit }
+                print (n["AS4837"] == 1) ? "只看到联通入口，无法判断" : "没看到联通骨干网"; exit
+            }
+            if (first("AS58807") >= 0) {
+                if (first("AS58453") >= 0 && f["AS58453"] < f["AS58807"]) { print "移动CMIN2混合 [优质线路]"; exit }
+                print "移动CMIN2 [精品线路]"; exit
+            }
+            if (first("AS58453") >= 0) { print "移动CMI [普通线路]"; exit }
+            if (first("AS9808") >= 0) { print "移动CMNET [普通线路]"; exit }
+            print "没看到移动骨干网"
+        }' "$2"
+}
+
+rt_one() {  # rt_one 输出前缀 运营商 IP... : 最多试 3 次 (换备用 IP / 换探测方式), 判断出线路就停
+    local out=$1 c=$2 ip k=0 label best="" bestn=-1 n
+    shift 2
+    for ip in "$@"; do
+        k=$((k + 1)); ((k > 3)) && break
+        if ((k < 3)); then
+            traceroute -n -I -q 1 -w 2 -m 30 "$ip" > "$out.raw" 2>/dev/null       # ICMP
+        else
+            traceroute -n -T -p 80 -q 1 -w 2 -m 30 "$ip" > "$out.raw" 2>/dev/null # 最后一次换 TCP, 有的线路只放行 TCP
+        fi
+        rt_parse "$out.raw" > "$out.try"
+        label=$(rt_classify "$c" "$out.try")
+        n=$(awk '$4 != ""' "$out.try" | wc -l)                         # 认出骨干网的跳数
+        if ((n > bestn)); then bestn=$n; cp "$out.try" "$out.hops"; echo "$ip $k" > "$out.used"; fi
+        [[ "$label" == *线路* ]] && break                                 # 已判断出线路
+    done
+    rm -f "$out.raw" "$out.try"
+}
+
+ensure_traceroute() { ensure_pkg traceroute traceroute "回程线路检测"; }
+
+route_check() {
+    local t i name ip c alts tries line label last ms c1 c2 sel myip
+    title "回程线路检测"
+    echo " 回程 = 数据从这台服务器回到国内的路线，决定你下载/看视频的速度和稳定性"
+    echo " 检测北京、上海、广州、成都的电信 / 联通 / 移动，约 30 秒"
+    ensure_traceroute || return
+    t=$(mktemp -d)
+    printf ' 检测中（判断不出的会换备用地址重试，约 30～90 秒）...'
+    for i in "${!RT_TARGETS[@]}"; do
+        read -r name ip c alts <<< "${RT_TARGETS[i]}"
+        # shellcheck disable=SC2086
+        rt_one "$t/$i" "$c" "$ip" $alts &
+    done
+    wait
+    printf '\r\033[K'
+    echo -e "${CYAN}检测结果${NC}（线路是根据途经的骨干网推测的）"
+    for i in "${!RT_TARGETS[@]}"; do
+        read -r name ip c _ <<< "${RT_TARGETS[i]}"
+        [[ -f "$t/$i.used" ]] && read -r ip tries < "$t/$i.used"
+        label=$(rt_classify "$c" "$t/$i.hops")
+        # 到达目标的延迟; 目标没回应时不显示中途某一跳的延迟, 免得误导
+        ms=$(awk -v ip="$ip" '$2 == ip && $3 != "-" {printf "%.0f ms", $3; exit}' "$t/$i.hops")
+        case "$label" in
+            *精品*) c1=$GREEN ;; *优质*) c1=$CYAN ;; *普通*) c1=$YELLOW ;; *) c1=$NC ;;
+        esac
+        printf ' %s  %b%s%b  %s\n' "$name" "$c1" "$label" "$NC" "${ms:-终点不回应}"
+    done
+    echo
+    echo " 说明：精品 > 优质 > 普通。电信 CN2 GIA、移动 CMIN2、联通 9929 一般最稳；163/4837/CMI 晚高峰容易拥堵"
+    echo " 终点不回应：目标地址不回 ping，只是测不到延迟，线路判断照样有效"
+    echo " 没看到骨干网 / 无法判断：途中路由器不回应探测，换了备用地址和方式还是看不到，多测几次或换时间再测"
+    echo " 去程（国内到这台）在服务器上测不了，要从国内发起。可在手机/电脑浏览器打开："
+    myip=$(curl -s4 --max-time 5 ip.sb 2>/dev/null)
+    echo -e "   ${CYAN}https://www.itdog.cn/tracert/${myip:-你的服务器IP}${NC}"
+    echo
+    read -rp "查看某一条的详细路由？输入序号 1-${#RT_TARGETS[@]}（回车跳过）: " sel
+    if [[ "$sel" =~ ^[0-9]+$ ]] && ((sel >= 1 && sel <= ${#RT_TARGETS[@]})); then
+        read -r name ip c _ <<< "${RT_TARGETS[sel-1]}"
+        [[ -f "$t/$((sel - 1)).used" ]] && read -r ip tries < "$t/$((sel - 1)).used"
+        echo
+        echo -e "${CYAN}${name}（${ip}，第 ${tries:-1} 次尝试）详细路由${NC}"
+        printf ' %-4s %-16s %-9s %s\n' "跳" "IP" "延迟" "骨干网"
+        while read -r h hip hms has; do
+            case "$has" in
+                AS4809) has="电信CN2" ;; AS4134) has="电信163" ;; AS23764) has="电信CTGNET" ;;
+                AS9929) has="联通9929" ;; AS10099) has="联通CUG" ;; AS4837) has="联通4837" ;;
+                AS58807) has="移动CMIN2" ;; AS58453) has="移动CMI" ;; AS9808) has="移动CMNET" ;;
+            esac
+            printf ' %-4s %-16s %-9s %s\n' "$h" "$hip" "$([[ "$hms" == - ]] && echo - || echo "${hms}ms")" "$has"
+        done < "$t/$((sel - 1)).hops"
+    fi
+    rm -rf "$t"
+}
+
+# ---------------- 流媒体 / AI 解锁检测 ----------------
+# 按各平台网页/接口的返回特征判断; 平台改版后可能不准, 结果仅供参考
+UA_WEB="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+
+ul_netflix() {
+    local r1 r2 region
+    r1=$(curl $UL_OPT -fsL 'https://www.netflix.com/title/81280792' -H 'accept-language: en-US,en;q=0.9' -A "$UA_WEB")
+    r2=$(curl $UL_OPT -fsL 'https://www.netflix.com/title/70143836' -H 'accept-language: en-US,en;q=0.9' -A "$UA_WEB")
+    [[ -z "$r1" || -z "$r2" ]] && { echo "? 检测失败（连不上）"; return; }
+    if grep -q 'Oh no!' <<< "$r1" && grep -q 'Oh no!' <<< "$r2"; then echo "! 仅自制剧"; return; fi
+    region=$(sed -n 's/.*"id":"\([^"]*\)".*"countryName":"[^"]*".*/\1/p' <<< "$r1" | head -1)
+    echo "Y 完整解锁${region:+（地区 $region）}"
+}
+
+ul_disney() {
+    local u
+    u=$(curl $UL_OPT -sL 'https://www.disneyplus.com' -o /dev/null -w '%{http_code} %{url_effective}' -A "$UA_WEB")
+    [[ -z "$u" || "$u" == 000* ]] && { echo "? 检测失败（连不上）"; return; }
+    [[ "$u" == 403* ]] && { echo "N 不支持（IP 被封）"; return; }
+    if [[ "$u" =~ preview|unavailable ]]; then echo "N 不支持"; else echo "Y 可访问（简易判断）"; fi
+}
+
+ul_youtube() {
+    local r region
+    r=$(curl $UL_OPT -sL 'https://www.youtube.com/premium' -H 'accept-language: en-US,en;q=0.9' \
+        -H 'cookie: SOCS=CAISOAgDEitib3FfaWRlbnRpdHlmcm9udGVuZHVpc2VydmVyXzIwMjQwNTI2LjAxX3AwGgV6aC1DTiACGgYIgMnpsgY; PREF=f7=4000' -A "$UA_WEB")
+    [[ -z "$r" ]] && { echo "? 检测失败（连不上）"; return; }
+    grep -q 'www.google.cn' <<< "$r" && { echo "N 不支持（地区 CN）"; return; }
+    grep -qi 'Premium is not available in your country' <<< "$r" && { echo "N 不支持"; return; }
+    region=$(grep -o '"INNERTUBE_CONTEXT_GL" *: *"[^"]*"' <<< "$r" | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+    if grep -qi 'ad-free' <<< "$r"; then echo "Y 支持${region:+（地区 $region）}"; else echo "? 检测失败（页面异常）"; fi
+}
+
+ul_prime() {
+    local r region
+    r=$(curl $UL_OPT -sL 'https://www.primevideo.com' -A "$UA_WEB")
+    [[ -z "$r" ]] && { echo "? 检测失败（连不上）"; return; }
+    grep -qi 'isServiceRestricted' <<< "$r" && { echo "N 不支持"; return; }
+    region=$(grep -o '"currentTerritory":"[^"]*"' <<< "$r" | head -1 | cut -d'"' -f4)
+    if [[ -n "$region" ]]; then echo "Y 支持（地区 $region）"; else echo "? 检测失败（页面异常）"; fi
+}
+
+ul_chatgpt() {
+    local r1 r2 loc
+    r1=$(curl $UL_OPT -s 'https://api.openai.com/compliance/cookie_requirements' -H 'authorization: Bearer null' \
+        -H 'origin: https://platform.openai.com' -H 'referer: https://platform.openai.com/' -A "$UA_WEB")
+    r2=$(curl $UL_OPT -s 'https://ios.chat.openai.com/' -A "$UA_WEB")
+    [[ -z "$r1" || -z "$r2" ]] && { echo "? 检测失败（连不上）"; return; }
+    loc=$(curl $UL_OPT -s 'https://chatgpt.com/cdn-cgi/trace' | sed -n 's/^loc=//p')
+    local a=0 b=0
+    grep -qi 'unsupported_country' <<< "$r1" && a=1
+    grep -qi 'VPN' <<< "$r2" && b=1
+    if ((a == 0 && b == 0)); then echo "Y 支持${loc:+（地区 $loc）}"
+    elif ((a == 1 && b == 1)); then echo "N 不支持${loc:+（地区 $loc）}"
+    elif ((a == 0)); then echo "! 仅网页版可用（App 不行）"
+    else echo "! 仅 App 可用（网页版不行）"; fi
+}
+
+ul_claude() {
+    local u
+    u=$(curl $UL_OPT -sL -o /dev/null -w '%{url_effective}' -A "$UA_WEB" 'https://claude.ai/')
+    [[ -z "$u" ]] && { echo "? 检测失败（连不上）"; return; }
+    case "$u" in
+        https://claude.ai/*) echo "Y 支持" ;;
+        *app-unavailable-in-region*) echo "N 不支持（地区限制）" ;;
+        *) echo "? 无法判断（跳转到 ${u:0:40}）" ;;
+    esac
+}
+
+ul_gemini() {
+    # 用 Gemini API 判断: 故意不带有效 key, 地区支持时返回 "API key not valid", 不支持时返回 "location is not supported"
+    # (网页里的特征字符串会随改版失效, 接口的这两种报错更稳定)
+    local r cc
+    r=$(curl $UL_OPT -s 'https://generativelanguage.googleapis.com/v1beta/models?key=ssb-check' -A "$UA_WEB")
+    cc=$(curl $UL_OPT -s 'https://www.cloudflare.com/cdn-cgi/trace' | sed -n 's/^loc=//p')
+    if grep -qi 'location is not supported' <<< "$r"; then echo "N 不支持${cc:+（地区 $cc）}"; return; fi
+    if grep -qiE 'API key not valid|API_KEY_INVALID' <<< "$r"; then echo "Y 支持${cc:+（地区 $cc）}"; return; fi
+    # 接口没给出明确结果时, 退回网页判断
+    r=$(curl $UL_OPT -sL 'https://gemini.google.com' -A "$UA_WEB")
+    [[ -z "$r" ]] && { echo "? 检测失败（连不上）"; return; }
+    if grep -q '45631641,null,true' <<< "$r"; then echo "Y 支持${cc:+（地区 $cc）}"; else echo "? 无法判断"; fi
+}
+
+unlock_check() {
+    local c t i n v ipinfo f
+    local -a names=("Netflix" "Disney+" "YouTube Premium" "Prime Video" "ChatGPT" "Claude" "Gemini")
+    local -a funcs=(ul_netflix ul_disney ul_youtube ul_prime ul_chatgpt ul_claude ul_gemini)
+    title "流媒体 / AI 解锁检测"
+    mitem 1 "用 IPv4 检测"
+    mitem 2 "用 IPv6 检测"
+    mback
+    read -r -p "请选择 [1]: " c
+    case "${c:-1}" in
+        1) UL_OPT="-4 --max-time 10" ;;
+        2) curl -6 -s --max-time 5 https://www.cloudflare.com/cdn-cgi/trace >/dev/null 2>&1 || { err "这台服务器没有可用的 IPv6"; return; }
+           UL_OPT="-6 --max-time 10" ;;
+        *) return ;;
+    esac
+    ipinfo=$(curl $UL_OPT -s https://www.cloudflare.com/cdn-cgi/trace)
+    echo " 出口 IP：$(sed -n 's/^ip=//p' <<< "$ipinfo")    地区：$(sed -n 's/^loc=//p' <<< "$ipinfo")"
+    printf ' 检测中（约 10 秒）...'
+    t=$(mktemp -d)
+    for i in "${!funcs[@]}"; do ( "${funcs[i]}" > "$t/$i" 2>/dev/null ) & done
+    wait
+    printf '\r\033[K'
+    for i in "${!funcs[@]}"; do
+        ((i == 0)) && echo -e "${CYAN}流媒体${NC}"
+        ((i == 4)) && echo -e "${CYAN}AI${NC}"
+        v=$(cat "$t/$i"); f=${v:0:1}; v=${v:2}
+        case "$f" in
+            Y) printf '  %-16s %b✔ %s%b\n' "${names[i]}" "$GREEN" "$v" "$NC" ;;
+            N) printf '  %-16s %b✘ %s%b\n' "${names[i]}" "$RED" "$v" "$NC" ;;
+            !) printf '  %-16s %b! %s%b\n' "${names[i]}" "$YELLOW" "$v" "$NC" ;;
+            *) printf '  %-16s ? %s\n' "${names[i]}" "${v:-检测失败}" ;;
+        esac
+    done
+    rm -rf "$t"
+    echo
+    echo " 说明：结果按各平台网页的特征判断，平台改版后可能不准；Disney+ 只做了简易判断"
+}
+# ---------------- 服务器工具的菜单
+bbr_state() { [[ $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null) == bbr ]]; }
+
+menu_net() {  # 网络设置
+    local c
+    while true; do
+        title "网络设置"
+        echo "  BBR: $(bbr_state && echo "${G}已开启${N}" || echo "${D}未开启${N}")    Ping: $([[ $(ping_state) == 已禁用 ]] && echo "${Y}已禁用${N}" || echo "${G}允许${N}")"
+        echo
+        mitem 1 "BBR 加速" "开启 / 关闭"
+        mitem 2 "禁 Ping" "禁用 / 恢复"
+        mitem 3 "端口转发" "TCP / UDP 中转"
+        mback
+        read -r -p "请选择: " c || return 0
+        case "$c" in
+            1) (bbr_menu); pause ;;
+            2) (ping_menu); pause ;;
+            3) forward_menu ;;
+            0|q|Q) return 0 ;;
+            *) warn "无效选择" ;;
+        esac
+    done
+}
+
+menu_check() {  # 网络检测
+    local c
+    while true; do
+        title "网络检测"
+        mitem 1 "回程线路检测" "电信 / 联通 / 移动"
+        mitem 2 "流媒体 / AI 解锁" "Netflix / YouTube / ChatGPT ..."
+        mback
+        read -r -p "请选择: " c || return 0
+        case "$c" in
+            1) (route_check); pause ;;
+            2) (unlock_check); pause ;;
+            0|q|Q) return 0 ;;
+            *) warn "无效选择" ;;
+        esac
+    done
+}
+
+menu_perf() {  # 性能测试
+    local c
+    while true; do
+        title "性能测试"
+        mitem 1 "CPU 占用状态" "各核 / 细节 / 最耗 CPU 的程序"
+        mitem 2 "CPU 性能测试" "单核 / 多核"
+        mitem 3 "内存性能测试" "读 / 写速度"
+        mitem 4 "硬盘 IO 测试" "读 / 写速度"
+        mback
+        read -r -p "请选择: " c || return 0
+        case "$c" in
+            1) (cpu_usage); pause ;;
+            2) (cpu_bench); pause ;;
+            3) (mem_bench); pause ;;
+            4) (io_bench); pause ;;
+            0|q|Q) return 0 ;;
+            *) warn "无效选择" ;;
+        esac
+    done
 }
 
 # ================================================================ CPU 性能测试
@@ -6701,38 +8205,62 @@ cpu_bench() {
   fi
 }
 
-menu_system() {
-  local c
-  while true; do
-    title "系统与服务"
-    cat <<'EOF'
-   1) 服务管理 (启停/重启/自启)
-   2) 检测并重载 Nginx 配置
-   3) 查看 Nginx 全局错误日志
-   4) 磁盘与内存使用情况
-   5) Telegram 告警
-   6) 清理日志
-   7) Swap 虚拟内存
-   8) 服务器时区 (定时任务按它执行)
-   9) CPU 性能测试 (单核/多核)
-EOF
-    echo "   0) ${G}返回${N}"
-    read -r -p "请选择: " c || return 0
-    case $c in
-      1) (manage_service) ;;
-      2) nginx -t && systemctl reload nginx && info "配置正确, 已重载"; pause ;;
-      3) tail -n 50 /var/log/nginx/error.log 2>/dev/null || warn "暂无日志"; pause ;;
-      4) df -h /; echo; free -h; du -sh "$WWW_ROOT" "$BACKUP_DIR" 2>/dev/null; pause ;;
-      5) tg_menu ;;
-      6) (logs_clean); pause ;;
-      7) swap_menu ;;
-      8) (tz_menu); pause ;;
-      9) (cpu_bench); pause ;;
-      0|q) return 0 ;;
-      *) warn "无效选择" ;;
-    esac
-  done
+os_short() {  # 系统简称, 如 Debian 12 / Ubuntu 24.04
+  local n v
+  n=$( . /etc/os-release 2>/dev/null; echo "${ID:-linux}" ); v=$( . /etc/os-release 2>/dev/null; echo "${VERSION_ID:-}" )
+  case $n in
+    debian) n=Debian ;; ubuntu) n=Ubuntu ;; centos) n=CentOS ;; rocky) n=Rocky ;; almalinux) n=Alma ;; rhel) n=RHEL ;; ol) n=Oracle ;;
+  esac
+  echo "$n${v:+ $v}"
 }
+
+pct_color() {  # pct_color 百分比 : >=90 红, >=80 黄, 其他正常
+  if (($1 >= 90)); then printf '%s' "$R"; elif (($1 >= 80)); then printf '%s' "$Y"; else printf '%s' "$T"; fi
+}
+
+kv() { printf '%s%s%s %s' "$D" "$1" "$N" "$2"; }   # kv 标签 值 : 状态栏里的一项
+
+dashboard() {  # 主菜单顶部状态
+  local disk mem load n=0 f phps w=52
+  disk=$(df -P / 2>/dev/null | awk 'NR==2{gsub("%","",$5); print $5+0}')
+  mem=$(free -m 2>/dev/null | awk '/^Mem:/{if ($2 > 0) printf "%d", ($2-$7)*100/$2; else print 0}')
+  read -r load _ < /proc/loadavg
+  echo
+  printf '  %s╭%s╮%s\n' "$L" "$(rep ─ $w)" "$N"
+  printf '  %s│%s  %sWSM%s %sServer Manager%s  %sv%s%s\e[%dG%s│%s\n' "$L" "$N" "$BD$B" "$N" "$T" "$N" "$D" "$WSM_VER" "$N" $((w + 4)) "$L" "$N"
+  printf '  %s│%s  %s   %s\e[%dG%s│%s\n' "$L" "$N" "$(kv IP "$T${SERVER_IP:-未知}$N")" "$(kv 系统 "$T$(os_short)$N")" $((w + 4)) "$L" "$N"
+  printf '  %s╰%s╯%s\n' "$L" "$(rep ─ $w)" "$N"
+  printf '  %s   %s   %s\n' "$(kv SSH端口 "$T$(ssh_port_now)$N")" \
+    "$(kv 密码登录 "$(ssh_nopass_now && echo "${G}已关闭" || echo "${Y}开启")$N")" \
+    "$(kv BBR "$(bbr_state && echo "${G}开启" || echo "${D}未开启")$N")"
+  printf '  %s   %s   %s\n' "$(kv 磁盘 "$(pct_color "${disk:-0}")${disk:-?}%$N")" \
+    "$(kv 内存 "$(pct_color "${mem:-0}")${mem:-?}%$N")" "$(kv 负载 "$T$load$N")"
+  if web_installed; then
+    for f in "$META_DIR"/*.conf; do [[ -e $f ]] && n=$((n + 1)); done
+    phps=$(php_installed | sort -V | tr '\n' ' '); phps=${phps% }
+    printf '  %s   %s   %s\n' "$(kv Nginx "$(systemctl is-active --quiet nginx && echo "${G}● 运行中" || echo "${R}● 未运行")$N")" \
+      "$(kv PHP "$T${phps:-无}$N")" "$(kv 站点 "$T$n 个$N")"
+  else
+    printf '  %s\n' "$(kv 网站环境 "${D}○ 未安装$N")"
+  fi
+}
+
+web_dashboard() {  # 网站面板顶部状态
+  local n=0 f phps logmb
+  for f in "$META_DIR"/*.conf; do [[ -e $f ]] && n=$((n + 1)); done
+  phps=$(php_installed | sort -V | tr '\n' ' '); phps=${phps% }
+  printf '  %s   %s   %s\n' "$(kv Nginx "$(svc_state nginx)")" "$(kv 站点 "$T$n 个$N")" "$(kv PHP "$T${phps:-未安装}$N")"
+  if unit_exists mariadb; then printf '  %s\n' "$(kv MariaDB "$(svc_state mariadb)")"; fi
+  logmb=$(du -sm /var/log/nginx 2>/dev/null | awk '{print $1+0}')
+  if (( ${logmb:-0} >= 1024 )); then
+    echo "  ${Y}提示: 网站日志已占用 ${logmb}MB, 7 → 清理网站日志${N}"
+  fi
+  if (( $(swap_total) == 0 && $(free -m | awk '/^Mem:/{print $2+0}') <= 4096 )); then
+    echo "  ${Y}提示: 没有 Swap, 内存吃紧时数据库容易被杀, 主菜单 6 → Swap 可创建${N}"
+  fi
+}
+
+sec() { printf '\n  %s%s%s %s%s%s\n' "$S$BD" "$1" "$N" "$L" "$(rep ─ $((48 - $(disp_w "$1"))))" "$N"; }
 
 main_menu() {
   local c
@@ -6740,30 +8268,33 @@ main_menu() {
   ui_load
   realip_ensure
   [[ -f $GUARD_CONF ]] && guard_ensure_global >/dev/null 2>&1
-  wsm_logrotate
+  web_installed && wsm_logrotate
   while true; do
     dashboard
+    sec 服务器
+    mitem 1 "系统信息" "配置 / 负载 / IP / 虚拟化"
+    mitem 2 "SSH 安全" "端口 / 密钥 / 密码登录"
+    mitem 3 "网络设置" "BBR / 禁 Ping / 端口转发"
+    mitem 4 "网络检测" "回程线路 / 流媒体 / AI 解锁"
+    mitem 5 "性能测试" "CPU / 内存 / 硬盘 IO"
+    mitem 6 "系统维护" "服务 / Swap / 时区 / 告警 / 组件"
+    sec 网站
+    if web_installed; then mitem 7 "网站面板 ›" "站点 / SSL / PHP / 数据库 / 备份"
+    else mitem 7 "安装网站环境" "Nginx + PHP + MariaDB 一键安装"; fi
+    mitem 8 "程序下载" "3x-ui / 哪吒 / WordPress …"
+    printf '\n  %s%s%s\n' "$L" "$(rep ─ 50)" "$N"
+    printf '  %s%3s%s  %s%s%s\e[24G%s%s0%s  %s退出%s\n' "$BD$B" 9 "$N" "$T" "更新 / 卸载" "$N" "$BD$R" "" "$N" "$R" "$N"
     echo
-    mi 1 "$(ico web)" "网站管理" "新建/设置/删除"
-    mi 2 "$(ico ssl)" "SSL 证书" "申请/续期"
-    mi 3 "$(ico php)" "PHP 管理" "版本/扩展/参数"
-    mi 4 "$(ico db)" "数据库" "创建/备份/phpMyAdmin"
-    mi 5 "$(ico bak)" "备份与搬家" "全量/异地/定时"
-    mi 6 "$(ico sys)" "系统与服务" "服务/日志/Swap/告警"
-    mi 7 "$(ico app)" "程序下载" "扩展程序/环境/工具"
-    mi 8 "$(ico sec)" "安全防护" "源站/CDN/防CC/SSH"
-    mi 9 "$(ico upd)" "更新脚本" "从 Git 仓库更新"
-    printf '  0) %s\e[8G%s\n' "$(ico exit)" "${R}退出${N}"
     read -r -p "请选择: " c || exit 0
     case $c in
-      1) menu_sites ;;
-      2) menu_ssl ;;
-      3) menu_php ;;
-      4) menu_db ;;
-      5) menu_backup ;;
+      1) (sys_info); pause ;;
+      2) ssh_menu ;;
+      3) menu_net ;;
+      4) menu_check ;;
+      5) menu_perf ;;
       6) menu_system ;;
-      7) menu_store ;;
-      8) menu_security ;;
+      7) if web_installed; then menu_web; else web_install_flow && menu_web; fi ;;
+      8) menu_store ;;
       9) update_menu ;;
       0|q) exit 0 ;;
       *) warn "无效选择" ;;
@@ -6771,12 +8302,331 @@ main_menu() {
   done
 }
 
+web_install_flow() {  # 主菜单 [安装网站环境]
+  title "安装网站环境"
+  echo "  将安装: ${T}Nginx${N}、${T}certbot${N} (证书)、${T}PHP${N} (可选版本)、${T}MariaDB${N} (可选)"
+  echo "  装好后会开机自启; 以后不需要了可以在 网站面板 → 卸载网站环境 里完整卸载"
+  echo
+  confirm "开始安装?" y || return 1
+  (cmd_install) || true
+  web_installed || { err "网站环境没有安装成功"; pause; return 1; }
+  pause
+}
+
+menu_web() {  # 网站面板
+  local c
+  while true; do
+    web_installed || return 0
+    title "网站面板"
+    web_dashboard
+    echo
+    mitem 1 "网站管理" "新建 / 设置 / 删除 / 统计"
+    mitem 2 "SSL 证书" "申请 / 续期"
+    mitem 3 "PHP 管理" "版本 / 扩展 / 参数"
+    mitem 4 "数据库" "创建 / 备份 / phpMyAdmin"
+    mitem 5 "备份与搬家" "全量 / 异地 / 定时"
+    mitem 6 "安全防护" "源站 / CDN / 防CC / 防篡改"
+    mitem 7 "Nginx 维护" "重载 / 错误日志 / 清理日志"
+    mitem 8 "卸载网站环境" "完整卸载 Nginx / PHP / MariaDB"
+    mback
+    read -r -p "请选择: " c || return 0
+    case $c in
+      1) menu_sites ;;
+      2) menu_ssl ;;
+      3) menu_php ;;
+      4) menu_db ;;
+      5) menu_backup ;;
+      6) menu_security ;;
+      7) menu_nginx ;;
+      8) (web_uninstall); pause ;;
+      0|q) return 0 ;;
+      *) warn "无效选择" ;;
+    esac
+  done
+}
+
+menu_nginx() {
+  local c
+  while true; do
+    title "Nginx 维护"
+    mitem 1 "检测并重载配置"
+    mitem 2 "查看全局错误日志" "最近 50 行"
+    mitem 3 "清理网站日志"
+    mback
+    read -r -p "请选择: " c || return 0
+    case $c in
+      1) nginx -t && systemctl reload nginx && info "配置正确, 已重载"; pause ;;
+      2) tail -n 50 /var/log/nginx/error.log 2>/dev/null || warn "暂无日志"; pause ;;
+      3) (logs_clean); pause ;;
+      0|q) return 0 ;;
+      *) warn "无效选择" ;;
+    esac
+  done
+}
+
+menu_system() {  # 系统维护
+  local c
+  while true; do
+    title "系统维护"
+    echo "  $(kv Swap "$T$(swap_state)$N")   $(kv 时区 "$T$(tz_get)$N")   $(kv 告警 "$(tg_ready 2>/dev/null && [[ -f $TG_CRON ]] && echo "${G}开" || echo "${D}关")$N")"
+    echo
+    mitem 1 "服务管理" "启停 / 重启 / 开机自启"
+    mitem 2 "磁盘与内存" "使用情况"
+    mitem 3 "Swap 虚拟内存" "创建 / 删除"
+    mitem 4 "服务器时区" "定时任务按它执行"
+    mitem 5 "Telegram 告警" "服务挂了 / 磁盘满 / 证书到期"
+    mitem 6 "已安装组件" "wsm 装过的软件, 可卸载"
+    mback
+    read -r -p "请选择: " c || return 0
+    case $c in
+      1) (manage_service) ;;
+      2) df -h /; echo; free -h; web_installed && du -sh "$WWW_ROOT" "$BACKUP_DIR" 2>/dev/null; pause ;;
+      3) swap_menu ;;
+      4) (tz_menu); pause ;;
+      5) tg_menu ;;
+      6) comp_menu ;;
+      0|q) return 0 ;;
+      *) warn "无效选择" ;;
+    esac
+  done
+}
+
+# ================================================================ 已安装组件 / 卸载
+# 基础系统工具: 就算是 wsm 装的也不卸载 (很多程序都依赖它们)
+COMP_KEEP=" curl ca-certificates openssl cron cronie unzip tar gzip epel-release dnf-plugins-core software-properties-common apt-transport-https lsb-release python3 iptables e2fsprogs "
+# 测试/检测用的小工具 (可一键清理)
+COMP_TOOLS="sysbench traceroute"
+
+comp_list() {  # 输出: 包名<TAB>用途<TAB>日期  (只列现在还装着的)
+  local p f d t
+  local -A seen=()
+  if [[ -f $LEDGER ]]; then
+    while IFS=$'\t' read -r p f d; do
+      [[ -n $p ]] || continue
+      if [[ $p == @rclone ]]; then [[ -f /usr/bin/rclone ]] || { ledger_del "$p"; continue; }
+      else pkg_has "$p" || { ledger_del "$p"; continue; }; fi
+      [[ $COMP_KEEP == *" $p "* ]] && continue
+      seen[$p]=1; printf '%s\t%s\t%s\n' "$p" "$f" "$d"
+    done < "$LEDGER"
+  fi
+  # 记录功能之前就装上的 (老版本 wsm / 原 SSH 小工具装的)
+  for t in sysbench:性能测试 traceroute:回程线路检测 iptables-persistent:端口转发; do
+    p=${t%%:*}
+    [[ -z ${seen[$p]:-} ]] && pkg_has "$p" && printf '%s\t%s\t%s\n' "$p" "${t#*:} (之前安装)" "-"
+  done
+  return 0
+}
+
+comp_remove() {  # comp_remove 包名 用途
+  local p=$1 f=${2:-}
+  if [[ $f == 网站环境* ]]; then
+    warn "$p 属于网站环境, 请到 网站面板 → 卸载网站环境 (或 PHP 管理 → 卸载 PHP 版本)"; return 1
+  fi
+  case $p in
+    @rclone)
+      [[ -f $FB_CONF ]] && warn "异地备份在用 rclone, 卸载后异地备份会失败"
+      confirm "卸载 rclone?" n || return 0
+      rm -f /usr/bin/rclone /usr/local/share/man/man1/rclone.1; ledger_del @rclone; info "已卸载 rclone (配置 /root/.config/rclone 保留)"; return 0 ;;
+    iptables-persistent|netfilter-persistent)
+      fwd_collect 2>/dev/null
+      ((${#FWD_RULES[@]})) && warn "还有 ${#FWD_RULES[@]} 条端口转发规则, 卸载后重启服务器这些规则会丢失"
+      confirm "卸载 iptables-persistent (开机恢复规则的服务)?" n || return 0
+      systemctl disable --now netfilter-persistent >/dev/null 2>&1
+      pkg_remove iptables-persistent netfilter-persistent >/dev/null 2>&1
+      ledger_del iptables-persistent; ledger_del netfilter-persistent
+      info "已卸载 iptables-persistent"; return 0 ;;
+    mariadb-server)
+      warn "卸载 MariaDB 后, 依赖它的网站会无法连接数据库 (数据文件仍保留在 /var/lib/mysql)"
+      confirm_typed "确认卸载 MariaDB" || return 0
+      systemctl stop mariadb >/dev/null 2>&1 ;;
+    *) confirm "卸载 $p${f:+ ($f)}?" n || return 0 ;;
+  esac
+  pkg_remove "$p" >/dev/null 2>&1
+  if pkg_has "$p"; then err "$p 卸载失败"; return 1; fi
+  ledger_del "$p"; info "已卸载 $p"
+}
+
+comp_menu() {
+  local c i p f d n
+  local -a rows=()
+  while true; do
+    title "已安装组件"
+    mapfile -t rows < <(comp_list)
+    if ((${#rows[@]} == 0)); then
+      echo "  ${D}wsm 还没有安装过任何软件, 系统是干净的${N}"
+    else
+      printf '  %s     ' "$D"; pad_w "软件包" 26; pad_w "用途" 26; printf '安装日期%s\n' "$N"
+      for i in "${!rows[@]}"; do
+        IFS=$'\t' read -r p f d <<< "${rows[i]}"
+        printf '  %s%3d%s  %s' "$BD$B" $((i + 1)) "$N" "$T"; pad_w "${p#@}" 26; printf '%s%s' "$N" "$D"; pad_w "${f:-程序下载}" 26; printf '%s%s\n' "$d" "$N"
+      done
+    fi
+    echo
+    echo "  ${D}说明: 只列 wsm 装上去的; 网站环境请到 网站面板 → 卸载网站环境${N}"
+    echo "  ${D}      程序下载 里的扩展程序 (3x-ui / 哪吒 等) 在各自菜单里卸载${N}"
+    echo
+    ((${#rows[@]})) && mitem t "清理测试工具" "$COMP_TOOLS"
+    mback
+    read -r -p "输入序号卸载: " c || return 0
+    case $c in
+      0|q|'') return 0 ;;
+      t|T)
+        n=0
+        for p in $COMP_TOOLS; do
+          pkg_has "$p" || continue
+          pkg_remove "$p" >/dev/null 2>&1 && { ledger_del "$p"; info "已卸载 $p"; n=$((n + 1)); }
+        done
+        ((n)) || info "没有需要清理的测试工具"; pause ;;
+      *)
+        if [[ $c =~ ^[0-9]+$ ]] && ((c >= 1 && c <= ${#rows[@]})); then
+          IFS=$'\t' read -r p f d <<< "${rows[c - 1]}"
+          (comp_remove "$p" "$f"); pause
+        else warn "无效选择"; fi ;;
+    esac
+  done
+}
+
+# ---------------- 卸载网站环境
+web_uninstall() {
+  local n=0 f p dbs="" pk
+  local -a pkgs=() svcs=()
+  title "卸载网站环境"
+  for f in "$META_DIR"/*.conf; do [[ -e $f ]] && n=$((n + 1)); done
+  echo "  将停止并卸载: Nginx、certbot、所有 PHP 版本$(unit_exists mariadb && echo "、MariaDB (单独确认)")"
+  echo "  同时清理: wsm 的网站配置、证书自动续期、源站保护、防 CC 规则、CDN 定时任务"
+  echo "  不会动: 服务器工具的设置 (SSH / BBR / 端口转发 / Swap)、程序下载里的独立软件 (3x-ui / 哪吒 等)"
+  echo
+  if ((n)); then
+    warn "现在有 ${n} 个站点, 卸载后这些网站全部无法访问"
+    echo "  建议先做一次全量备份: 网站面板 → 备份与搬家 → 全量备份"
+  fi
+  confirm_typed "确认卸载网站环境" || { info "已取消, 没有改动"; return 0; }
+
+  # 1. 先关掉依赖 Nginx 的功能
+  if cfw_active || [[ -f $CFW_UNIT ]]; then cfw_disable >/dev/null 2>&1; fi
+  systemctl disable --now wsm-cf-firewall >/dev/null 2>&1; rm -f "$CFW_UNIT"; systemctl daemon-reload
+  rm -f /etc/cron.d/wsm-certbot "$CFW_CRON" /etc/logrotate.d/wsm
+  [[ -f $CRON_TASKS ]] && sed -i '/ backup-site \| backup-db /d' "$CRON_TASKS"   # 网站/数据库备份任务 (自定义命令保留)
+  # 2. 停服务 (含网站应用自己的后台服务, 如 Xboard 队列)
+  while read -r f; do
+    [[ -n $f ]] || continue
+    p=$(app_of_site "$f")
+    [[ -n $p ]] && ! app_soft "$p" && svcs+=($(app_call "$p" units "$f"))
+  done < <(list_site_names)
+  for p in ${svcs[@]+"${svcs[@]}"}; do
+    systemctl disable --now "$p" >/dev/null 2>&1; rm -f "/etc/systemd/system/$p" "/etc/systemd/system/$p.service"
+  done
+  systemctl daemon-reload >/dev/null 2>&1
+  svcs=(nginx)
+  for p in $(php_installed); do svcs+=("$(php_svc "$p")"); done
+  for p in "${svcs[@]}"; do systemctl disable --now "$p" >/dev/null 2>&1; done
+  # 3. 要卸载的包: 安装记录里属于网站环境的; 没有记录 (老版本装的) 就按默认清单
+  if [[ -f $LEDGER ]]; then
+    while IFS=$'\t' read -r p f _; do
+      [[ $f == 网站环境* && $COMP_KEEP != *" $p "* ]] && pkgs+=("$p")
+    done < "$LEDGER"
+  fi
+  if ((${#pkgs[@]} == 0)); then
+    pkgs=(nginx certbot)
+    pkg_has nginx-common && pkgs+=(nginx-common)
+    pkg_has python3-certbot-dns-cloudflare && pkgs+=(python3-certbot-dns-cloudflare)
+  fi
+  info "正在卸载 Nginx / certbot / PHP ..."
+  if [[ $PM == apt ]]; then
+    DEBIAN_FRONTEND=noninteractive apt-get purge -y "${pkgs[@]}" >/dev/null 2>&1
+    mapfile -t pk < <(dpkg-query -W -f='${Package} ${Status}\n' 'php*' 2>/dev/null | awk '/install ok installed/{print $1}')
+    ((${#pk[@]})) && DEBIAN_FRONTEND=noninteractive apt-get purge -y "${pk[@]}" >/dev/null 2>&1
+    # PHP 软件源 (wsm 安装 PHP 时加的)
+    if [[ $OS_ID == ubuntu ]]; then
+      ls /etc/apt/sources.list.d/ 2>/dev/null | grep -qi ondrej && add-apt-repository -y --remove ppa:ondrej/php >/dev/null 2>&1
+    else
+      rm -f /etc/apt/sources.list.d/php-sury.list
+      pkg_has debsuryorg-archive-keyring && dpkg -r debsuryorg-archive-keyring >/dev/null 2>&1
+    fi
+  else
+    dnf remove -y "${pkgs[@]}" >/dev/null 2>&1
+    dnf remove -y 'php*-php-*' >/dev/null 2>&1
+  fi
+  for p in "${pkgs[@]}" "${pk[@]+"${pk[@]}"}"; do ledger_del "$p"; done
+  [[ -f $LEDGER ]] && awk -F'\t' '$2 !~ /^网站环境/' "$LEDGER" > "$LEDGER.tmp" && mv -f "$LEDGER.tmp" "$LEDGER"
+  rm -rf /etc/nginx /var/log/nginx "$ACME_ROOT" "$META_DIR" "$CERT_DIR" "$AUTH_DIR" 2>/dev/null
+  rm -f "$CFW_IPS" "$CDN_ALLOW" 2>/dev/null
+  # 4. 数据库
+  if unit_exists mariadb; then
+    echo
+    dbs=$(mysql -N -e 'SHOW DATABASES' 2>/dev/null | grep -vxE 'information_schema|performance_schema|mysql|sys' | paste -sd' ' -)
+    echo "  MariaDB 里的数据库: ${dbs:-无}"
+    if confirm "同时卸载 MariaDB?" n; then
+      systemctl disable --now mariadb >/dev/null 2>&1
+      pkg_remove mariadb-server mariadb-client >/dev/null 2>&1; ledger_del mariadb-server
+      if [[ -d /var/lib/mysql ]]; then
+        warn "数据库文件还在 /var/lib/mysql"
+        confirm_typed "删除全部数据库文件 (不可恢复)" && rm -rf /var/lib/mysql && info "已删除数据库文件"
+      fi
+    fi
+  fi
+  [[ $PM == apt ]] && DEBIAN_FRONTEND=noninteractive apt-get autoremove -y >/dev/null 2>&1
+  # 5. 网站文件
+  if [[ -d $WWW_ROOT ]]; then
+    echo
+    echo "  网站文件在 $WWW_ROOT ($(du -sh "$WWW_ROOT" 2>/dev/null | cut -f1)), 备份在 $BACKUP_DIR"
+    confirm_typed "删除网站文件 (不可恢复)" && rm -rf "$WWW_ROOT" && rmdir /www 2>/dev/null && info "已删除网站文件"
+  fi
+  echo
+  info "网站环境已卸载"
+  [[ -d $BACKUP_DIR ]] && echo "  备份文件保留在 $BACKUP_DIR (不需要可以手动删除)"
+}
+
+# ---------------- 卸载 wsm 本身
+wsm_uninstall() {
+  local keep_ssh=1 c
+  title "卸载 wsm"
+  echo "  将删除: wsm / ssb 命令、wsm 的配置 ($WSM_DIR)、wsm 的定时任务 (含 计划任务 里添加的) 和日志配置"
+  if web_installed; then
+    warn "网站环境还装着。只卸载 wsm 的话, 网站照常运行, 但证书自动续期、定时备份、告警等会停止"
+    choose c "怎么处理网站环境?" "先完整卸载网站环境, 再卸载 wsm" "保留网站环境, 只卸载 wsm" || return 0
+    if [[ $c == 先* ]]; then web_uninstall; web_installed && { err "网站环境没有卸载完成, 已停止"; return 1; }; fi
+  fi
+  echo
+  echo "  服务器工具改过的系统设置默认保留 (SSH 端口和密钥登录 / BBR / 禁 Ping / 端口转发 / Swap)"
+  if [[ -f $SSH_DROPIN ]] || grep -q '^# wsm-ssh begin' "$SSH_MAIN" 2>/dev/null; then
+    confirm "SSH 设置还原成系统默认? (端口恢复 22、允许密码登录; 选 n 保留现在的设置)" n && keep_ssh=0
+  fi
+  confirm_typed "确认卸载 wsm" || { info "已取消"; return 0; }
+  if ((keep_ssh == 0)); then
+    ssh_apply 0 "" && info "SSH 已还原 (现在端口 $(ssh_port_now))"
+  fi
+  rm -f /etc/cron.d/wsm-* /etc/logrotate.d/wsm
+  if cfw_active || [[ -f $CFW_UNIT ]]; then cfw_disable >/dev/null 2>&1; fi
+  rm -rf "$WSM_DIR"
+  rm -f /var/log/wsm-*.log
+  [[ -L $WSM_ALIAS ]] && rm -f "$WSM_ALIAS"
+  rm -rf "$SELF_BAK" 2>/dev/null
+  rm -f "$WSM_BIN"
+  info "wsm 已卸载, 感谢使用"
+  exit 0
+}
+
 usage() {
   cat <<EOF
-wsm v$WSM_VER - Web Server Manager
+wsm v$WSM_VER - Server Manager   (ssb 是同一个命令)
 
   wsm                               交互菜单 (推荐)
-  wsm install                       安装 Nginx/PHP/MariaDB/certbot 环境
+  ── 服务器工具 (不需要网站环境) ──
+  wsm sysinfo                       系统信息
+  wsm ssh                           SSH 安全 (密钥登录/导入公钥/关闭密码/改端口)
+  wsm keys                          导入公钥 (从仓库拉取 / 粘贴)
+  wsm key-download [私钥文件]       下载服务器上的私钥
+  wsm bbr | noping                  BBR 加速 / 禁 Ping (开关)
+  wsm fwd                           端口转发 (TCP/UDP)
+  wsm route | unlock                回程线路检测 / 流媒体与 AI 解锁检测
+  wsm bench                         性能测试 (CPU 占用/CPU/内存/硬盘)
+  wsm components                    已安装组件 (查看/卸载 wsm 装过的软件)
+  wsm uninstall                     卸载 wsm
+  ── 网站 ──
+  wsm install                       一键安装网站环境 (Nginx/PHP/MariaDB/certbot)
+  wsm web                           网站面板
+  wsm web-uninstall                 卸载网站环境
   wsm add-php|add-static [域名]     新建站点
   wsm app list                      扩展程序模块列表 (及各自的站点/安装状态)
   wsm app add [模块|网址|文件]      添加模块 (不写=从仓库选)
@@ -6788,7 +8638,6 @@ wsm v$WSM_VER - Web Server Manager
   wsm cf-firewall [on|off|refresh]  源站保护: 80/443 只允许 CDN (默认关闭)
   wsm cdn                           CDN 设置 (真实IP开关 / 添加其他 CDN)
   wsm realip [on|off]               CDN 真实 IP 开关 (默认开启)
-  wsm ssh                           SSH 安全 (密钥登录/关闭密码/改端口)
   wsm tg                            Telegram 告警设置
   wsm icons nerd|plain              菜单图标: Nerd 字体图标 / 普通符号
   wsm timezone [Asia/Shanghai]      查看 / 设置服务器时区
@@ -6824,11 +8673,31 @@ EOF
 [[ ${1:-} == version || ${1:-} == -v || ${1:-} == --version ]] && { echo "$WSM_VER"; exit 0; }
 need_root
 detect_os
-mkdir -p "$META_DIR" "$CERT_DIR" "$AUTH_DIR"
+web_installed && mkdir -p "$META_DIR" "$CERT_DIR" "$AUTH_DIR"
+[[ ${1:-menu} == menu ]] && self_install   # 只装 wsm 命令本身, 不装任何软件
 apps_load
 
+# 这些命令需要网站环境 (没装会提示一键安装)
+case ${1:-} in
+  add-php|add-static|add-proxy|add-redirect|ssl|del|list|certs|renew|backup-site|guard|cf-firewall|cf-refresh|cdn|realip|stats|tamper-*)
+    need_web || exit 1 ;;
+esac
+
 case ${1:-menu} in
-  menu)         apps_migrate_once; main_menu ;;
+  menu)         [[ -d $APPS_DIR || -d $META_DIR ]] && apps_migrate_once; main_menu ;;
+  sysinfo)      sys_info ;;
+  bbr)          bbr_menu ;;
+  noping)       ping_menu ;;
+  fwd)          forward_menu ;;
+  route)        route_check ;;
+  unlock)       unlock_check ;;
+  bench)        menu_perf ;;
+  keys)         import_keys ;;
+  key-download) key_download "${2:-}" ;;
+  components)   comp_menu ;;
+  web)          if web_installed; then menu_web; else web_install_flow && menu_web; fi ;;
+  uninstall)    wsm_uninstall ;;
+  web-uninstall) web_installed && web_uninstall ;;
   icons)        ui_icon_set "${2:-}" ;;
   timezone)     if [[ -n ${2:-} ]]; then tz_set "$2"; else echo "时区: $(tz_get)  时间: $(tz_now)"; fi ;;
   install)      cmd_install ;;
