@@ -23,12 +23,12 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="3.1.2"
+WSM_VER="3.1.3"
 # CHANGELOG-BEGIN  (更新时显示比当前版本新的条目, 新的写在最上面; 只留最近几条, 完整记录见仓库 CHANGELOG.md)
+# v3.1.3 修复 Gemini 检测误判 (以前不支持的地区也显示支持); 多节点测速的国内部分改为只测还能用的 电信 / 联通 / 移动 服务器 (列表每天更新, 不通自动换备用)
 # v3.1.2 网速测试: 快速测试和多节点都改为测本地最近节点, 多节点每项都测下载和上传; 每项默认 1 个节点 + 2 个备用, 不通自动换备用
 # v3.1.1 修复网速测试 Cloudflare 下载失败; 多节点测试改为 美国 (美西/美中/美东) + 上海/北京/广州 三网, 国内节点同时测下载和上传
 # v3.1.0 新增网速测试 (网络检测 → 1): 最近机房的 延迟/下载/上传, 东京/新加坡/美西/法兰克福/伦敦 多节点下载; 只用 curl, 不跑第三方测速脚本; 新命令 wsm speedtest
-# v3.0.0 主菜单新增 [9 TG机器人], 更新/卸载 改为 10 (独立脚本 tggl 的入口); 合并 SSH 小工具 (ssb): 系统信息/BBR/禁Ping/端口转发/回程线路/流媒体与AI解锁/CPU内存硬盘测试/导入公钥/下载私钥; 启动不再安装任何软件, 网站环境改为菜单里一键安装; 新菜单 (服务器 / 网站与应用 两区) 和配色; wsm install 先确认再安装; 新增 [已安装组件] 统一卸载, 可卸载网站环境和 wsm 本身; ssb 命令保留为别名
 # CHANGELOG-END
 WSM_DIR=/etc/wsm
 META_DIR=$WSM_DIR/sites
@@ -7944,17 +7944,13 @@ ul_claude() {
 }
 
 ul_gemini() {
-    # 用 Gemini API 判断: 故意不带有效 key, 地区支持时返回 "API key not valid", 不支持时返回 "location is not supported"
-    # (网页里的特征字符串会随改版失效, 接口的这两种报错更稳定)
+    # 看 Gemini 网页: 地区支持时页面里有 45631641,null,true; 地区代码在 ,2,1,200,"XXX" 里
+    # 不用 API 判断: 带无效 key 请求时 Google 先校验 key, 不管哪个地区都返回 "key 无效", 会被误判成支持
     local r cc
-    r=$(curl $UL_OPT -s 'https://generativelanguage.googleapis.com/v1beta/models?key=ssb-check' -A "$UA_WEB")
-    cc=$(curl $UL_OPT -s 'https://www.cloudflare.com/cdn-cgi/trace' | sed -n 's/^loc=//p')
-    if grep -qi 'location is not supported' <<< "$r"; then echo "N 不支持${cc:+（地区 $cc）}"; return; fi
-    if grep -qiE 'API key not valid|API_KEY_INVALID' <<< "$r"; then echo "Y 支持${cc:+（地区 $cc）}"; return; fi
-    # 接口没给出明确结果时, 退回网页判断
     r=$(curl $UL_OPT -sL 'https://gemini.google.com' -A "$UA_WEB")
     [[ -z "$r" ]] && { echo "? 检测失败（连不上）"; return; }
-    if grep -q '45631641,null,true' <<< "$r"; then echo "Y 支持${cc:+（地区 $cc）}"; else echo "? 无法判断"; fi
+    cc=$(grep -o ',2,1,200,"[A-Z]\{3\}"' <<< "$r" | head -1 | sed 's/.*"\([A-Z]*\)"/\1/')
+    if grep -q '45631641,null,true' <<< "$r"; then echo "Y 支持${cc:+（地区 $cc）}"; else echo "N 不支持${cc:+（地区 $cc）}"; fi
 }
 
 unlock_check() {
@@ -7999,13 +7995,20 @@ unlock_check() {
 # 节点都是 Speedtest 服务器 (运营商 / 机房自己架的), 在 speedtest.net 的公开列表里实时查找,
 # 直接用 curl 连它的 /download 和 /upload 接口 (服务器列表经常变, 所以不写死地址)
 #   本地: 离本机最近的 2 个 + Cloudflare 最近机房, 共 3 个, 前一个不通就自动换下一个
-#   国内: 上海 / 北京 / 广州 的 电信 / 联通 / 移动, 每项最多找 3 个服务器, 同样不通就换
+#   国内: speedtest.net 在国内的公开服务器已经很少 (而且它的查询接口不让机房 IP 用),
+#         所以用 spiritLHLS/speedtest.net-CN-ID 每天更新的国内服务器列表, 按 电信 / 联通 / 移动 分组,
+#         每组最多 3 个, 前一个不通就换下一个; 列表拉不到时用下面内置的 (2026-10 的数据)
 # Cloudflare 单次最多给 1 亿字节 (超过直接拒绝), 这里每次取 2500 万, 循环下载
 ST_CF_DOWN="https://speed.cloudflare.com/__down?bytes=25000000"
 ST_CF_UP="https://speed.cloudflare.com/__up"
-ST_CN_CITIES=("上海|Shanghai" "北京|Beijing" "广州|Guangzhou")
+ST_CN_LIST_URL="https://raw.githubusercontent.com/spiritLHLS/speedtest.net-CN-ID/main/CN.csv"
+ST_CN_BUILTIN='id,country_code,country,city,ip,host,port,supplier
+24447,CN,China,Shanghai,210.22.155.34,mobile.shunicomtest.com.prod.hosts.ooklaserver.net,8080,China Unicom 5G
+43752,CN,China,Beijing,124.65.21.31,beijing.unicomtest.com,8080,BJ Unicom
+5396,CN,China,Suzhou,115.169.22.130,4gsuzhou1.speedtest.jsinfo.net.prod.hosts.ooklaserver.net,8080,China Telecom JiangSu 5G
+36663,CN,China,Zhenjiang,115.168.74.186,5gzhenjiang.speedtest.jsinfo.net.prod.hosts.ooklaserver.net,8080,China Telecom JiangSu 5G
+59387,CN,China,NingBo,61.153.82.77,cesu-nb.zjtelecom.com.cn.prod.hosts.ooklaserver.net,8080,浙江电信'
 # 运营商: 显示名|英文名|JSON 里的中文 (\u 转义)
-ST_CN_ISPS=('电信|Telecom|\\u7535\\u4fe1' '联通|Unicom|\\u8054\\u901a' '移动|Mobile|\\u79fb\\u52a8')
 ST_IPV="-4"
 
 st_now() { date +%s.%N; }
@@ -8156,40 +8159,48 @@ st_fmt_short() {
 }
 
 st_row() {  # 名称 : 用 st_try 的结果画一行
-  printf '\r\033[K  %s' "$T"; pad_w "$1" 14; printf '%s' "$N"
+  printf '\r\033[K  %s' "$T"; pad_w "$1" 18; printf '%s' "$N"
   if [[ -z $ST_NAME ]]; then echo "${R}连不上${N} ${D}(试了 $ST_TRIED 个节点)${N}"; return 0; fi
-  pad_w "$ST_LAT ms" 9; printf '%s\e[44G%s\n' "$(st_fmt_short "$ST_D")" "$(st_fmt_short "$ST_U")"
+  pad_w "$ST_LAT ms" 9; printf '%s\e[48G%s\n' "$(st_fmt_short "$ST_D")" "$(st_fmt_short "$ST_U")"
 }
 
-speed_nodes() {  # 本地最近 + 上海 / 北京 / 广州 三网
-  local n c city en list isp iname ien iesc l local_name
+st_cn_list() {  # -> host:port|城市|运营商  (只要中国大陆三大运营商的)
+  local csv
+  csv=$(curl $ST_IPV -fsL --max-time 10 "$ST_CN_LIST_URL?t=$(date +%s)" 2>/dev/null)
+  [[ $csv == id,* ]] || csv=$ST_CN_BUILTIN
+  printf '%s\n' "$csv" | awk -F',' 'NR > 1 && $3 == "China" && $6 != "" {
+      s = $8; isp = ""
+      if (s ~ /Telecom|Tietong|电信/) isp = "电信"; else if (s ~ /Unicom|联通/) isp = "联通"; else if (s ~ /Mobile|移动/) isp = "移动"
+      if (isp != "") print $6 ":" ($7 ? $7 : 8080) "|" $4 "|" isp }'
+}
+
+speed_nodes() {  # 本地最近 + 国内还能用的三网服务器
+  local n isp l h city list local_name
   local -a cands=()
   st_pick_ip || return 1
   n=$(st_threads)
-  echo "  ${D}每个节点 下载 / 上传 各 5 秒 ($n 线程), 不通的自动换备用节点, 全部约 2 分钟${N}"
-  echo "  ${D}国内节点是运营商自己的测速服务器, 有的会限制国外访问, 连不上属正常${N}"
+  echo "  ${D}每个节点 下载 / 上传 各 5 秒 ($n 线程), 不通的自动换备用节点, 约 1 分钟${N}"
+  echo "  ${D}国内 Speedtest 公开服务器已经很少, 只测还能用的; 有的会限制国外访问, 连不上属正常${N}"
   echo
-  printf '  %s' "$D"; pad_w "节点" 14; pad_w "延迟" 9; printf '下载\e[44G上传%s\n' "$N"
-  printf '  %s' "$T"; pad_w "本地最近" 14; printf '%s测试中 ...' "$N"
+  printf '  %s' "$D"; pad_w "节点" 18; pad_w "延迟" 9; printf '下载\e[48G上传%s\n' "$N"
+  printf '  %s' "$T"; pad_w "本地最近" 18; printf '%s测试中 ...' "$N"
   mapfile -t cands < <(st_local_cands)
   st_try 5 "$n" "${cands[@]}"; st_row "本地最近"; local_name=$ST_NAME
-  for c in "${ST_CN_CITIES[@]}"; do
-    city=${c%%|*}; en=${c#*|}
-    list=$(st_servers "$en" | awk -F'|' '$4 == "CN"')
-    for isp in "${ST_CN_ISPS[@]}"; do
-      IFS='|' read -r iname ien iesc <<< "$isp"
-      printf '  %s' "$T"; pad_w "$city$iname" 14; printf '%s测试中 ...' "$N"
-      cands=()
-      while IFS= read -r l; do [[ -n $l ]] && cands+=("$(st_ookla_cand "$l")"); done \
-        < <(printf '%s\n' "$list" | grep -iE "^[^|]*\|[^|]*($ien|$iname|$iesc)" | head -3)
-      if ((${#cands[@]} == 0)); then
-        printf '\r\033[K  %s' "$T"; pad_w "$city$iname" 14; echo "$N${D}没找到测速服务器${N}"; continue
-      fi
-      st_try 5 "$n" "${cands[@]}"; st_row "$city$iname"
-    done
+  list=$(st_cn_list)
+  for isp in 电信 联通 移动; do
+    cands=()
+    while IFS='|' read -r h city _; do
+      [[ -n $h ]] && cands+=("$isp ($city)|http://$h/|http://$h/download?size=25000000|http://$h/upload")
+    done < <(printf '%s\n' "$list" | awk -F'|' -v i="$isp" '$3 == i' | head -3)
+    if ((${#cands[@]} == 0)); then
+      printf '  %s' "$T"; pad_w "国内$isp" 18; echo "$N${D}目前没有公开的测速服务器${N}"; continue
+    fi
+    printf '  %s' "$T"; pad_w "国内$isp" 18; printf '%s测试中 ...' "$N"
+    st_try 5 "$n" "${cands[@]}"
+    st_row "${ST_NAME:-国内$isp}"
   done
   echo
-  [[ -n $local_name ]] && echo "  ${D}本地最近 = $local_name${N}"
+  [[ -n ${local_name:-} ]] && echo "  ${D}本地最近 = $local_name${N}"
   echo "  ${D}下载 = 从节点下载到本机; 上传 = 从本机发到节点 (做代理时, 国内用户的下载速度主要看上传这一列)${N}"
 }
 
@@ -8201,7 +8212,7 @@ speed_menu() {
     echo "  ${D}按千兆带宽算: 快速测试约用 2.5GB 流量, 多节点更多; 按流量计费的机器请注意${N}"
     echo
     mitem 1 "快速测试" "本地最近节点的 延迟 / 下载 / 上传, 约 25 秒"
-    mitem 2 "多节点测试" "本地 + 上海 / 北京 / 广州 三网, 约 2 分钟"
+    mitem 2 "多节点测试" "本地 + 国内三网 (还能用的服务器), 约 1 分钟"
     mback
     read -r -p "请选择: " c || return 0
     case "$c" in
