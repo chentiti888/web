@@ -23,12 +23,12 @@
 # =====================================================================
 set -uo pipefail
 
-WSM_VER="3.1.10"
+WSM_VER="3.1.11"
 # CHANGELOG-BEGIN  (更新时显示比当前版本新的条目, 新的写在最上面; 只留最近几条, 完整记录见仓库 CHANGELOG.md)
+# v3.1.11 查看计划任务现在也列出全量备份、证书续期、告警等自动任务 (之前只列自定义任务, 开了定时全量备份也显示无); 时间改成 每天 03:30 这种写法
 # v3.1.10 网速测试改用 speedtest.net 网页版的服务器接口, 并按本机所在城市补充搜索 (老接口返回的列表和位置无关, 美国机器给台湾节点, 日本机器给印度节点)
 # v3.1.9 修复网速测试显示的本机 IP 不对 (speedtest.net 返回的是固定的美国 Comcast 地址), 按它算距离会选到很远的节点; 改为按本机真实位置排序
 # v3.1.8 网速测试改回 curl 自己测 (不再用 speedtest-cli): 从官方 Speedtest 服务器列表按距离由近到远试, 每个先试测 2 秒, 下载和上传都正常才用; Speedtest 都不行再用 Cloudflare / Linode
-# v3.1.7 修复 Gemini 检测: 网页里的可用标记改版失效, 支持的地区 (如日本) 也显示不支持; 改为按 Google 识别的地区对照支持列表判断
 # CHANGELOG-END
 WSM_DIR=/etc/wsm
 META_DIR=$WSM_DIR/sites
@@ -2678,12 +2678,61 @@ tasks_init() {
   chmod 644 "$CRON_TASKS"
 }
 
-tasks_list() {
+cron_human() {  # 分 时 日 月 周 -> 每天 03:30 这类说法
+  local m=$1 h=$2 dom=$3 mon=$4 dow=$5 t="" x
+  local -a wd=(日 一 二 三 四 五 六 日)
+  if [[ $m =~ ^\*/([0-9]+)$ && $h == '*' ]]; then echo "每 ${BASH_REMATCH[1]} 分钟"; return; fi
+  if [[ $m =~ ^[0-9]+$ && $h =~ ^\*/([0-9]+)$ ]]; then echo "每 ${BASH_REMATCH[1]} 小时"; return; fi
+  if [[ $m =~ ^[0-9]+$ && $h =~ ^[0-9]+(,[0-9]+)*$ && $mon == '*' ]]; then
+    for x in ${h//,/ }; do t+="${t:+ / }$(printf '%02d:%02d' "$x" "$m")"; done
+    if [[ $dom == '*' && $dow == '*' ]]; then echo "每天 $t"; return; fi
+    if [[ $dom == '*' && $dow =~ ^[0-7]$ ]]; then echo "每周${wd[$dow]} $t"; return; fi
+    if [[ $dom =~ ^[0-9]+$ && $dow == '*' ]]; then echo "每月 ${dom} 号 $t"; return; fi
+  fi
+  echo "$m $h $dom $mon $dow"
+}
+
+task_desc() {  # cron 里的命令 -> 说明
+  local c=$1 a
+  c=${c%% >>*}; c=${c%%# wsm-task*}; c=${c%"${c##*[![:space:]]}"}
+  read -ra a <<< "$c"
+  case "${a[1]:-}" in
+    backup-site)  echo "备份网站 ${a[2]:-}  ${D}保留 ${a[3]:-7} 份${N}" ;;
+    backup-db)    if [[ ${a[2]:-} == --all ]]; then echo "备份全部数据库  ${D}保留 ${a[3]:-7} 份${N}"
+                  else echo "备份数据库 ${a[2]:-}  ${D}保留 ${a[3]:-7} 份${N}"; fi ;;
+    tamper-check) echo "防篡改检测 ${a[2]:-}" ;;
+    *) echo "$c" ;;
+  esac
+}
+
+TASK_LINES=()
+tasks_list() {  # 自定义任务编号存进 TASK_LINES (对应 wsm-tasks 里的行号)
+  local n l m h dom mon dow u cmd i=0 f d line
   tasks_init
-  echo "已有计划任务:"
-  if grep -q '# wsm-task' "$CRON_TASKS"; then
-    grep -n '# wsm-task' "$CRON_TASKS" | sed -E 's/ root / → /; s/ >> [^#]*//; s/# wsm-task//' | sed 's/^/   /'
-  else echo "   (无)"; fi
+  TASK_LINES=()
+  sec "自定义计划任务"
+  while IFS=: read -r n l; do
+    read -r m h dom mon dow u cmd <<< "$l"
+    i=$((i + 1)); TASK_LINES+=("$n")
+    printf '   %s%2d%s  %s %s\n' "$B" "$i" "$N" "$(pad_w "$(cron_human "$m" "$h" "$dom" "$mon" "$dow")" 20)" "$(task_desc "$cmd")"
+  done < <(grep -n '# wsm-task' "$CRON_TASKS")
+  ((i)) || echo "   ${D}(无)${N}"
+  sec "wsm 自动任务"
+  i=0
+  for f in "$FB_CRON|全量备份  ${D}全量备份 / 搬家 → 定时自动备份${N}" \
+           "/etc/cron.d/wsm-certbot|证书自动续期  ${D}证书 → 自动续期${N}" \
+           "$TG_CRON|Telegram 告警检查" \
+           "$CFW_CRON|更新 Cloudflare IP 段  ${D}源站保护用${N}"; do
+    d=${f#*|}; f=${f%%|*}
+    [[ -f $f ]] || continue
+    line=$(grep -Ev '^[[:space:]]*(#|$|[A-Z_]+=)' "$f" | head -1)
+    [[ -n $line ]] || continue
+    read -r m h dom mon dow _ <<< "$line"
+    i=$((i + 1))
+    printf '   %s •%s  %s %s\n' "$G" "$N" "$(pad_w "$(cron_human "$m" "$h" "$dom" "$mon" "$dow")" 20)" "$d"
+  done
+  ((i)) || echo "   ${D}(无)${N}"
+  echo "   ${D}服务器时间: $(tz_now)${N}"
 }
 
 tasks_add() {
@@ -2735,10 +2784,13 @@ tasks_add() {
 }
 
 tasks_del() {
-  tasks_list
   local n
-  read -r -p "要删除的行号 (列表最前面的数字): " n || return 1
-  [[ $n =~ ^[0-9]+$ ]] || { err "请输入数字"; return 1; }
+  tasks_list
+  ((${#TASK_LINES[@]})) || return 0
+  echo "   ${D}wsm 自动任务请到对应功能里关闭${N}"
+  read -r -p "要删除第几个: " n || return 1
+  [[ $n =~ ^[0-9]+$ && $n -ge 1 && $n -le ${#TASK_LINES[@]} ]] || { err "请输入 1-${#TASK_LINES[@]}"; return 1; }
+  n=${TASK_LINES[$((n - 1))]}
   if sed -n "${n}p" "$CRON_TASKS" | grep -q '# wsm-task'; then sed -i "${n}d" "$CRON_TASKS"; info "已删除"
   else err "该行不是 wsm 任务"; fi
 }
@@ -4637,10 +4689,19 @@ fb_bots() {  # 输出: 服务名|程序目录|环境变量文件  (程序目录�
   return 0
 }
 
-fb_bots_desc() {  # okbot (/root/mybot), ...
-  local u wd ef out=""
-  while IFS='|' read -r u wd ef; do [[ -n $u ]] && out+="${out:+, }$u${wd:+ ($wd)}"; done < <(fb_bots)
-  echo "${out:-无}"
+fb_bots_desc() {  # 按程序目录合并: mini-api, mini (/root/yxbot); okbot (/root/okbot)
+  local u wd ef k out=""
+  local -A names=()
+  local -a order=()
+  while IFS='|' read -r u wd ef; do
+    [[ -n $u ]] || continue
+    k=${wd:-"-$u"}
+    [[ -n ${names[$k]+x} ]] || order+=("$k")
+    names[$k]+="${names[$k]:+, }$u"
+  done < <(fb_bots)
+  for k in "${order[@]}"; do
+    if [[ $k == -* ]]; then echo "${names[$k]}"; else echo "${names[$k]}  ${D}$k${N}"; fi
+  done
 }
 
 fb_bot_paths() {  # 机器人占用的全部路径 (给额外备份去重用)
@@ -5736,6 +5797,7 @@ fb_restore() {
 
 fb_menu() {
   local c last
+  local -a bl
   while true; do
     fb_load
     last=$(ls -1t "$FB_DIR"/wsm-full-*.tar* 2>/dev/null | head -1)
@@ -5744,7 +5806,12 @@ fb_menu() {
     echo "  定时备份: $(grep -q backup-all "$FB_CRON" 2>/dev/null && echo "${G}已开启${N}" || echo 未开启)"
     echo "  异地目标: ${FB_TARGETS:-无 (只存本机)}"
     echo "  加密:     $([[ -n $FB_PASS ]] && echo 已开启 || echo 未开启)"
-    echo "  机器人:   $(fb_bots_desc)  ${D}(自动识别, 单独备份)${N}"
+    mapfile -t bl < <(fb_bots_desc)
+    if ((${#bl[@]})); then
+      echo "  机器人:   ${bl[0]}"
+      for c in "${bl[@]:1}"; do echo "            $c"; done
+      echo "            ${D}(自动识别, 每个机器人单独备份)${N}"
+    else echo "  机器人:   无"; fi
     choose c "操作:" "立即全量备份" "定时自动备份" "异地备份" \
       "额外备份的目录" "保留份数 / 加密" "还原 / 搬家到本机" "返回" || return 0
     case $c in
